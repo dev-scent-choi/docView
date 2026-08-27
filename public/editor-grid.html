@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DocView — 동시편집</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='3' width='19' height='26' rx='3' fill='%231f4d47'/%3E%3Cpath d='M18 3v6a2 2 0 0 0 2 2h6z' fill='%234fd6c4'/%3E%3Crect x='9' y='16' width='11' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3Crect x='9' y='21' width='8' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body class="editor-body grid-editor-page">
+  <header class="editor-toolbar" id="toolbar">
+    <div class="toolbar-top-row">
+      <div class="toolbar-group toolbar-left">
+        <a href="/" class="icon-btn" title="문서 목록으로" aria-label="문서 목록으로 돌아가기">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+        </a>
+        <span id="doc-title" class="doc-title">문서 불러오는 중…</span>
+        <span id="conn-status" class="conn-status" data-status="connecting">연결 중…</span>
+      </div>
+      <div class="toolbar-group toolbar-right">
+        <div class="zoom-group" role="group" aria-label="확대/축소">
+          <button id="zoom-out" class="icon-btn" title="축소" aria-label="축소">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+          </button>
+          <span id="zoom-level" class="zoom-level">100%</span>
+          <button id="zoom-in" class="icon-btn" title="확대" aria-label="확대">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          </button>
+        </div>
+        <button id="search-btn" class="icon-btn" title="시트 내 검색 (Ctrl+F)" aria-label="시트 내 검색">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        </button>
+        <div id="presence-list" class="presence-list" aria-label="현재 접속 중인 참여자"></div>
+      </div>
+    </div>
+    <div class="ribbon-tabs" role="tablist">
+      <button type="button" class="ribbon-tab active" role="tab" aria-selected="true">홈</button>
+    </div>
+    <div class="toolbar-group toolbar-format">
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-undo" class="icon-btn" title="실행 취소 (Ctrl+Z)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.51 13a9 9 0 1 0 2.13-9.36L3 7"/></svg>
+          </button>
+          <button id="btn-redo" class="icon-btn" title="다시 실행 (Ctrl+Y)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M20.49 13a9 9 0 1 1-2.13-9.36L21 7"/></svg>
+          </button>
+        </div>
+        <span class="ribbon-group-label">실행 취소</span>
+      </div>
+
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-cell-bold" class="icon-btn" title="굵게"><strong>B</strong></button>
+          <button id="btn-cell-italic" class="icon-btn" title="기울임"><em>I</em></button>
+          <button id="btn-cell-underline" class="icon-btn" title="밑줄"><u>U</u></button>
+          <button id="btn-cell-strike" class="icon-btn" title="취소선"><s>S</s></button>
+          <span class="color-btn" id="cell-font-color-btn">
+            <span class="color-btn-glyph">A</span>
+            <span class="color-btn-bar"></span>
+            <input id="cell-font-color" class="color-btn-input" type="color" value="#1b1a17" title="글자 색" aria-label="셀 글자 색" />
+          </span>
+          <span class="color-btn" id="cell-bg-color-btn">
+            <span class="color-btn-glyph">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M12 2s6 7.5 6 12a6 6 0 1 1-12 0c0-4.5 6-12 6-12Z"/></svg>
+            </span>
+            <span class="color-btn-bar"></span>
+            <input id="cell-bg-color" class="color-btn-input" type="color" value="#ffff00" title="배경 색" aria-label="셀 배경 색" />
+          </span>
+          <button id="btn-cell-clear-format" class="icon-btn" title="서식 지우기">A✕</button>
+        </div>
+        <span class="ribbon-group-label">글꼴</span>
+      </div>
+
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-cell-align-l" class="icon-btn" title="왼쪽 정렬">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h14"/></svg>
+          </button>
+          <button id="btn-cell-align-c" class="icon-btn" title="가운데 정렬">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M8 12h8M6 18h12"/></svg>
+          </button>
+          <button id="btn-cell-align-r" class="icon-btn" title="오른쪽 정렬">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M10 12h10M6 18h14"/></svg>
+          </button>
+        </div>
+        <span class="ribbon-group-label">맞춤</span>
+      </div>
+
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-add-row" class="icon-btn" title="행 추가">+행</button>
+          <button id="btn-del-row" class="icon-btn" title="마지막 행 삭제">-행</button>
+          <button id="btn-add-col" class="icon-btn" title="열 추가">+열</button>
+          <button id="btn-del-col" class="icon-btn" title="마지막 열 삭제">-열</button>
+        </div>
+        <span class="ribbon-group-label">셀</span>
+      </div>
+    </div>
+  </header>
+
+  <div id="search-bar" class="search-bar" hidden>
+    <input id="search-input" type="text" placeholder="셀 값 검색…" autocomplete="off" />
+    <span id="search-count" class="search-count"></span>
+    <button id="search-prev" class="icon-btn" title="이전 결과" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+    </button>
+    <button id="search-next" class="icon-btn" title="다음 결과" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+    </button>
+    <button id="search-close" class="icon-btn" title="닫기">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+  </div>
+
+  <div id="unsupported-warning" class="unsupported-warning" hidden>
+    이 시트는 규모가 커서 실시간 편집이 느릴 수 있습니다 — 대량 열람은 뷰어를 이용하세요.
+    수식은 값으로만 입력·저장되며(예: =A1+B1), 편집기 화면에는 계산 결과 없이 수식 자체가 표시됩니다.
+  </div>
+
+  <div class="formula-bar">
+    <span id="cell-ref-box" class="cell-ref-box">A1</span>
+    <span class="fx-icon" aria-hidden="true">fx</span>
+    <input id="formula-input" class="formula-input" type="text" placeholder="" autocomplete="off" aria-label="셀 내용 편집" />
+  </div>
+
+  <div id="grid-zoom-host">
+    <main id="grid-editor" class="grid-editor-surface">
+      <div class="grid-editor-scroll">
+        <table id="grid-edit-table" class="grid-edit-table"></table>
+      </div>
+    </main>
+  </div>
+  <div id="sheet-tabs" class="grid-sheet-tabs" role="tablist"></div>
+
+  <div id="error-screen" class="error-screen" hidden>
+    <div class="error-card">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+      <p id="error-message"></p>
+      <a href="/" class="btn-pill btn-pill-primary">문서 목록으로</a>
+    </div>
+  </div>
+
+  <script type="module" src="/js/grid-editor.bundle.js"></script>
+</body>
+</html>

@@ -1,0 +1,1283 @@
+:root {
+  --color-bg: #f5f2ec;
+  --color-surface: #ffffff;
+  --color-ink: #1b1a17;
+  --color-ink-soft: #6b6156;
+  --color-accent: #1f4d47;
+  --color-accent-hover: #163b36;
+  --color-accent-soft: #e4ece9;
+  --color-accent-ink: #ffffff;
+  --color-danger: #b3402a;
+  --color-ok: #2c7a4b;
+  --color-line: #e2ddd2;
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+  --shadow-page: 0 2px 14px rgba(27, 26, 23, 0.1);
+  --shadow-card-hover: 0 10px 26px rgba(27, 26, 23, 0.1);
+  --duration-fast: 150ms;
+  --duration-med: 260ms;
+  /* Outfit엔 한글 글리프가 없어 라틴/숫자만 이 글꼴로 렌더링되고, 한글은 자동으로
+     Pretendard(설치돼 있으면)·시스템 한글 글꼴로 폴백된다 — 별도 처리 없이
+     "영문·숫자는 개성 있게, 한글은 자연스럽게"가 동시에 된다. */
+  --font-sans: "Outfit", "Pretendard Variable", "Pretendard", "Apple SD Gothic Neo", -apple-system,
+    "Malgun Gothic", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-weight: 400;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: var(--color-accent); color: #fff; }
+
+/* 접근성: 키보드 포커스 링은 어떤 화면에서도 눈에 띄어야 한다 */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.viewer-body :focus-visible,
+.editor-body :focus-visible {
+  outline-color: var(--v-accent);
+}
+
+/* ---------- 관리 페이지 ---------- */
+
+.app-header {
+  padding: 3rem 1.5rem 1.25rem;
+  max-width: 860px;
+  margin: 0 auto;
+}
+
+.app-header .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 9px;
+  background: var(--color-accent);
+  color: #fff;
+  display: grid;
+  place-items: center;
+}
+.brand-mark svg { width: 18px; height: 18px; }
+
+.app-header h1 {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 2.1rem;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.app-header h1 span { color: var(--color-accent); font-weight: 800; }
+
+.tagline { margin: 0.4rem 0 0; color: var(--color-ink-soft); font-size: 0.95rem; }
+
+.container {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 1.5rem 4rem;
+}
+
+h2 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-size: 1.05rem;
+  margin: 2.25rem 0 0.85rem;
+}
+
+.upload-panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  padding: 1.4rem 1.6rem 1.6rem;
+}
+
+#upload-form { display: flex; gap: 0.75rem; align-items: stretch; }
+
+.file-drop {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.85rem 1.1rem;
+  border: 1.5px dashed var(--color-line);
+  border-radius: var(--radius);
+  color: var(--color-ink-soft);
+  cursor: pointer;
+  transition: border-color var(--duration-med) ease, background var(--duration-med) ease;
+}
+
+.file-drop svg { width: 18px; height: 18px; flex: none; color: var(--color-accent); opacity: 0.85; }
+.file-drop:hover, .file-drop:focus-within { border-color: var(--color-accent); background: var(--color-accent-soft); }
+.file-drop input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
+.btn {
+  font-family: var(--font-sans);
+  border: 1px solid var(--color-line);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  border-radius: var(--radius);
+  padding: 0.55rem 1.1rem;
+  font-size: 0.92rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease,
+    transform var(--duration-fast) ease;
+}
+
+.btn:hover:not(:disabled) { background: var(--color-accent-soft); border-color: var(--color-accent); }
+.btn:active:not(:disabled) { transform: translateY(1px) scale(0.99); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-ink);
+  box-shadow: 0 4px 14px rgba(31, 77, 71, 0.25);
+}
+
+.btn-primary:hover:not(:disabled) { background: var(--color-accent-hover); border-color: var(--color-accent-hover); }
+.btn-ghost { border-color: transparent; background: transparent; box-shadow: none; }
+.btn-ghost:hover:not(:disabled) { border-color: var(--color-line); }
+
+.format-hint { margin: 0.65rem 0 0; font-size: 0.8rem; color: var(--color-ink-soft); }
+
+.progress { margin-top: 0.9rem; }
+
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--color-ink-soft);
+  margin-bottom: 0.35rem;
+}
+.progress-head span { font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: 0.78rem; }
+
+.progress-track {
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-line);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: var(--color-accent);
+  transition: width var(--duration-fast) ease;
+}
+
+.progress-fill.indeterminate {
+  width: 35%;
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+.doc-gauge { margin-top: 0.7rem; height: 5px; }
+
+@keyframes progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.status { min-height: 1.4em; margin: 0.75rem 0 0; font-size: 0.9rem; }
+.status[data-kind="error"] { color: var(--color-danger); }
+.status[data-kind="ok"] { color: var(--color-ok); }
+.status[data-kind="pending"] { color: var(--color-ink-soft); }
+
+.doc-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.75rem; }
+
+.doc-item {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.3rem;
+  transition: box-shadow var(--duration-med) ease, border-color var(--duration-med) ease,
+    transform var(--duration-med) ease;
+}
+.doc-item:hover { box-shadow: var(--shadow-card-hover); border-color: #d5cfc0; transform: translateY(-1px); }
+
+.doc-info { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: baseline; }
+.doc-info strong { font-weight: 600; letter-spacing: -0.005em; }
+.doc-detail { color: var(--color-ink-soft); font-size: 0.83rem; font-variant-numeric: tabular-nums; }
+
+.token-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 0.9rem;
+  align-items: center;
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--color-line);
+  font-size: 0.9rem;
+}
+
+.token-form label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.6rem 0.3rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-line);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+.token-form label:has(input:checked) { border-color: var(--color-accent); background: var(--color-accent-soft); }
+
+.token-form input[type="text"] {
+  font-family: var(--font-sans);
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-line);
+  border-radius: calc(var(--radius) - 3px);
+  font-size: 0.9rem;
+  min-width: 10rem;
+}
+.token-form input[type="text"]:focus-visible { outline-offset: 0; }
+
+.token-result { margin: 0.65rem 0 0; display: flex; gap: 0.5rem; font-size: 0.85rem; color: var(--color-danger); }
+.empty {
+  display: grid;
+  justify-items: center;
+  gap: 0.6rem;
+  padding: 2.5rem 1rem;
+  color: var(--color-ink-soft);
+  border: 1px dashed var(--color-line);
+  border-radius: var(--radius-lg);
+}
+.empty svg { width: 28px; height: 28px; opacity: 0.5; }
+
+/* ---------- 뷰어: 다크 워크스페이스 톤(몰입해서 "읽는" 화면) ---------- */
+
+.viewer-body {
+  --v-text: #edf1ef;
+  --v-text-dim: #93a19d;
+  --v-glass: rgba(16, 22, 21, 0.74);
+  --v-glass-line: rgba(255, 255, 255, 0.08);
+  --v-hover: rgba(255, 255, 255, 0.07);
+  --v-accent: #4fd6c4;
+  --v-accent-ink: #072522;
+  --v-accent-shadow: rgba(79, 214, 196, 0.3);
+  --v-presence-border: rgba(14, 19, 18, 0.92);
+  --v-scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --v-scrollbar-thumb-hover: rgba(255, 255, 255, 0.24);
+  min-height: 100vh;
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(1100px 480px at 50% -10%, rgba(79, 214, 196, 0.1), transparent 62%),
+    linear-gradient(180deg, #171d1c 0%, #101413 100%);
+  background-attachment: fixed;
+}
+
+/* ---------- 동시편집기: 밝은 오피스 리본 톤("쓰는" 생산성 도구 — 관리 페이지와 같은 계열) ---------- */
+
+.editor-body {
+  --v-text: var(--color-ink);
+  --v-text-dim: var(--color-ink-soft);
+  --v-glass: #f7f5f0;
+  --v-glass-line: var(--color-line);
+  --v-hover: #ece8e0;
+  --v-accent: var(--color-accent);
+  --v-accent-ink: var(--color-accent-ink);
+  /* 아래 둘은 --v-accent에서 계산되므로, 화면별로 --v-accent만 오버라이드하면
+     그림자·옅은 배경(이름 상자 등)까지 전부 그 색으로 따라간다. */
+  --v-accent-shadow: color-mix(in srgb, var(--v-accent) 22%, transparent);
+  --v-accent-soft: color-mix(in srgb, var(--v-accent) 12%, white);
+  --v-presence-border: #fff;
+  --v-scrollbar-thumb: rgba(27, 26, 23, 0.16);
+  --v-scrollbar-thumb-hover: rgba(27, 26, 23, 0.28);
+  min-height: 100vh;
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+}
+
+/* 엑셀 편집기만 실제 엑셀의 브랜드 그린을 쓴다(워드 편집기는 앱 고유 틸 유지) —
+   그림자/옅은배경/포커스링/선택 셀 테두리/시트탭 활성색 등이 이 값 하나로 전부 같이 바뀐다. */
+.grid-editor-page {
+  --v-accent: #217346;
+  --v-accent-ink: #ffffff;
+}
+
+.viewer-toolbar {
+  position: fixed;
+  top: 0.9rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  width: min(1160px, calc(100% - 1.5rem));
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 16px;
+  background: var(--v-glass);
+  border: 1px solid var(--v-glass-line);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.toolbar-group { display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex-wrap: wrap; row-gap: 0.4rem; }
+.toolbar-left { flex: 1; min-width: 0; }
+
+.doc-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--v-text-dim);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease,
+    transform var(--duration-fast) ease;
+}
+
+.icon-btn svg { width: 17px; height: 17px; }
+.icon-btn:hover:not(:disabled) { background: var(--v-hover); color: var(--v-text); }
+.icon-btn:active:not(:disabled) { transform: scale(0.92); }
+
+.zoom-group {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.15rem;
+  border-radius: 12px;
+  border: 1px solid var(--v-glass-line);
+}
+
+.zoom-group .icon-btn { width: 28px; height: 28px; border-radius: 8px; }
+.zoom-group .icon-btn svg { width: 14px; height: 14px; }
+
+.page-indicator, .zoom-level {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--v-text-dim);
+  min-width: 3.4em;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.btn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.95rem;
+  border-radius: 12px;
+  border: 1px solid var(--v-glass-line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease,
+    transform var(--duration-fast) ease, opacity var(--duration-fast) ease;
+}
+
+.btn-pill svg { width: 15px; height: 15px; flex: none; }
+.btn-pill:hover:not(:disabled) { background: var(--v-hover); }
+.btn-pill:active:not(:disabled) { transform: scale(0.97); }
+.btn-pill:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.btn-pill-primary {
+  background: var(--v-accent);
+  color: var(--v-accent-ink);
+  border-color: transparent;
+  font-weight: 600;
+  box-shadow: 0 4px 18px var(--v-accent-shadow);
+}
+
+.btn-pill-primary:hover:not(:disabled) { background: #6fe3d3; }
+
+.pages-container {
+  --page-width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 5.2rem 1rem 5rem;
+  /* 100% 초과 확대 시 페이지가 컨테이너를 넘치므로 가로 스크롤을 허용한다 */
+  overflow-x: auto;
+}
+
+.page-frame {
+  position: relative;
+  width: var(--page-width);
+  /* 축소 시 가운데 정렬, 확대 시 왼쪽 기준으로 넘쳐 스크롤 가능 */
+  margin: 0 auto 2.4rem;
+  background: #fff;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 18px 50px rgba(0, 0, 0, 0.45);
+  min-height: 220px;
+}
+
+.page-frame canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  opacity: 0;
+  transition: opacity 320ms ease;
+}
+
+.page-frame.page-ready canvas { opacity: 1; }
+
+/* 도면 모드: AutoCAD 모델 공간처럼 어두운 배경에 밝은 선으로 반전 */
+.pages-invert .page-frame { background: #101114; }
+.pages-invert .page-frame canvas { filter: invert(0.93) hue-rotate(180deg); }
+.pages-invert .page-loading::after {
+  background: linear-gradient(100deg, #16171c 40%, #1e2026 50%, #16171c 60%);
+  background-size: 200% 100%;
+}
+
+.icon-btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--v-accent) 16%, transparent);
+  color: var(--v-accent);
+}
+
+.page-loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, #f2f2f4 40%, #fafafc 50%, #f2f2f4 60%);
+  background-size: 200% 100%;
+  animation: page-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes page-shimmer {
+  0% { background-position: 120% 0; }
+  100% { background-position: -80% 0; }
+}
+
+.page-error::after {
+  content: "페이지를 불러올 수 없습니다";
+  animation: none;
+  background: #f6f0ef;
+  display: grid;
+  place-items: center;
+  color: var(--color-danger);
+  font-size: 0.9rem;
+}
+
+/* overflow 컨테이너에 잘리지 않도록 페이지 안쪽 모서리에 오버레이한다 */
+.page-number {
+  position: absolute;
+  bottom: 0.55rem;
+  right: 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.9);
+  padding: 0.12rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(20, 22, 28, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* ---------- 문서 내 검색 ---------- */
+
+.search-bar {
+  position: fixed;
+  top: 4.4rem;
+  right: 1.2rem;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 12px;
+  background: var(--v-glass);
+  border: 1px solid var(--v-glass-line);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.search-bar[hidden] { display: none; }
+
+.search-bar input {
+  font-family: var(--font-sans);
+  width: 15rem;
+  border: none;
+  outline: none;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 0.4rem 0.7rem;
+  color: var(--v-text);
+  font-size: 0.85rem;
+}
+
+.search-bar input::placeholder { color: var(--v-text-dim); }
+
+.search-count {
+  min-width: 4.5em;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--v-text-dim);
+  white-space: nowrap;
+}
+
+/* 페이지 뷰 하이라이트 오버레이 (비율 좌표) — 전체 결과는 연노랑, 현재 결과는 진한 주황 */
+.search-hit-overlay {
+  position: absolute;
+  background: rgba(255, 220, 80, 0.35);
+  outline: 1px solid rgba(255, 180, 0, 0.55);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.search-hit-overlay.current {
+  background: rgba(255, 170, 30, 0.5);
+  outline: 2.5px solid #f76707;
+  box-shadow: 0 0 0 4px rgba(247, 103, 7, 0.25);
+  animation: hit-pulse 0.9s ease-in-out 3;
+}
+
+@keyframes hit-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(247, 103, 7, 0.25); }
+  50% { box-shadow: 0 0 0 10px rgba(247, 103, 7, 0.45); }
+}
+
+/* 그리드 셀 내 매치 부분 형광 표시 */
+.grid-table mark {
+  background: #ffd43b;
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.grid-table td.g-hit-current mark {
+  background: #ff922b;
+  color: #fff;
+}
+
+/* 그리드 뷰 하이라이트 */
+.grid-table td.g-hit { background: #fff3bf !important; }
+.grid-table td.g-hit-current { background: #ffd43b !important; outline: 2px solid #f59f00; }
+
+/* ---------- 도면 도구: 패닝 · 거리 측정 ---------- */
+
+.pages-container { cursor: grab; }
+.pages-container.panning { cursor: grabbing; }
+.pages-container.measuring,
+.pages-container.measuring .page-frame { cursor: crosshair; }
+
+.measure-bar {
+  position: fixed;
+  top: 4.4rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 12px;
+  background: var(--v-glass);
+  border: 1px solid var(--v-glass-line);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  color: var(--v-text);
+  font-size: 0.82rem;
+}
+
+.measure-bar[hidden] { display: none; }
+.measure-bar .btn-pill { padding: 0.3rem 0.7rem; font-size: 0.78rem; }
+
+.measure-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 4;
+}
+
+.measure-layer line {
+  stroke: #e8590c;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.measure-dot {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e8590c;
+  border: 2px solid #fff;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.measure-label {
+  position: absolute;
+  transform: translate(-50%, -130%);
+  background: #1c1b1a;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 5;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* ---------- 그리드 뷰 (스프레드시트) ---------- */
+
+.grid-container {
+  position: fixed;
+  inset: 4.4rem 0.75rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--v-glass-line);
+  background: #fff;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+.grid-head {
+  position: relative;
+  height: 30px;
+  flex: none;
+  overflow: hidden;
+  background: #f3f4f7;
+  border-bottom: 1px solid #d7dae0;
+  z-index: 2;
+}
+
+.g-head-track { display: flex; height: 100%; will-change: transform; }
+
+.g-head-cell {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #6b7280;
+  border-right: 1px solid #e2e5ea;
+  box-sizing: border-box;
+}
+
+.g-head-corner { position: sticky; left: 0; background: #f3f4f7; z-index: 1; }
+
+.grid-scroll {
+  flex: 1;
+  overflow: auto;
+  background: #fff;
+  color: #1c1b1a;
+  scrollbar-color: #a7adb8 #f3f4f7; /* Firefox */
+}
+
+/* 흰 배경 위에서도 보이도록 그리드 전용 스크롤바 (다크 뷰어 공통 스타일 무시) */
+.grid-scroll::-webkit-scrollbar { width: 13px; height: 13px; }
+.grid-scroll::-webkit-scrollbar-track { background: #f3f4f7; }
+.grid-scroll::-webkit-scrollbar-thumb {
+  background: #b6bcc7;
+  border-radius: 999px;
+  border: 3px solid #f3f4f7;
+  background-clip: padding-box;
+}
+.grid-scroll::-webkit-scrollbar-thumb:hover { background-color: #8f96a3; }
+.grid-scroll::-webkit-scrollbar-corner { background: #f3f4f7; }
+
+.grid-inner { position: relative; }
+
+.grid-table {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.8rem;
+  line-height: 1.3;
+  will-change: transform;
+}
+
+.grid-table td {
+  border: 1px dotted #9aa0ab;
+  padding: 2px 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  background-clip: padding-box;
+}
+
+.grid-table .g-rownum {
+  position: sticky;
+  left: 0;
+  background: #f3f4f7;
+  color: #8a8f99;
+  font-size: 0.7rem;
+  text-align: center;
+  border-right: 1px solid #d7dae0;
+  z-index: 1;
+}
+
+.grid-noselect { user-select: none; -webkit-user-select: none; }
+
+.sheet-tabs {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px;
+  background: #eceef2;
+  border-top: 1px solid #d7dae0;
+  overflow-x: auto;
+}
+
+.sheet-tab {
+  border: none;
+  border-radius: 7px 7px 0 0;
+  padding: 5px 14px;
+  font-size: 0.78rem;
+  background: transparent;
+  color: #5b6270;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sheet-tab:hover { background: rgba(0, 0, 0, 0.06); }
+.sheet-tab.active { background: #fff; color: #1c1b1a; font-weight: 600; box-shadow: 0 -1px 4px rgba(0,0,0,0.08); }
+
+/* ---------- 그리드(엑셀) 동시편집기 ---------- */
+
+/* 리본 툴바가 캡션까지 붙어 높이가 늘어난 만큼 그리드 영역을 fixed+매직넘버로 맞추면
+   툴바 높이가 바뀔 때마다 다시 깨진다 — 대신 .grid-editor-page(body)를 뷰포트 높이에 고정하고
+   플렉스로 "툴바가 쓰고 남은 공간을 전부 채우기"를 브라우저가 계산하게 한다. */
+.grid-editor-page { height: 100vh; overflow: hidden; }
+#grid-zoom-host { flex: 1; min-height: 0; display: flex; flex-direction: column; transform-origin: top center; }
+
+.grid-editor-surface {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0.75rem 0.75rem 0;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-page);
+}
+
+.grid-editor-scroll { flex: 1; min-height: 0; overflow: auto; }
+
+/* ---------- 수식 입력줄 (이름 상자 + fx + 셀 내용) — 스프레드시트임을 가장 먼저 알려주는 요소 ---------- */
+.formula-bar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin: 0.6rem 0.75rem 0;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-page);
+  overflow: hidden;
+}
+.cell-ref-box {
+  flex: none;
+  width: 5.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--v-text);
+  background: var(--v-accent-soft);
+  border-right: 1px solid var(--color-line);
+}
+.fx-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 0.6rem;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-style: italic;
+  font-size: 0.85rem;
+  color: var(--v-accent);
+  border-right: 1px solid var(--color-line);
+}
+.formula-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  padding: 0 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--color-ink);
+  background: transparent;
+}
+.formula-input:focus { background: var(--v-accent-soft); }
+
+.grid-edit-table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.82rem;
+}
+
+.grid-edit-table th,
+.grid-edit-table td {
+  border: 1px dotted var(--color-ink-soft);
+  min-width: 100px;
+  padding: 0.18rem 0.4rem;
+  box-sizing: border-box;
+  height: 1.7rem;
+}
+
+.grid-edit-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--v-glass);
+  color: var(--v-text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+  z-index: 2;
+}
+.grid-edit-table thead th.g-col-active {
+  background: color-mix(in srgb, var(--v-accent) 22%, var(--v-glass));
+  color: var(--v-accent);
+}
+
+.grid-edit-table .g-edit-rownum {
+  position: sticky;
+  left: 0;
+  background: var(--v-glass);
+  color: var(--v-text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  min-width: 40px;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+  z-index: 1;
+}
+.grid-edit-table .g-edit-rownum.g-row-active {
+  background: color-mix(in srgb, var(--v-accent) 22%, var(--v-glass));
+  color: var(--v-accent);
+  font-weight: 700;
+}
+
+.grid-edit-table td[contenteditable] {
+  position: relative;
+  color: var(--v-text);
+  outline: none;
+  cursor: cell;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: box-shadow var(--duration-fast) ease;
+}
+.grid-edit-table td[contenteditable]:hover { background: var(--v-hover); }
+/* 엑셀의 선택 셀은 배경을 칠하지 않고 뚜렷한 테두리만 두른다 */
+.grid-edit-table td[contenteditable]:focus {
+  cursor: text;
+  box-shadow: inset 0 0 0 2px var(--v-accent);
+  white-space: normal;
+  overflow: visible;
+  z-index: 3;
+}
+
+/* 다른 참여자가 지금 편집 중인 셀 — "누가 어디를 수정 중인지" 표시 */
+.grid-edit-table td.g-remote-cell {
+  box-shadow: inset 0 0 0 2px var(--remote-color);
+}
+.g-remote-tag {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  max-width: calc(100% - 4px);
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #08201d;
+  background: var(--remote-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.grid-sheet-tabs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+  margin: 0.6rem 0.75rem 0.75rem;
+  border-radius: 10px;
+  background: var(--v-glass);
+  border: 1px solid var(--v-glass-line);
+  overflow-x: auto;
+}
+
+.grid-sheet-tab {
+  border: none;
+  border-radius: 7px;
+  padding: 5px 14px;
+  font-size: 0.78rem;
+  background: transparent;
+  color: var(--v-text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+.grid-sheet-tab:hover { background: var(--v-hover); }
+.grid-sheet-tab.active {
+  background: color-mix(in srgb, var(--v-accent) 16%, transparent);
+  color: var(--v-accent);
+  font-weight: 600;
+}
+
+/* 셀 인라인 배경/글자색(applyStyleToTd)보다 검색 하이라이트가 항상 위에 보이도록 !important */
+.grid-edit-table td.g-hit-current { background: #ffd43b !important; outline: 2px solid #f59f00; }
+
+.error-screen {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  padding: 1.5rem;
+}
+
+/* hidden 속성이 author display 값에 지지 않도록 명시한다 */
+.error-screen[hidden],
+.pages-container[hidden],
+.grid-container[hidden] {
+  display: none;
+}
+
+.error-card {
+  display: grid;
+  justify-items: center;
+  gap: 1rem;
+  max-width: 26rem;
+  padding: 2.2rem 2.4rem;
+  text-align: center;
+  border-radius: 20px;
+  background: var(--v-glass);
+  border: 1px solid var(--v-glass-line);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.error-card svg { width: 40px; height: 40px; color: var(--v-text-dim); }
+.error-card p { margin: 0; color: var(--v-text); line-height: 1.6; }
+
+.viewer-body ::-webkit-scrollbar,
+.editor-body ::-webkit-scrollbar { width: 10px; }
+.viewer-body ::-webkit-scrollbar-thumb,
+.editor-body ::-webkit-scrollbar-thumb {
+  background: var(--v-scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.viewer-body ::-webkit-scrollbar-thumb:hover,
+.editor-body ::-webkit-scrollbar-thumb:hover { background-color: var(--v-scrollbar-thumb-hover); }
+
+@media (max-width: 720px) {
+  .viewer-toolbar { flex-wrap: wrap; }
+  .doc-title { font-size: 0.85rem; }
+  .btn-pill .btn-label { display: none; }
+  .btn-pill { padding: 0.45rem 0.6rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-frame canvas { transition: none; }
+  .page-loading::after { animation: none; }
+}
+
+/* ---------- 동시편집기 (editor.html) ---------- */
+/* 색·블러·라운딩 토큰은 위 .viewer-body와 공유(같은 다크 워크스페이스 톤) —
+   뷰어는 "읽기"용 떠 있는 컴팩트 툴바, 에디터는 "쓰기"용 항상 보이는 전체 폭 툴바로
+   형태만 다르게 가져간다. */
+
+.editor-body { display: flex; flex-direction: column; }
+
+.editor-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: var(--v-glass);
+  border-bottom: 1px solid var(--v-glass-line);
+  box-shadow: 0 2px 8px rgba(27, 26, 23, 0.06);
+}
+
+.toolbar-top-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 1.1rem;
+}
+
+/* 실제 오피스 리본의 탭 줄(홈/삽입/...) — 이 앱은 기능이 "홈"뿐이라 탭 하나만 항상 활성 상태로
+   둔다(누르면 뭔가 열릴 것처럼 보이는 가짜 탭을 여러 개 만들지 않는다). */
+.ribbon-tabs {
+  display: flex;
+  gap: 0.15rem;
+  padding: 0 1.1rem;
+  border-top: 1px solid var(--v-glass-line);
+}
+.ribbon-tab {
+  border: none;
+  background: transparent;
+  padding: 0.4rem 1rem 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--v-text-dim);
+  cursor: default;
+  border-radius: 6px 6px 0 0;
+}
+.ribbon-tab.active {
+  color: var(--v-accent);
+  background: var(--color-surface);
+  box-shadow: inset 0 2px 0 var(--v-accent);
+}
+
+.toolbar-format {
+  flex: 1;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.4rem 1.1rem 0.5rem;
+}
+.toolbar-sep { width: 1px; height: 30px; align-self: center; background: var(--v-glass-line); margin: 0 0.2rem; }
+
+/* 오피스 리본처럼 버튼을 기능별로 묶고, 아래에 작은 캡션을 단다 */
+.ribbon-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.1rem 0.7rem 0;
+  border-right: 1px solid var(--v-glass-line);
+}
+.ribbon-group:last-child { border-right: none; padding-right: 0; }
+.ribbon-group-buttons { display: flex; align-items: center; gap: 0.2rem; flex-wrap: wrap; justify-content: center; }
+.ribbon-group-label {
+  font-size: 0.64rem;
+  color: var(--v-text-dim);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.conn-status {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: var(--v-glass-line);
+  color: var(--v-text-dim);
+}
+.conn-status[data-status="connected"],
+.conn-status[data-status="synced"] {
+  background: color-mix(in srgb, var(--v-accent) 18%, transparent);
+  color: var(--v-accent);
+}
+.conn-status[data-status="disconnected"] { background: rgba(255, 107, 87, 0.18); color: #ff8b76; }
+
+/* 오피스 365 스타일 겹침 아바타 스택 — 뒤쪽 아바타일수록 왼쪽으로 겹친다 */
+.presence-list { display: flex; align-items: center; padding-left: 6px; }
+
+.presence-badge {
+  --presence-color: var(--v-accent);
+  width: 28px;
+  height: 28px;
+  flex: none;
+  margin-left: -6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  border-radius: 50%;
+  background: var(--presence-color);
+  color: #08201d;
+  border: 2px solid var(--v-presence-border);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  cursor: default;
+  transition: transform var(--duration-fast) ease, z-index 0s;
+}
+.presence-badge:hover { transform: translateY(-3px); z-index: 5; }
+
+.unsupported-warning {
+  padding: 0.6rem 1.2rem;
+  background: #fdf3d7;
+  color: #7a5b06;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #f0dca0;
+}
+
+/* 엑셀/워드의 "글자색 A" · "채우기 색 물방울" 버튼 — 글자/아이콘 아래 현재 색을 보여주는 막대가
+   있고, 버튼 전체에 네이티브 색상 선택 input을 투명하게 겹쳐서 클릭하면 바로 색을 고를 수 있다. */
+.color-btn {
+  position: relative;
+  width: 30px;
+  height: 34px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background var(--duration-fast) ease;
+}
+.color-btn:hover { background: var(--v-hover); }
+.color-btn-glyph { width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: 700; color: var(--v-text); line-height: 1; }
+.color-btn-bar { width: 18px; height: 3px; border-radius: 1px; background: var(--btn-color, currentColor); box-shadow: 0 0 0 1px var(--v-glass-line); }
+.color-btn-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.mini-select {
+  height: 26px;
+  padding: 0 0.35rem;
+  border-radius: 7px;
+  border: 1px solid var(--v-glass-line);
+  background: var(--v-glass-line);
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+/* 뷰어의 fixed 플로팅 검색바와 달리, 에디터는 sticky 툴바 바로 아래 일반 흐름으로 붙인다 */
+.editor-body .search-bar {
+  position: static;
+  transform: none;
+  margin: 0.6rem auto 0;
+  width: fit-content;
+}
+
+#editor-zoom-host { flex: 1; display: flex; flex-direction: column; transform-origin: top center; }
+
+/* ProseMirror 문서 내 검색 하이라이트 (Decoration으로 삽입되는 인라인 span) */
+.editor-search-hit { background: #fff3bf; border-radius: 2px; }
+.editor-search-hit-current { background: #ffd43b; outline: 2px solid #f59f00; }
+
+.editor-surface {
+  flex: 1;
+  max-width: 860px;
+  width: 100%;
+  margin: 2.5rem auto 4.5rem;
+  padding: 3.2rem 4rem;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  min-height: 70vh;
+  box-shadow: var(--shadow-page);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+}
+
+.editor-surface .ProseMirror {
+  outline: none;
+  font-family: var(--font-sans);
+  line-height: 1.75;
+  max-width: 65ch;
+}
+.editor-surface .ProseMirror h1,
+.editor-surface .ProseMirror h2,
+.editor-surface .ProseMirror h3 { line-height: 1.3; letter-spacing: -0.01em; text-wrap: balance; }
+.editor-surface .ProseMirror table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: none;
+  margin: 1rem 0;
+}
+.editor-surface .ProseMirror table td {
+  border: 1px solid var(--color-line);
+  padding: 0.4rem 0.6rem;
+  min-width: 2em;
+}
+
+/* y-prosemirror의 yCursorPlugin이 삽입하는 원격 커서/선택 영역 데코레이션 */
+.editor-surface .ProseMirror-yjs-cursor {
+  position: relative;
+  margin-left: -1px;
+  margin-right: -1px;
+  border-left: 1.5px solid black;
+  border-right: 1.5px solid black;
+  word-break: normal;
+  pointer-events: none;
+}
+.editor-surface .ProseMirror-yjs-cursor > div {
+  position: absolute;
+  top: -1.05em;
+  left: -1.5px;
+  font-size: 0.7rem;
+  padding: 0 0.3rem;
+  border-radius: 3px 3px 3px 0;
+  white-space: nowrap;
+  color: #fff;
+  user-select: none;
+}

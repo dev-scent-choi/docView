@@ -1,0 +1,25 @@
+# 의존성
+node_modules/
+
+# 업로드된 문서·변환본·감사 로그 (사용자 데이터 — 절대 커밋 금지)
+data/
+
+# 외부 변환 도구 바이너리 (README의 설치 안내 참조)
+tools/
+
+# 로그·임시 파일
+*.log
+.DS_Store
+Thumbs.db
+
+# 도구 캐시(소스 아님)
+.impeccable/
+
+# 빌드 산출물 (src/client/*.ts에서 npm run build:editor로 생성됨)
+public/js/editor.bundle.js
+public/js/editor.bundle.js.map
+public/js/grid-editor.bundle.js
+public/js/grid-editor.bundle.js.map
+
+# 브라우저 회귀 테스트 산출물(스크린샷·샘플 업로드 파일) — 실행할 때마다 재생성됨
+scripts/.screenshots/

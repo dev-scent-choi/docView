@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DocView — 동시편집</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='3' width='19' height='26' rx='3' fill='%231f4d47'/%3E%3Cpath d='M18 3v6a2 2 0 0 0 2 2h6z' fill='%234fd6c4'/%3E%3Crect x='9' y='16' width='11' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3Crect x='9' y='21' width='8' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body class="editor-body">
+  <header class="editor-toolbar" id="toolbar">
+    <div class="toolbar-top-row">
+      <div class="toolbar-group toolbar-left">
+        <a href="/" class="icon-btn" title="문서 목록으로" aria-label="문서 목록으로 돌아가기">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+        </a>
+        <span id="doc-title" class="doc-title">문서 불러오는 중…</span>
+        <span id="conn-status" class="conn-status" data-status="connecting">연결 중…</span>
+      </div>
+      <div class="toolbar-group toolbar-right">
+        <div class="zoom-group" role="group" aria-label="확대/축소">
+          <button id="zoom-out" class="icon-btn" title="축소" aria-label="축소">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+          </button>
+          <span id="zoom-level" class="zoom-level">100%</span>
+          <button id="zoom-in" class="icon-btn" title="확대" aria-label="확대">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          </button>
+        </div>
+        <button id="search-btn" class="icon-btn" title="문서 내 검색 (Ctrl+F)" aria-label="문서 내 검색">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        </button>
+        <div id="presence-list" class="presence-list" aria-label="현재 접속 중인 참여자"></div>
+      </div>
+    </div>
+    <div class="ribbon-tabs" role="tablist">
+      <button type="button" class="ribbon-tab active" role="tab" aria-selected="true">홈</button>
+    </div>
+    <div class="toolbar-group toolbar-format">
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-undo" class="icon-btn" title="실행 취소 (Ctrl+Z)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.51 13a9 9 0 1 0 2.13-9.36L3 7"/></svg>
+          </button>
+          <button id="btn-redo" class="icon-btn" title="다시 실행 (Ctrl+Y)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M20.49 13a9 9 0 1 1-2.13-9.36L21 7"/></svg>
+          </button>
+        </div>
+        <span class="ribbon-group-label">실행 취소</span>
+      </div>
+
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-bold" class="icon-btn" title="굵게 (Ctrl+B)"><strong>B</strong></button>
+          <button id="btn-italic" class="icon-btn" title="기울임 (Ctrl+I)"><em>I</em></button>
+          <button id="btn-underline" class="icon-btn" title="밑줄 (Ctrl+U)"><u>U</u></button>
+          <button id="btn-strike" class="icon-btn" title="취소선"><s>S</s></button>
+          <span class="color-btn" id="font-color-btn">
+            <span class="color-btn-glyph">A</span>
+            <span class="color-btn-bar"></span>
+            <input id="font-color" class="color-btn-input" type="color" value="#1b1a17" title="글자 색" aria-label="글자 색" />
+          </span>
+          <button id="btn-clear-color" class="icon-btn" title="글자 색 지우기">A✕</button>
+          <select id="font-size" class="mini-select" title="글자 크기" aria-label="글자 크기">
+            <option value="">크기</option>
+            <option value="10">10pt</option>
+            <option value="11">11pt</option>
+            <option value="12">12pt</option>
+            <option value="14">14pt</option>
+            <option value="16">16pt</option>
+            <option value="18">18pt</option>
+            <option value="24">24pt</option>
+            <option value="32">32pt</option>
+          </select>
+        </div>
+        <span class="ribbon-group-label">글꼴</span>
+      </div>
+
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-align-left" class="icon-btn" title="왼쪽 정렬">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h14"/></svg>
+          </button>
+          <button id="btn-align-center" class="icon-btn" title="가운데 정렬">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M8 12h8M6 18h12"/></svg>
+          </button>
+          <button id="btn-align-right" class="icon-btn" title="오른쪽 정렬">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M10 12h10M6 18h14"/></svg>
+          </button>
+          <button id="btn-bullet-list" class="icon-btn" title="글머리 기호 목록">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="4.5" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1" fill="currentColor" stroke="none"/><path d="M9 6h11M9 12h11M9 18h11"/></svg>
+          </button>
+          <button id="btn-ordered-list" class="icon-btn" title="번호 매기기 목록">1.—</button>
+        </div>
+        <span class="ribbon-group-label">단락</span>
+      </div>
+
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-paragraph" class="icon-btn" title="본문">P</button>
+          <button id="btn-h1" class="icon-btn" title="제목 1">H1</button>
+          <button id="btn-h2" class="icon-btn" title="제목 2">H2</button>
+          <button id="btn-h3" class="icon-btn" title="제목 3">H3</button>
+        </div>
+        <span class="ribbon-group-label">스타일</span>
+      </div>
+
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-table" class="icon-btn" title="표 삽입 (2×2)">▦</button>
+          <button id="btn-add-row" class="icon-btn" title="행 추가">+행</button>
+          <button id="btn-add-col" class="icon-btn" title="열 추가">+열</button>
+          <button id="btn-del-row" class="icon-btn" title="행 삭제">-행</button>
+          <button id="btn-del-col" class="icon-btn" title="열 삭제">-열</button>
+          <button id="btn-del-table" class="icon-btn" title="표 삭제">✕표</button>
+        </div>
+        <span class="ribbon-group-label">표</span>
+      </div>
+    </div>
+  </header>
+
+  <div id="search-bar" class="search-bar" hidden>
+    <input id="search-input" type="text" placeholder="문서 내 검색…" autocomplete="off" />
+    <span id="search-count" class="search-count"></span>
+    <button id="search-prev" class="icon-btn" title="이전 결과" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+    </button>
+    <button id="search-next" class="icon-btn" title="다음 결과" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+    </button>
+    <button id="search-close" class="icon-btn" title="닫기">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+  </div>
+
+  <div id="unsupported-warning" class="unsupported-warning" hidden>
+    이 문서에는 이미지 등 편집기가 지원하지 않는 요소가 포함되어 있습니다 — 이 화면에서 저장하면
+    해당 요소는 사라집니다. 원본을 보존하려면 편집 대신 뷰어에서 다운로드하세요.
+  </div>
+
+  <div id="editor-zoom-host">
+    <main id="editor" class="editor-surface"></main>
+  </div>
+
+  <div id="error-screen" class="error-screen" hidden>
+    <div class="error-card">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+      <p id="error-message"></p>
+      <a href="/" class="btn-pill btn-pill-primary">문서 목록으로</a>
+    </div>
+  </div>
+
+  <script type="module" src="/js/editor.bundle.js"></script>
+</body>
+</html>

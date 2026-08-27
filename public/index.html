@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DocView — 문서 관리</title>
+  <meta name="description" content="권한 제어형 문서 웹뷰어 — 업로드한 문서를 열람 권한이 담긴 링크로 안전하게 공유합니다." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='3' width='19' height='26' rx='3' fill='%231f4d47'/%3E%3Cpath d='M18 3v6a2 2 0 0 0 2 2h6z' fill='%234fd6c4'/%3E%3Crect x='9' y='16' width='11' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3Crect x='9' y='21' width='8' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      </span>
+      <h1>Doc<span>View</span></h1>
+    </div>
+    <p class="tagline">권한 제어형 문서 웹뷰어 — 원본은 서버 밖으로 나가지 않습니다</p>
+  </header>
+
+  <main class="container">
+    <section class="upload-panel" aria-labelledby="upload-heading">
+      <h2 id="upload-heading">문서 업로드</h2>
+      <label class="file-drop" for="file-input">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/></svg>
+        <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg" />
+        <span id="file-label">파일을 선택하면 바로 업로드되고 뷰어가 열립니다</span>
+      </label>
+      <p id="format-hint" class="format-hint"></p>
+      <div id="progress" class="progress" hidden>
+        <div class="progress-head">
+          <span id="progress-label"></span>
+          <span id="progress-percent"></span>
+        </div>
+        <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+      </div>
+      <p id="upload-status" class="status" role="status"></p>
+    </section>
+
+    <section aria-labelledby="docs-heading">
+      <h2 id="docs-heading">문서 목록</h2>
+      <ul id="doc-list" class="doc-list"></ul>
+      <p id="empty-message" class="empty" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 15h6"/><path d="M9 11h2"/></svg>
+        아직 업로드된 문서가 없습니다.
+      </p>
+    </section>
+  </main>
+
+  <script src="/js/main.js"></script>
+</body>
+</html>
