@@ -19,8 +19,14 @@ export interface GridSheet {
   readonly colCount: number;
   readonly colWidths: readonly number[];
   readonly merges: readonly GridMerge[];
+  /** 엑셀 "틀 고정" — 위 N행/왼쪽 N열은 스크롤해도 계속 보인다. 없으면 둘 다 0. */
+  readonly freezeRows: number;
+  readonly freezeCols: number;
   readonly rows: ReadonlyArray<ReadonlyArray<GridCell | 0>>;
 }
+
+/** 테두리 굵기 — 1=가는 선, 2=굵은 선(엑셀 thin/medium을 단순화. 그 외 스타일은 가장 가까운 쪽으로 반올림). */
+export type BorderWeight = 1 | 2;
 
 export interface GridStyle {
   readonly b?: 1;
@@ -33,6 +39,14 @@ export interface GridStyle {
   readonly bg?: string;
   readonly a?: 'l' | 'c' | 'r';
   readonly w?: 1;
+  /** 시트 보호가 걸려 있고 이 셀이 잠겨 있음(=편집 불가) */
+  readonly lk?: 1;
+  /** 엑셀 데이터 유효성 검사(정수/소수)가 걸려 있음 */
+  readonly nu?: 1;
+  readonly bt?: BorderWeight;
+  readonly br?: BorderWeight;
+  readonly bb?: BorderWeight;
+  readonly bl?: BorderWeight;
 }
 
 export interface GridDocument {
@@ -262,10 +276,17 @@ const DEFAULT_FONT_SIZE_PT = 11;
 const PT_TO_PX = 96 / 72;
 const MAX_FONT_PX = 26;
 
+/** 엑셀 테두리 스타일 이름 → 단순화된 굵기(1=가는 선, 2=굵은 선). 스타일이 없으면 undefined. */
+function borderWeight(border?: Partial<ExcelJS.Border>): BorderWeight | undefined {
+  if (!border?.style) return undefined;
+  return border.style === 'medium' || border.style === 'thick' || border.style === 'double' ? 2 : 1;
+}
+
 function extractStyle(
   cell: ExcelJS.Cell,
   palette: StylePalette,
   themeColors: readonly string[],
+  sheetProtected: boolean,
 ): number | undefined {
   const style: {
     b?: 1;
@@ -277,6 +298,12 @@ function extractStyle(
     bg?: string;
     a?: 'l' | 'c' | 'r';
     w?: 1;
+    lk?: 1;
+    nu?: 1;
+    bt?: BorderWeight;
+    br?: BorderWeight;
+    bb?: BorderWeight;
+    bl?: BorderWeight;
   } = {};
   const font = cell.font;
   if (font?.bold) style.b = 1;
@@ -297,6 +324,22 @@ function extractStyle(
   if (horizontal === 'center') style.a = 'c';
   else if (horizontal === 'right') style.a = 'r';
   if (cell.alignment?.wrapText) style.w = 1;
+  // 시트 보호가 걸려 있을 때만 잠금 여부가 실제로 의미를 가진다(엑셀도 그렇게 동작함) — 그렇지
+  // 않은 대부분의 일반 문서는 셀마다 protection.locked가 true(엑셀 기본값)라도 편집 가능해야 한다.
+  if (sheetProtected && cell.protection?.locked !== false) style.lk = 1;
+  // 엑셀의 실제 데이터 유효성 검사(정수/소수 제한)를 그대로 읽는다 — webviewer가 새로 지어낸
+  // 개념이 아니라 어떤 xlsx든 이 규칙이 있으면 똑같이 동작한다.
+  const validationType = cell.dataValidation?.type;
+  if (validationType === 'whole' || validationType === 'decimal') style.nu = 1;
+  const border = cell.border;
+  const bt = borderWeight(border?.top);
+  if (bt) style.bt = bt;
+  const br = borderWeight(border?.right);
+  if (br) style.br = br;
+  const bb = borderWeight(border?.bottom);
+  if (bb) style.bb = bb;
+  const bl = borderWeight(border?.left);
+  if (bl) style.bl = bl;
   return palette.register(style);
 }
 
@@ -312,8 +355,21 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
   workbook.eachSheet((sheet) => {
     if (sheet.state && sheet.state !== 'visible') return;
     const rowCount = Math.min(sheet.actualRowCount || 0, MAX_ROWS);
-    const colCount = Math.min(sheet.actualColumnCount || 0, MAX_COLS);
+    // actualColumnCount는 맨 오른쪽 열이 수식 셀만 있을 때 그 열을 세지 않는 경우가 있다(ExcelJS
+    // 자체 버그로 보임 — 값이 아니라 수식만 있는 열은 "dimensions" 추적에서 빠지는 듯하다). 이 값만
+    // 믿으면 예: 맨 오른쪽 합계(=SUM) 열이 통째로 누락되고, 그 결과 동시편집 저장 시
+    // exportXlsxFromGrid의 "구조 밖 열 잘라내기" 로직이 그 열을 실제로 지워버린다. 그래서 전체
+    // 행을 훑어 실제로 쓰인 최대 열 번호도 함께 구해 더 큰 쪽을 쓴다.
+    let maxColUsed = 0;
+    sheet.eachRow((row) => {
+      row.eachCell({ includeEmpty: false }, (_cell, colNumber) => {
+        if (colNumber > maxColUsed) maxColUsed = colNumber;
+      });
+    });
+    const colCount = Math.min(Math.max(sheet.actualColumnCount || 0, maxColUsed), MAX_COLS);
     if (rowCount === 0 || colCount === 0) return;
+    // exceljs 타입 선언에는 없지만 런타임에는 시트 보호 시 채워진다(themes와 동일한 이유로 캐스팅)
+    const sheetProtected = Boolean((sheet as unknown as { sheetProtection?: unknown }).sheetProtection);
 
     const colWidths: number[] = [];
     for (let c = 1; c <= colCount; c += 1) {
@@ -328,7 +384,7 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
       row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
         if (colNumber > colCount) return;
         const text = displayValue(cell);
-        const styleRef = extractStyle(cell, palette, themeColors);
+        const styleRef = extractStyle(cell, palette, themeColors, sheetProtected);
         if (text === '' && styleRef === undefined) return;
         cells[colNumber - 1] = styleRef === undefined ? { v: text } : { v: text, s: styleRef };
       });
@@ -353,7 +409,11 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
         (merge): merge is GridMerge => merge !== null && merge.r <= rows.length && merge.c <= colCount,
       );
 
-    sheets.push({ name: sheet.name, rowCount: rows.length, colCount, colWidths, merges, rows });
+    const frozenView = sheet.views?.find((v) => (v as { state?: string }).state === 'frozen');
+    const freezeRows = frozenView ? ((frozenView as { ySplit?: number }).ySplit ?? 0) : 0;
+    const freezeCols = frozenView ? ((frozenView as { xSplit?: number }).xSplit ?? 0) : 0;
+
+    sheets.push({ name: sheet.name, rowCount: rows.length, colCount, colWidths, merges, freezeRows, freezeCols, rows });
   });
 
   return { sheets, styles: palette.toArray() };
@@ -416,6 +476,8 @@ export function parseCsvToGrid(text: string): GridDocument {
         colCount,
         colWidths: new Array(colCount).fill(120),
         merges: [],
+        freezeRows: 0,
+        freezeCols: 0,
         rows: gridRows,
       },
     ],

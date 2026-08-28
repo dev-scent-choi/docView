@@ -5,11 +5,13 @@ import {
   EDIT_SOFT_COL_LIMIT,
   EDIT_SOFT_ROW_LIMIT,
   GRID_CELLS_MAP,
+  GRID_MERGES_MAP,
   GRID_STRUCTURE_MAP,
   GRID_STYLES_MAP,
   gridCellKey,
   parseGridCellKey,
   type CellStyleAttrs,
+  type GridMergeShape,
   type SheetStructure,
 } from '../collab/gridShared.js';
 import { formulaFunctions, formulaFunctionsNeedContext } from './formulaOverrides.js';
@@ -81,6 +83,12 @@ function cellRefLabel(row: number, col: number): string {
 /** 엑셀처럼 숫자로 보이는 값은 서식이 따로 없으면 기본적으로 오른쪽 정렬로 보여준다. */
 const NUMERIC_VALUE = /^-?\d+(\.\d+)?$/;
 
+/** 엑셀 테두리 굵기(1=가는 선, 2=굵은 선)를 CSS로. 지정이 없으면 빈 문자열 —
+ * 그러면 스타일시트의 기본 점선 격자(.grid-edit-table td)가 그대로 보인다. */
+function borderCss(weight: 1 | 2 | undefined): string {
+  return weight ? `${weight}px solid var(--v-text)` : '';
+}
+
 function applyStyleToTd(td: HTMLTableCellElement, style: CellStyleAttrs | undefined): void {
   td.style.fontWeight = style?.b ? '700' : '400';
   td.style.fontStyle = style?.i ? 'italic' : 'normal';
@@ -92,6 +100,11 @@ function applyStyleToTd(td: HTMLTableCellElement, style: CellStyleAttrs | undefi
   } else {
     td.style.textAlign = NUMERIC_VALUE.test((td.textContent ?? '').trim()) ? 'right' : '';
   }
+  td.style.borderTop = borderCss(style?.bt);
+  td.style.borderRight = borderCss(style?.br);
+  td.style.borderBottom = borderCss(style?.bb);
+  td.style.borderLeft = borderCss(style?.bl);
+  td.classList.toggle('g-locked', style?.lk === 1);
 }
 
 async function main(): Promise<void> {
@@ -120,6 +133,7 @@ async function main(): Promise<void> {
   const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
   const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
   const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
+  const merges = ydoc.getMap<readonly GridMergeShape[]>(GRID_MERGES_MAP);
 
   const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const provider = new WebsocketProvider(`${wsProtocol}//${location.host}/ws/edit`, info.docId, ydoc, {
@@ -257,6 +271,18 @@ async function main(): Promise<void> {
     );
   }
 
+/** 셀 근처에 잠깐 떴다 사라지는 안내 말풍선 — 유효성 검사에 걸린 입력을 왜 안 받았는지 알려준다. */
+  function showCellTooltip(td: HTMLTableCellElement, message: string): void {
+    const rect = td.getBoundingClientRect();
+    const tip = document.createElement('div');
+    tip.className = 'g-cell-tooltip';
+    tip.textContent = message;
+    tip.style.left = `${rect.left}px`;
+    tip.style.top = `${rect.bottom + 4}px`;
+    document.body.appendChild(tip);
+    setTimeout(() => tip.remove(), 2200);
+  }
+
   /** 데이터가 없는 빈 셀에 값을 입력하면 시트 범위(structure)를 자동으로 넓힌다 — 엑셀처럼
    * "칸이 있으니까 그냥 입력하면 늘어난다"는 동작을 흉내낸다. */
   function commitCell(td: HTMLTableCellElement): void {
@@ -266,6 +292,14 @@ async function main(): Promise<void> {
     const value = td.textContent ?? '';
     const current = cells.get(key) ?? '';
     if (value === current) return;
+
+    // 이 칸이 숫자 전용(엑셀 데이터 유효성 검사)이면 숫자가 아닌 입력은 저장하지 않고 안내만 띄운다
+    // — blur 이후 renderCellDisplay가 다시 그리면서 원래 값으로 자연히 되돌아간다.
+    if (styles.get(key)?.nu === 1 && value.trim() !== '' && !NUMERIC_VALUE.test(value.trim())) {
+      showCellTooltip(td, '숫자만 입력할 수 있습니다.');
+      return;
+    }
+
     ydoc.transact(() => {
       if (value === '') {
         cells.delete(key);
@@ -290,6 +324,29 @@ async function main(): Promise<void> {
   const GRID_MIN_RENDER_ROWS = 25;
   const GRID_MIN_RENDER_COLS = 12;
 
+  /** 병합 정보(1-based)를 0-based (row:col) 조회표로 바꾼다 — viewer.js의 buildMergeIndex와 동일한 원리.
+   * anchors: 병합의 왼쪽위 칸 → {rs,cs}(rowspan/colspan). covered: 그 외 병합에 덮인 칸(<td>를 아예 안 그림). */
+  function buildMergeLookup(sheetIdx: number): {
+    anchors: Map<string, { rs: number; cs: number }>;
+    covered: Set<string>;
+  } {
+    const anchors = new Map<string, { rs: number; cs: number }>();
+    const covered = new Set<string>();
+    const sheetMerges = merges.get(String(sheetIdx)) ?? [];
+    for (const m of sheetMerges) {
+      const r0 = m.r - 1;
+      const c0 = m.c - 1;
+      anchors.set(`${r0}:${c0}`, { rs: m.rs, cs: m.cs });
+      for (let r = r0; r < r0 + m.rs; r += 1) {
+        for (let c = c0; c < c0 + m.cs; c += 1) {
+          if (r === r0 && c === c0) continue;
+          covered.add(`${r}:${c}`);
+        }
+      }
+    }
+    return { anchors, covered };
+  }
+
   function renderTable(): void {
     const sheet = structure.get(String(activeSheet));
     tableEl.replaceChildren();
@@ -298,6 +355,9 @@ async function main(): Promise<void> {
     warningEl.hidden = !(sheet.rowCount > EDIT_SOFT_ROW_LIMIT || sheet.colCount > EDIT_SOFT_COL_LIMIT);
     const renderRowCount = Math.max(sheet.rowCount + GRID_ROW_PADDING, GRID_MIN_RENDER_ROWS);
     const renderColCount = Math.max(sheet.colCount + GRID_COL_PADDING, GRID_MIN_RENDER_COLS);
+    const { anchors, covered } = buildMergeLookup(activeSheet);
+    const freezeRows = sheet.freezeRows ?? 0;
+    const freezeCols = sheet.freezeCols ?? 0;
 
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
@@ -320,45 +380,127 @@ async function main(): Promise<void> {
       rowHead.dataset.row = String(r);
       tr.appendChild(rowHead);
       for (let c = 0; c < renderColCount; c += 1) {
+        if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커 쪽에서 colspan/rowspan으로 대신 차지한다
         const key = gridCellKey(activeSheet, r, c);
         const td = document.createElement('td');
-        td.contentEditable = 'true';
+        const span = anchors.get(`${r}:${c}`);
+        if (span) {
+          if (span.rs > 1) td.rowSpan = span.rs;
+          if (span.cs > 1) td.colSpan = span.cs;
+        }
+        const isLocked = styles.get(key)?.lk === 1;
+        td.contentEditable = isLocked ? 'false' : 'true';
         td.dataset.row = String(r);
         td.dataset.col = String(c);
+        // 엑셀 "틀 고정" — 위 N행/왼쪽 N열은 스크롤해도 계속 보여야 한다. 실제 sticky 좌표(top/left)는
+        // 렌더링이 끝나 실제 셀 크기를 잴 수 있게 된 뒤 applyFreezePanes()에서 한 번에 계산한다.
+        if (r < freezeRows) td.classList.add('g-frozen-row');
+        if (c < freezeCols) td.classList.add('g-frozen-col');
         renderCellDisplay(td, key);
         applyStyleToTd(td, styles.get(key));
-        td.addEventListener('focus', () => {
-          activeCellKey = key;
-          provider.awareness.setLocalStateField('cell', { sheetIdx: activeSheet, row: r, col: c });
-          syncCellToolbarState(key);
-          setActiveHeaders(r, c);
-          cellRefBoxEl.textContent = cellRefLabel(r, c);
-          formulaInputEl.value = cells.get(key) ?? '';
-          renderCellDisplay(td, key); // 편집 모드로 진입 — 계산 결과 대신 원본 수식/값을 보여준다
-        });
-        td.addEventListener('input', () => {
-          if (activeCellKey === key) formulaInputEl.value = td.textContent ?? '';
-        });
-        td.addEventListener('blur', () => {
-          commitCell(td);
-          renderCellDisplay(td, key); // 편집 종료 — 수식이면 계산 결과로 되돌린다
-          recalcFormulaCells(); // 이 셀 값이 바뀌었으니 이를 참조하는 다른 수식 셀도 갱신
-        });
-        td.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            td.blur();
-          }
-        });
+        // 잠겨 있으면서 여러 칸을 병합한(제목 배너 같은) 셀은 클릭 시 부모 창(이 문서를 iframe으로
+        // 임베드한 화면)에 알림만 보낸다 — 무엇을 보여줄지(예: 연도 목록 드롭다운)는 전적으로 부모
+        // 쪽 책임이다. webviewer 자신은 "연도"/"이력" 같은 특정 문서의 의미를 전혀 알 필요가 없다.
+        if (isLocked && span && span.cs > 1) {
+          td.classList.add('g-clickable-header');
+          td.addEventListener('click', () => {
+            if (window.parent !== window) {
+              // 셀의 화면상 위치(이 iframe 안에서의 좌표)를 같이 보내, 부모 쪽이 임베드한 iframe의
+              // 위치와 합쳐 팝오버를 셀 바로 밑에 자연스럽게 놓을 수 있게 한다 — webviewer는 "연도
+              // 팝오버를 어디에 그릴지" 자체는 몰라도 되고, 그저 클릭된 칸의 위치만 알려준다.
+              const rect = td.getBoundingClientRect();
+              window.parent.postMessage(
+                {
+                  type: 'docview:title-click',
+                  rect: { top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height },
+                },
+                '*',
+              );
+            }
+          });
+        }
+        if (!isLocked) {
+          td.addEventListener('focus', () => {
+            activeCellKey = key;
+            provider.awareness.setLocalStateField('cell', { sheetIdx: activeSheet, row: r, col: c });
+            syncCellToolbarState(key);
+            setActiveHeaders(r, c);
+            cellRefBoxEl.textContent = cellRefLabel(r, c);
+            formulaInputEl.value = cells.get(key) ?? '';
+            renderCellDisplay(td, key); // 편집 모드로 진입 — 계산 결과 대신 원본 수식/값을 보여준다
+          });
+          td.addEventListener('input', () => {
+            if (activeCellKey === key) formulaInputEl.value = td.textContent ?? '';
+          });
+          td.addEventListener('blur', () => {
+            commitCell(td);
+            renderCellDisplay(td, key); // 편집 종료 — 수식이면 계산 결과로 되돌린다
+            recalcFormulaCells(); // 이 셀 값이 바뀌었으니 이를 참조하는 다른 수식 셀도 갱신
+          });
+          td.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              td.blur();
+            }
+          });
+        }
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
     }
     tableEl.appendChild(tbody);
+    applyFreezePanes(freezeRows, freezeCols);
     renderRemoteCellHighlights();
     if (activeCellKey) {
       const parsed = parseGridCellKey(activeCellKey);
       if (parsed && parsed.sheetIdx === activeSheet) setActiveHeaders(parsed.row, parsed.col);
+    }
+  }
+
+  /**
+   * 위 freezeRows행 / 왼쪽 freezeCols열을 실제로 sticky 처리한다. 렌더링 직후 DOM에 실제로 붙은
+   * 뒤에 호출해야 offsetHeight/offsetWidth로 진짜 셀 크기를 잴 수 있다 — 그래야 컬럼 letter 헤더
+   * (이미 sticky top:0)와 행번호 열(이미 sticky left:0) 바로 다음에 정확히 이어붙일 수 있다.
+   * 배경을 불투명하게 칠해야 스크롤된 내용이 그 밑으로 비쳐 보이지 않는다.
+   */
+  function applyFreezePanes(freezeRows: number, freezeCols: number): void {
+    if (freezeRows === 0 && freezeCols === 0) return;
+
+    const theadHeight = tableEl.querySelector('thead')?.getBoundingClientRect().height ?? 0;
+    const rownumWidth = tableEl.querySelector<HTMLElement>('.g-edit-rownum')?.getBoundingClientRect().width ?? 0;
+
+    if (freezeRows > 0) {
+      // 행 높이는 전부 동일(CSS 고정값)하므로, 얼릴 행들의 실제 렌더 높이를 각 행 대표 셀에서 재
+      // 누적해 top을 계산한다.
+      let top = theadHeight;
+      for (let r = 0; r < freezeRows; r += 1) {
+        const rowCells = tableEl.querySelectorAll<HTMLElement>(`tbody td[data-row="${r}"], tbody th[data-row="${r}"]`);
+        let rowHeight = 0;
+        rowCells.forEach((cell) => {
+          cell.style.position = 'sticky';
+          cell.style.top = `${top}px`;
+          cell.style.zIndex = cell.classList.contains('g-frozen-col') ? '4' : '3';
+          cell.classList.add('g-frozen-pane');
+          rowHeight = Math.max(rowHeight, cell.getBoundingClientRect().height);
+        });
+        top += rowHeight;
+      }
+    }
+
+    if (freezeCols > 0) {
+      let left = rownumWidth;
+      for (let c = 0; c < freezeCols; c += 1) {
+        const colCells = tableEl.querySelectorAll<HTMLElement>(`tbody td[data-col="${c}"]`);
+        let colWidth = 0;
+        colCells.forEach((cell) => {
+          cell.style.position = 'sticky';
+          cell.style.left = `${left}px`;
+          if (!cell.style.zIndex) cell.style.zIndex = '3';
+          cell.classList.add('g-frozen-pane');
+          colWidth = Math.max(colWidth, cell.getBoundingClientRect().width);
+        });
+        left += colWidth;
+      }
     }
   }
 

@@ -11,6 +11,14 @@
   <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body class="editor-body grid-editor-page">
+  <script>
+    // 다른 화면에 iframe으로 임베드할 때 툴바 없이 콘텐츠(그리드)만 보이게 하는 옵션.
+    // 모듈 스크립트(grid-editor.bundle.js)가 뜨기 전에 툴바가 잠깐 보였다 사라지는 걸
+    // 막기 위해 body 여는 태그 바로 뒤, 툴바가 파싱되기 전에 동기적으로 클래스를 붙인다.
+    if (new URLSearchParams(location.search).get('chrome') === 'hidden') {
+      document.body.classList.add('chrome-hidden');
+    }
+  </script>
   <header class="editor-toolbar" id="toolbar">
     <div class="toolbar-top-row">
       <div class="toolbar-group toolbar-left">

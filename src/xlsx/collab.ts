@@ -3,12 +3,14 @@ import * as Y from 'yjs';
 import {
   GRID_BASELINE_MAP,
   GRID_CELLS_MAP,
+  GRID_MERGES_MAP,
   GRID_STRUCTURE_MAP,
   GRID_STYLES_BASELINE_MAP,
   GRID_STYLES_MAP,
   gridCellKey,
   parseGridCellKey,
   type CellStyleAttrs,
+  type GridMergeShape,
   type SheetStructure,
 } from '../collab/gridShared.js';
 import type { GridDocument, GridStyle } from '../spreadsheet.js';
@@ -23,7 +25,32 @@ function toCellStyleAttrs(style: GridStyle): CellStyleAttrs {
   if (style.col) attrs.col = style.col;
   if (style.bg) attrs.bg = style.bg;
   if (style.a) attrs.a = style.a;
+  if (style.lk) attrs.lk = 1;
+  if (style.nu) attrs.nu = 1;
+  if (style.bt) attrs.bt = style.bt;
+  if (style.br) attrs.br = style.br;
+  if (style.bb) attrs.bb = style.bb;
+  if (style.bl) attrs.bl = style.bl;
   return attrs;
+}
+
+/** 병합 범위(1-based, {r,c,rs,cs})에서 "앵커가 아닌, 병합에 덮인" 칸의 (0-based r:c) 키 집합을 만든다.
+ * 이런 칸은 ExcelJS가 앵커와 동일한 값을 그대로 돌려주는 것뿐(진짜 값이 아님)이라 시딩에서 제외해야
+ * 병합이 "14칸에 같은 제목이 중복 입력된 것"이 아니라 진짜 병합으로 남는다(그리드 에디터가 렌더링
+ * 시 앵커에만 colspan/rowspan을 주고 이 칸들은 아예 그리지 않는다 — viewer.js의 처리와 동일한 원리). */
+function mergeCoveredCells(merges: readonly GridMergeShape[]): Set<string> {
+  const covered = new Set<string>();
+  for (const m of merges) {
+    const r0 = m.r - 1;
+    const c0 = m.c - 1;
+    for (let r = r0; r < r0 + m.rs; r += 1) {
+      for (let c = c0; c < c0 + m.cs; c += 1) {
+        if (r === r0 && c === c0) continue;
+        covered.add(`${r}:${c}`);
+      }
+    }
+  }
+  return covered;
 }
 
 /** 읽기전용 그리드 뷰(parseXlsxToGrid의 결과)를 협업용 Y.Doc에 시딩한다. */
@@ -33,15 +60,21 @@ export function seedGridFromXlsx(ydoc: Y.Doc, grid: GridDocument): void {
   const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
   const stylesBaseline = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP);
   const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
+  const merges = ydoc.getMap<readonly GridMergeShape[]>(GRID_MERGES_MAP);
   grid.sheets.forEach((sheet, sheetIdx) => {
     structure.set(String(sheetIdx), {
       name: sheet.name,
       rowCount: sheet.rowCount,
       colCount: sheet.colCount,
+      freezeRows: sheet.freezeRows,
+      freezeCols: sheet.freezeCols,
     });
+    if (sheet.merges.length > 0) merges.set(String(sheetIdx), sheet.merges);
+    const covered = mergeCoveredCells(sheet.merges);
     sheet.rows.forEach((row, r) => {
       row.forEach((cell, c) => {
         if (cell === 0) return;
+        if (covered.has(`${r}:${c}`)) return; // 병합에 덮인 칸 — 앵커의 중복 값이라 시딩하지 않는다
         const key = gridCellKey(sheetIdx, r, c);
         if (cell.v !== '') {
           cells.set(key, cell.v);
@@ -114,6 +147,15 @@ export async function exportXlsxFromGrid(originalXlsxBytes: Uint8Array, ydoc: Y.
   await workbook.xlsx.load(originalXlsxBytes as unknown as ArrayBuffer);
   const visibleSheets = workbook.worksheets.filter((sheet) => !sheet.state || sheet.state === 'visible');
 
+  // ExcelJS는 시트 보호(sheetProtection)를 읽어오긴 하지만, 아무 것도 안 건드리고 그대로
+  // writeBuffer()만 하면 그 정보를 재직렬화하지 않고 조용히 잃어버린다(ExcelJS 자체의 한계로 보임 —
+  // protect()를 이번 세션에서 다시 명시적으로 불러야만 저장 시 살아남는다). 그래서 로드 직후
+  // 상태를 기억해뒀다가 쓰기 직전에 다시 걸어준다 — 안 그러면 편집기 저장을 한 번이라도 거치고
+  // 나면(사용자가 아무것도 안 건드려도 유휴 자동저장으로 매번 일어남) 잠금이 전부 풀려버린다.
+  const wasProtected = visibleSheets.map((sheet) =>
+    Boolean((sheet as unknown as { sheetProtection?: unknown }).sheetProtection),
+  );
+
   const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
   const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
   const baseline = ydoc.getMap<string>(GRID_BASELINE_MAP);
@@ -163,6 +205,12 @@ export async function exportXlsxFromGrid(originalXlsxBytes: Uint8Array, ydoc: Y.
     if (!target || !sheet) continue;
     if (parsed.row >= target.rowCount || parsed.col >= target.colCount) continue;
     applyStyleToCell(sheet.getCell(parsed.row + 1, parsed.col + 1), after);
+  }
+
+  for (let i = 0; i < visibleSheets.length; i += 1) {
+    if (wasProtected[i]) {
+      await visibleSheets[i].protect('', {});
+    }
   }
 
   const buffer = await workbook.xlsx.writeBuffer();

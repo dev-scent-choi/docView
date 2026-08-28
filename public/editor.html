@@ -11,6 +11,12 @@
   <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body class="editor-body">
+  <script>
+    // 다른 화면에 iframe으로 임베드할 때 툴바 없이 콘텐츠만 보이게 하는 옵션 (editor-grid.html과 동일)
+    if (new URLSearchParams(location.search).get('chrome') === 'hidden') {
+      document.body.classList.add('chrome-hidden');
+    }
+  </script>
   <header class="editor-toolbar" id="toolbar">
     <div class="toolbar-top-row">
       <div class="toolbar-group toolbar-left">
