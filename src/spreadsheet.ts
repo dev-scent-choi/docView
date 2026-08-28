@@ -84,8 +84,12 @@ const DEFAULT_COL_WIDTH_PX = 100;
 const CHAR_TO_PX = 7.2;
 
 function argbToCss(argb?: string): string | undefined {
-  if (!argb || argb.length !== 8) return undefined;
-  return `#${argb.slice(2)}`;
+  if (!argb) return undefined;
+  // 대부분의 엑셀 파일(과 ExcelJS 자신)은 8자리 AARRGGBB로 쓰지만, POI는 알파 없이 6자리
+  // RRGGBB만 쓰는 경우가 있다 — 두 형태 모두 지원해야 색이 조용히 누락되지 않는다.
+  if (argb.length === 8) return `#${argb.slice(2)}`;
+  if (argb.length === 6) return `#${argb}`;
+  return undefined;
 }
 
 /**
@@ -318,7 +322,9 @@ function extractStyle(
   const fill = cell.fill;
   if (fill && fill.type === 'pattern' && fill.pattern === 'solid') {
     const bg = resolveColor(fill.fgColor, themeColors);
-    if (bg && bg.toUpperCase() !== '#FFFFFF') style.bg = bg;
+    // 흰색이어도 캡처한다 — 잠긴 칸은 기본적으로 회색으로 렌더링되는데, 셀에 명시적으로 흰 배경을
+    // 지정해두면(이 커넥션-현황 시트의 1행처럼) 그 지정이 잠금 회색보다 우선해야 한다.
+    if (bg) style.bg = bg;
   }
   const horizontal = cell.alignment?.horizontal;
   if (horizontal === 'center') style.a = 'c';
@@ -381,7 +387,11 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
     for (let r = 1; r <= rowCount; r += 1) {
       const row = sheet.getRow(r);
       const cells: Array<GridCell | 0> = new Array(colCount).fill(0);
-      row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
+      // includeEmpty:true여야 한다 — 값은 없지만 스타일(잠금·숫자 전용 유효성 검사·테두리 등)만
+      // 있는 칸도 빠짐없이 읽는다. false로 두면 "값이 없는 칸"은 아예 순회 대상에서 빠져, 예를 들어
+      // 아직 아무도 입력하지 않은 숫자 전용 칸이 잠금·유효성 검사 정보 없이 렌더링되어 아무 텍스트나
+      // 입력·붙여넣기해도 막히지 않는 문제가 있었다(실제로 재현된 버그).
+      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
         if (colNumber > colCount) return;
         const text = displayValue(cell);
         const styleRef = extractStyle(cell, palette, themeColors, sheetProtected);

@@ -36,6 +36,19 @@ const ALIGN_TO_CSS: Record<'l' | 'c' | 'r', string> = { l: 'left', c: 'center', 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
 
+/** false면 이 문서 전체가 읽기 전용이다(예: 과거 연도 접속현황) — 잠금 여부(lk)와 무관하게 모든
+ * 칸이 편집 불가여야 한다. main()에서 서버가 내려준 토큰 권한으로 설정된다. */
+let canEdit = true;
+
+/** renderTable()이 다시 그릴 때마다 하나씩 늘어난다. 붙여넣기로 시트 범위가 넓어지면
+ * renderTable()이 트랜잭션 도중 동기적으로 표 전체를 다시 그리는데, 이때 포커스가 있던 셀이
+ * DOM에서 떨어져 나가며 브라우저가 blur를 보낸다 — 그 blur 콜백이 실행되는 시점엔 이미 그 요소가
+ * 실제로는 못 쓰게 됐어도 `isConnected`가 아직 true로 보이는 타이밍이 브라우저마다 있어(제거
+ * 시점과 blur 디스패치 시점이 항상 완전히 동기적이지 않음) 그 값만으로는 안전하게 걸러낼 수 없다.
+ * 대신 "이 칸이 만들어졌을 때의 세대"와 "지금 세대"를 비교하는 논리적 판정을 쓴다 — 사이에 표가
+ * 다시 그려졌으면(세대가 달라졌으면) 그 blur는 이미 낡은 것이니 커밋하지 않는다. */
+let renderGeneration = 0;
+
 const titleEl = document.getElementById('doc-title') as HTMLElement;
 const statusEl = document.getElementById('conn-status') as HTMLElement;
 const presenceEl = document.getElementById('presence-list') as HTMLElement;
@@ -43,6 +56,7 @@ const warningEl = document.getElementById('unsupported-warning') as HTMLElement;
 const editorHost = document.getElementById('grid-editor') as HTMLElement;
 const zoomHost = document.getElementById('grid-zoom-host') as HTMLElement;
 const tableEl = document.getElementById('grid-edit-table') as HTMLTableElement;
+const scrollHostEl = document.querySelector('.grid-editor-scroll') as HTMLElement;
 const sheetTabsEl = document.getElementById('sheet-tabs') as HTMLElement;
 const cellRefBoxEl = document.getElementById('cell-ref-box') as HTMLElement;
 const formulaInputEl = document.getElementById('formula-input') as HTMLInputElement;
@@ -121,9 +135,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!info.permissions.canEdit) {
-    showFatalError('이 링크에는 동시편집 권한이 없습니다. 뷰어에서 열람만 가능합니다.');
-    return;
+  // canEdit:false여도 이 편집기 화면 자체는 그대로 보여준다(과거 연도 접속현황처럼 "현재 연도와
+  // 똑같은 화면으로, 다만 손댈 수는 없게" 보여줘야 하는 경우가 있다) — 실제 쓰기 차단은 서버가
+  // 읽기 전용 연결로 처리한다(collab/room.ts). 여기서는 편집 UI(툴바·셀 입력)만 꺼서 애초에
+  // 사용자가 고칠 수 있다고 착각하지 않게 한다.
+  canEdit = info.permissions.canEdit;
+  if (!canEdit) {
+    toolbar.hidden = true;
+    formulaInputEl.readOnly = true;
   }
 
   titleEl.textContent = info.name;
@@ -153,6 +172,20 @@ async function main(): Promise<void> {
       statusEl.dataset.status = 'synced';
       renderSheetTabs();
       renderTable();
+      // 동기화 직후 structure.observe가 한 번 더 renderTable()을 트리거해 폭이 살짝 바뀌는 경우가
+      // 있다 — 그 재렌더까지 끝날 시간(두 번의 rAF, 즉 최소 한 번의 페인트)을 준 뒤에야 화면에
+      // 드러내, 사용자가 "넓었다가 줄어드는" 깜빡임을 보지 않게 한다.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          editorHost.classList.remove('g-render-pending');
+          // 부모 창(iframe으로 이 문서를 띄운 화면)이 자신의 로딩 스피너를 이 시점까지 유지하다가
+          // 여기서 iframe으로 교체할 수 있도록 알려준다 — webviewer 자신은 스피너 UI를 새로 만들지
+          // 않는다(부모가 이미 쓰고 있는 스피너를 그대로 재사용하는 게 목적).
+          if (window.parent !== window) {
+            window.parent.postMessage({ type: 'docview:ready' }, '*');
+          }
+        });
+      });
     }
   });
   provider.awareness.on('change', () => {
@@ -164,7 +197,12 @@ async function main(): Promise<void> {
   const undoManager = new Y.UndoManager([cells, structure, styles]);
 
   let activeSheet = 0;
+  /** 마지막으로 선택(focus)된 칸 — 편집 중이 아니어도 계속 유지된다(툴바 서식 버튼이 "마지막
+   * 선택 칸"에 적용되어야 하므로). */
   let activeCellKey: string | null = null;
+  /** 지금 실제로 편집 중(contenteditable=true, 텍스트 커서 보임)인 칸. 엑셀처럼 칸을 클릭만 하면
+   * "선택"만 되고, F2·더블클릭·직접 타이핑을 해야 이 값이 채워지며 편집모드로 들어간다. */
+  let editingKey: string | null = null;
 
   // ---------- 수식 계산 엔진: '='로 시작하는 셀은 실시간으로 계산 결과를 보여준다 ----------
   // fast-formula-parser(MIT)를 쓴다 — 자체 수식 파서/계산기를 새로 만들면 SUM/IF/VLOOKUP/범위
@@ -222,7 +260,7 @@ async function main(): Promise<void> {
   /** 셀 하나를 "지금 이 셀이 포커스 중인지"에 맞춰 원본 수식 또는 계산 결과로 그린다. */
   function renderCellDisplay(td: HTMLTableCellElement, key: string): void {
     const raw = cells.get(key) ?? '';
-    if (document.activeElement === td) {
+    if (editingKey === key) {
       td.textContent = raw; // 편집 중에는 계산 결과가 아니라 실제 입력한 수식이 보여야 한다
       return;
     }
@@ -238,11 +276,13 @@ async function main(): Promise<void> {
    * (의존성 그래프 없이 "지금 그려진 수식 셀 전부 다시 계산"으로 단순하게 처리 — 편집기 규모에서
    * 충분히 빠르다). */
   function recalcFormulaCells(): void {
-    tableEl.querySelectorAll<HTMLTableCellElement>('td[contenteditable]').forEach((td) => {
-      if (document.activeElement === td) return;
+    // 합계(N열)처럼 수식이 들어있는 칸은 대개 잠겨 있어(.g-editable이 아님) 여기서 빠지면 값이
+    // 바뀌어도 화면이 갱신되지 않는다 — 잠금 여부와 무관하게 "실제 칸"이면(data-row가 있으면) 전부 훑는다.
+    tableEl.querySelectorAll<HTMLTableCellElement>('td[data-row]').forEach((td) => {
       const row = Number(td.dataset.row);
       const col = Number(td.dataset.col);
       const key = gridCellKey(activeSheet, row, col);
+      if (editingKey === key) return;
       if ((cells.get(key) ?? '').startsWith('=')) renderCellDisplay(td, key);
     });
   }
@@ -317,6 +357,64 @@ async function main(): Promise<void> {
     });
   }
 
+  function isPasteTargetEditable(row: number, col: number): boolean {
+    if (!canEdit) return false;
+    return styles.get(gridCellKey(activeSheet, row, col))?.lk !== 1;
+  }
+
+  /** 실제 엑셀에서 여러 칸을 복사해 붙여넣을 때를 처리한다. 이 <td>가 contentEditable이라 아무
+   * 처리도 안 하면 브라우저가 클립보드의 HTML(엑셀이 함께 넣어주는 <table> 조각)을 이 한 칸 안에
+   * 그대로 밀어 넣어버려 값이 한 칸에 뭉쳐 들어가거나 깨진다 — 붙여넣기를 직접 가로채
+   * 클립보드의 plain text(엑셀은 항상 탭=열, 줄바꿈=행 구분의 TSV도 같이 넣어준다)를 파싱해
+   * 시작 칸부터 각 칸에 정확히 나눠 넣는다. */
+  function handlePaste(event: ClipboardEvent, anchorTd: HTMLTableCellElement): void {
+    const text = event.clipboardData?.getData('text/plain');
+    if (!text) return;
+    event.preventDefault();
+
+    const startRow = Number(anchorTd.dataset.row);
+    const startCol = Number(anchorTd.dataset.col);
+    const rows = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    while (rows.length > 1 && rows[rows.length - 1] === '') rows.pop();
+    const grid = rows.map((line) => line.split('\t'));
+    const maxCols = Math.max(...grid.map((r) => r.length));
+
+    ydoc.transact(() => {
+      grid.forEach((values, rOffset) => {
+        values.forEach((rawValue, cOffset) => {
+          const row = startRow + rOffset;
+          const col = startCol + cOffset;
+          if (!isPasteTargetEditable(row, col)) return; // 잠긴 칸·읽기 전용 문서는 조용히 건너뛴다
+          const key = gridCellKey(activeSheet, row, col);
+          const value = rawValue.trim();
+          if (styles.get(key)?.nu === 1 && value !== '' && !NUMERIC_VALUE.test(value)) return; // 숫자 전용 칸에 숫자가 아니면 건너뜀
+          if (value === '') cells.delete(key);
+          else cells.set(key, value);
+        });
+      });
+      const s = currentStructure();
+      const maxRow = startRow + grid.length - 1;
+      const maxCol = startCol + maxCols - 1;
+      if (maxRow >= s.rowCount || maxCol >= s.colCount) {
+        structure.set(String(activeSheet), {
+          ...s,
+          rowCount: Math.max(s.rowCount, maxRow + 1),
+          colCount: Math.max(s.colCount, maxCol + 1),
+        });
+      }
+    });
+
+    grid.forEach((values, rOffset) => {
+      values.forEach((_value, cOffset) => {
+        const row = startRow + rOffset;
+        const col = startCol + cOffset;
+        const targetTd = tdFor(row, col);
+        if (targetTd) renderCellDisplay(targetTd, gridCellKey(activeSheet, row, col));
+      });
+    });
+    recalcFormulaCells();
+  }
+
   /** 데이터가 있는 범위 너머로도 빈 칸을 넉넉히 그려서, 실제 엑셀처럼 "빈 시트도 격자가 있는"
    * 느낌을 준다 — 그 빈 칸에 입력하면 commitCell이 자동으로 범위를 넓혀준다. */
   const GRID_ROW_PADDING = 15;
@@ -348,6 +446,10 @@ async function main(): Promise<void> {
   }
 
   function renderTable(): void {
+    renderGeneration += 1;
+    // 다시 그리면 이전 <td>들은 전부 버려지므로, 그 순간 실제로 "편집 중"이던 칸도 이제 없다 —
+    // blur가 안전하게 안 오는 경우에도(과거 stale-blur 버그) 여기서 확실히 리셋해 둔다.
+    editingKey = null;
     const sheet = structure.get(String(activeSheet));
     tableEl.replaceChildren();
     if (!sheet) return;
@@ -361,11 +463,19 @@ async function main(): Promise<void> {
 
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
-    headRow.appendChild(document.createElement('th'));
+    headRow.style.position = 'relative';
+    headRow.style.zIndex = '3';
+    const cornerTh = document.createElement('th');
+    // table-layout:fixed는 "첫 번째 행"의 셀 너비로 각 열 너비를 확정한다 — 행번호 열의 실제 좁은
+    // 너비(.g-edit-rownum)를 적용하려면 헤더 행의 이 모서리 칸도 같은 클래스를 받아야 한다. 이걸
+    // 빼먹으면 이 칸이 일반 칸 min-width(100px)를 그대로 물려받아 행번호 열 전체가 넓어져 버린다.
+    cornerTh.className = 'g-edit-rownum';
+    headRow.appendChild(cornerTh);
     for (let c = 0; c < renderColCount; c += 1) {
       const th = document.createElement('th');
       th.textContent = colLetter(c);
       th.dataset.col = String(c);
+      th.addEventListener('click', () => selectColumn(c));
       headRow.appendChild(th);
     }
     thead.appendChild(headRow);
@@ -374,10 +484,17 @@ async function main(): Promise<void> {
     const tbody = document.createElement('tbody');
     for (let r = 0; r < renderRowCount; r += 1) {
       const tr = document.createElement('tr');
+      // Chromium은 서로 다른 <tr> 소속인 position:sticky 셀들 사이의 z-index 비교를 신뢰할 수 없게
+      // 처리한다(고정된 행의 배경보다 스크롤된 다른 행의 셀이 위로 그려지는 버그) — 각 행을
+      // position+z-index로 그 자체의 스태킹 컨텍스트로 격리하면, 셀별 z-index는 그 행 안에서만
+      // 비교되고 행 간 우열은 이 tr의 z-index로만 결정되어 늘 정확하다.
+      tr.style.position = 'relative';
+      tr.style.zIndex = r < freezeRows ? '2' : '1';
       const rowHead = document.createElement('th');
       rowHead.className = 'g-edit-rownum';
       rowHead.textContent = String(r + 1);
       rowHead.dataset.row = String(r);
+      rowHead.addEventListener('click', () => selectRow(r));
       tr.appendChild(rowHead);
       for (let c = 0; c < renderColCount; c += 1) {
         if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커 쪽에서 colspan/rowspan으로 대신 차지한다
@@ -389,7 +506,16 @@ async function main(): Promise<void> {
           if (span.cs > 1) td.colSpan = span.cs;
         }
         const isLocked = styles.get(key)?.lk === 1;
-        td.contentEditable = isLocked ? 'false' : 'true';
+        const canEditThisCell = !isLocked && canEdit;
+        // 클릭만으로는 "선택"만 되고 편집모드로 들어가지 않는다(엑셀과 동일) — 실제 편집모드는
+        // enterEditMode()가 필요할 때만 이 값을 'true'로 바꾼다. 잠긴 칸/읽기전용 문서는 애초에
+        // canEditThisCell이 false라 keydown 핸들러가 편집 진입 자체를 막는다.
+        td.contentEditable = 'false';
+        // 잠긴 칸도 화살표 키로 지나가거나 선택해서 볼 수 있어야 하므로(엑셀도 보호된 칸을 선택은
+        // 할 수 있음) 편집 가능 여부와 무관하게 모든 칸을 포커스 가능하게 만든다. tabIndex=-1은 Tab
+        // 키 순서에는 안 끼지만 클릭·프로그램적 focus()는 그대로 받는다.
+        td.tabIndex = -1;
+        if (canEditThisCell) td.classList.add('g-editable');
         td.dataset.row = String(r);
         td.dataset.col = String(c);
         // 엑셀 "틀 고정" — 위 N행/왼쪽 N열은 스크롤해도 계속 보여야 한다. 실제 sticky 좌표(top/left)는
@@ -398,11 +524,17 @@ async function main(): Promise<void> {
         if (c < freezeCols) td.classList.add('g-frozen-col');
         renderCellDisplay(td, key);
         applyStyleToTd(td, styles.get(key));
-        // 잠겨 있으면서 여러 칸을 병합한(제목 배너 같은) 셀은 클릭 시 부모 창(이 문서를 iframe으로
-        // 임베드한 화면)에 알림만 보낸다 — 무엇을 보여줄지(예: 연도 목록 드롭다운)는 전적으로 부모
-        // 쪽 책임이다. webviewer 자신은 "연도"/"이력" 같은 특정 문서의 의미를 전혀 알 필요가 없다.
-        if (isLocked && span && span.cs > 1) {
+        // 잠겨 있으면서 맨 위 행에 있고 내용이 실제로 있는 칸(제목 배너, "조회쿼리" 버튼 등)은 클릭
+        // 시 부모 창(이 문서를 iframe으로 임베드한 화면)에 알림만 보낸다 — 무엇을 보여줄지(예: 연도
+        // 목록 드롭다운, 쿼리 팝업)는 전적으로 부모 쪽 책임이다. webviewer 자신은 "연도"/"쿼리" 같은
+        // 특정 문서의 의미를 전혀 알 필요가 없고, 클릭된 칸의 위치·텍스트만 그대로 전달한다.
+        const hasContent = (cells.get(key) ?? '').trim() !== '';
+        if (isLocked && r === 0 && hasContent) {
           td.classList.add('g-clickable-header');
+          // 맨 왼쪽(제목 배너)만 "목록에서 고른다"는 의미의 드롭다운 화살표를 보여준다 — 그 옆의
+          // 다른 클릭 가능한 칸(조회쿼리 버튼 등)은 텍스트 자체에 "(클릭)"을 넣어 알려주므로
+          // 화살표가 필요 없다.
+          if (c === 0) td.classList.add('g-header-dropdown');
           td.addEventListener('click', () => {
             if (window.parent !== window) {
               // 셀의 화면상 위치(이 iframe 안에서의 좌표)를 같이 보내, 부모 쪽이 임베드한 iframe의
@@ -412,6 +544,9 @@ async function main(): Promise<void> {
               window.parent.postMessage(
                 {
                   type: 'docview:title-click',
+                  row: r,
+                  col: c,
+                  text: cells.get(key) ?? '',
                   rect: { top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height },
                 },
                 '*',
@@ -419,31 +554,46 @@ async function main(): Promise<void> {
             }
           });
         }
-        if (!isLocked) {
-          td.addEventListener('focus', () => {
-            activeCellKey = key;
-            provider.awareness.setLocalStateField('cell', { sheetIdx: activeSheet, row: r, col: c });
-            syncCellToolbarState(key);
-            setActiveHeaders(r, c);
-            cellRefBoxEl.textContent = cellRefLabel(r, c);
-            formulaInputEl.value = cells.get(key) ?? '';
-            renderCellDisplay(td, key); // 편집 모드로 진입 — 계산 결과 대신 원본 수식/값을 보여준다
-          });
+        const cellGeneration = renderGeneration;
+
+        // 포커스 = "선택"이다(엑셀처럼 클릭 한 번은 선택만, 편집모드가 아님) — 잠긴 칸도 포함해
+        // 모든 칸에 건다. 편집 가능한 칸일 때만 채우기 핸들을 그 칸 오른쪽 아래에 놓는다.
+        td.addEventListener('focus', () => {
+          activeCellKey = key;
+          syncCellToolbarState(key);
+          setActiveHeaders(r, c);
+          cellRefBoxEl.textContent = cellRefLabel(r, c);
+          formulaInputEl.value = cells.get(key) ?? '';
+          positionFillHandle(canEditThisCell ? td : null);
+        });
+        td.addEventListener('blur', () => {
+          if (editingKey !== key) return; // 편집 중이 아니었으면(그냥 선택만) 커밋할 것이 없다
+          // 붙여넣기/자동채우기로 시트 범위(rowCount/colCount)가 늘어나면 renderTable()이 트랜잭션
+          // 도중 동기적으로 표 전체를 다시 그리며 이 <td>를 DOM에서 떼어내는데, 포커스가 있던 칸이
+          // 떨어져 나가면 브라우저가 blur를 보낸다 — 그 시점의 td.textContent는 그 작업 "전" 값이라,
+          // 그대로 commitCell을 부르면 방금 쓴 값을 덮어써 버린다. 제거 시점과 blur 디스패치 시점이
+          // 완전히 동기적이진 않아 isConnected만으로는 못 거르므로, "이 칸이 만들어진 세대"가 지금도
+          // 최신인지로 판정한다.
+          if (cellGeneration !== renderGeneration) {
+            editingKey = null;
+            provider.awareness.setLocalStateField('cell', null);
+            return;
+          }
+          commitCell(td);
+          editingKey = null;
+          provider.awareness.setLocalStateField('cell', null);
+          td.contentEditable = 'false';
+          renderCellDisplay(td, key); // 편집 종료 — 수식이면 계산 결과로 되돌린다
+          recalcFormulaCells(); // 이 셀 값이 바뀌었으니 이를 참조하는 다른 수식 셀도 갱신
+        });
+        if (canEditThisCell) {
+          td.addEventListener('dblclick', () => enterEditMode(td, key));
           td.addEventListener('input', () => {
             if (activeCellKey === key) formulaInputEl.value = td.textContent ?? '';
           });
-          td.addEventListener('blur', () => {
-            commitCell(td);
-            renderCellDisplay(td, key); // 편집 종료 — 수식이면 계산 결과로 되돌린다
-            recalcFormulaCells(); // 이 셀 값이 바뀌었으니 이를 참조하는 다른 수식 셀도 갱신
-          });
-          td.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              td.blur();
-            }
-          });
+          td.addEventListener('paste', (event) => handlePaste(event, td));
         }
+        td.addEventListener('keydown', (event) => handleCellKeydown(event, td, r, c, key, canEditThisCell));
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -453,9 +603,270 @@ async function main(): Promise<void> {
     renderRemoteCellHighlights();
     if (activeCellKey) {
       const parsed = parseGridCellKey(activeCellKey);
-      if (parsed && parsed.sheetIdx === activeSheet) setActiveHeaders(parsed.row, parsed.col);
+      // 실제 DOM 포커스를 같은 칸의 새 <td>로 되돌린다 — focus 이벤트가 setActiveHeaders/채우기
+      // 핸들 위치 재계산까지 같이 해 준다. 재렌더로 그 칸이 더 이상 없으면(시트 전환 등) 그냥 둔다.
+      if (parsed && parsed.sheetIdx === activeSheet) tdFor(parsed.row, parsed.col)?.focus({ preventScroll: true });
     }
   }
+
+  // ---------- 셀 선택 vs 편집모드, 방향키 이동 (엑셀과 동일하게) ----------
+  // 칸을 클릭하면(focus) "선택"만 된다 — contenteditable은 여전히 false다. 실제로 값을 고칠 수
+  // 있으려면(1) F2, (2) 더블클릭, (3) 선택된 채로 문자를 바로 타이핑, 셋 중 하나로 편집모드에
+  // 들어가야 한다. 편집모드에서 Enter/Tab은 커밋 후 아래/오른쪽 칸으로 넘어가고, Escape는 원래
+  // 값으로 되돌리고 선택 상태로만 남는다.
+
+  function placeCaretAtEnd(el: HTMLElement): void {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }
+
+  function enterEditMode(td: HTMLTableCellElement, key: string, replaceWith?: string): void {
+    if (!td.classList.contains('g-editable')) return; // 잠긴 칸/읽기전용 문서는 편집모드 자체가 없다
+    editingKey = key;
+    const parsed = parseGridCellKey(key);
+    if (parsed) provider.awareness.setLocalStateField('cell', parsed); // "지금 편집 중" — 다른 참여자에게 표시
+    td.contentEditable = 'true';
+    td.textContent = replaceWith !== undefined ? replaceWith : cells.get(key) ?? '';
+    td.focus();
+    placeCaretAtEnd(td);
+    formulaInputEl.value = td.textContent ?? '';
+  }
+
+  function commitAndMove(td: HTMLTableCellElement, key: string, row: number, col: number, dRow: number, dCol: number): void {
+    commitCell(td);
+    editingKey = null;
+    provider.awareness.setLocalStateField('cell', null);
+    td.contentEditable = 'false';
+    renderCellDisplay(td, key);
+    recalcFormulaCells();
+    moveSelection(row, col, dRow, dCol);
+  }
+
+  function cancelEdit(td: HTMLTableCellElement, key: string): void {
+    editingKey = null;
+    provider.awareness.setLocalStateField('cell', null);
+    td.contentEditable = 'false';
+    renderCellDisplay(td, key); // 원래 값(수정 전)으로 되돌린다
+    td.focus();
+  }
+
+  /** 지금 칸에서 (dRow,dCol)만큼 떨어진 칸으로 선택을 옮긴다. 병합에 덮여 실제 <td>가 없는
+   * 칸이면(예: 1행 제목 병합) 같은 방향으로 한 칸씩 더 건너뛴다. 시트 렌더 범위 끝에 닿으면 멈춘다. */
+  function moveSelection(fromRow: number, fromCol: number, dRow: number, dCol: number): void {
+    const sheet = currentStructure();
+    const rowCount = Math.max(sheet.rowCount + GRID_ROW_PADDING, GRID_MIN_RENDER_ROWS);
+    const colCount = Math.max(sheet.colCount + GRID_COL_PADDING, GRID_MIN_RENDER_COLS);
+    let row = fromRow;
+    let col = fromCol;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const nextRow = Math.min(Math.max(row + dRow, 0), rowCount - 1);
+      const nextCol = Math.min(Math.max(col + dCol, 0), colCount - 1);
+      if (nextRow === row && nextCol === col) return; // 끝에 닿아 더 못 감
+      row = nextRow;
+      col = nextCol;
+      const targetTd = tdFor(row, col);
+      if (targetTd) {
+        targetTd.focus();
+        targetTd.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+    }
+  }
+
+  function handleCellKeydown(
+    event: KeyboardEvent,
+    td: HTMLTableCellElement,
+    row: number,
+    col: number,
+    key: string,
+    canEditThisCell: boolean,
+  ): void {
+    if (editingKey === key) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commitAndMove(td, key, row, col, 1, 0);
+      } else if (event.key === 'Tab') {
+        event.preventDefault();
+        commitAndMove(td, key, row, col, 0, event.shiftKey ? -1 : 1);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        cancelEdit(td, key);
+      }
+      return; // 다른 키(화살표 등)는 텍스트 커서 이동 등 브라우저 기본 동작 그대로 둔다
+    }
+
+    switch (event.key) {
+      case 'F2':
+        if (canEditThisCell) {
+          event.preventDefault();
+          enterEditMode(td, key);
+        }
+        break;
+      case 'Enter':
+        event.preventDefault();
+        moveSelection(row, col, 1, 0);
+        break;
+      case 'Tab':
+        event.preventDefault();
+        moveSelection(row, col, 0, event.shiftKey ? -1 : 1);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        moveSelection(row, col, -1, 0);
+        break;
+      case 'ArrowDown':
+        event.preventDefault();
+        moveSelection(row, col, 1, 0);
+        break;
+      case 'ArrowLeft':
+        event.preventDefault();
+        moveSelection(row, col, 0, -1);
+        break;
+      case 'ArrowRight':
+        event.preventDefault();
+        moveSelection(row, col, 0, 1);
+        break;
+      case 'Delete':
+      case 'Backspace':
+        if (canEditThisCell && (cells.get(key) ?? '') !== '') {
+          event.preventDefault();
+          ydoc.transact(() => cells.delete(key));
+        }
+        break;
+      default:
+        // 선택된 채로 문자를 바로 치면(엑셀처럼) 기존 값을 지우고 그 문자로 편집모드에 들어간다.
+        if (canEditThisCell && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          event.preventDefault();
+          enterEditMode(td, key, event.key);
+        }
+    }
+  }
+
+  // ---------- 자동 채우기 핸들 (드래그로 값 복사, 엑셀과 동일) ----------
+  const FILL_HANDLE_SIZE = 7;
+  const fillHandleEl = document.createElement('div');
+  fillHandleEl.className = 'g-fill-handle';
+  fillHandleEl.hidden = true;
+  scrollHostEl.appendChild(fillHandleEl);
+
+  /** 지금 선택된 칸(td)의 오른쪽 아래 모서리에 채우기 핸들을 옮겨 놓는다. 편집 불가한 칸이 선택되면
+   * 숨긴다. scrollHostEl의 스크롤 콘텐츠 안에 핸들이 같이 들어있으므로 스크롤해도 같이 움직인다. */
+  function positionFillHandle(td: HTMLTableCellElement | null): void {
+    if (!td) {
+      fillHandleEl.hidden = true;
+      return;
+    }
+    const tdRect = td.getBoundingClientRect();
+    const hostRect = scrollHostEl.getBoundingClientRect();
+    fillHandleEl.style.left = `${tdRect.right - hostRect.left + scrollHostEl.scrollLeft - FILL_HANDLE_SIZE / 2}px`;
+    fillHandleEl.style.top = `${tdRect.bottom - hostRect.top + scrollHostEl.scrollTop - FILL_HANDLE_SIZE / 2}px`;
+    fillHandleEl.hidden = false;
+  }
+
+  let fillSource: { row: number; col: number; key: string } | null = null;
+  let fillTargetRow = 0;
+  let fillTargetCol = 0;
+
+  /** 드래그로 지나간 칸들(시작 칸 제외)에 한 번씩 콜백을 호출한다 — 세로/가로 중 더 크게 움직인
+   * 한 방향으로만 채워진다(엑셀 자동 채우기와 동일하게 대각선으로는 안 채워짐). */
+  function forEachFillCell(fn: (row: number, col: number) => void): void {
+    if (!fillSource) return;
+    const r0 = Math.min(fillSource.row, fillTargetRow);
+    const r1 = Math.max(fillSource.row, fillTargetRow);
+    const c0 = Math.min(fillSource.col, fillTargetCol);
+    const c1 = Math.max(fillSource.col, fillTargetCol);
+    for (let r = r0; r <= r1; r += 1) {
+      for (let c = c0; c <= c1; c += 1) {
+        if (r === fillSource.row && c === fillSource.col) continue;
+        fn(r, c);
+      }
+    }
+  }
+
+  function clearFillPreview(): void {
+    tableEl.querySelectorAll('.g-fill-preview').forEach((el) => el.classList.remove('g-fill-preview'));
+  }
+
+  function onFillDragMove(event: MouseEvent): void {
+    if (!fillSource) return;
+    const el = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+    const td = el?.closest('td[data-row][data-col]') as HTMLTableCellElement | null;
+    if (!td) return;
+    const row = Number(td.dataset.row);
+    const col = Number(td.dataset.col);
+    const dRow = row - fillSource.row;
+    const dCol = col - fillSource.col;
+    if (Math.abs(dRow) >= Math.abs(dCol)) {
+      fillTargetRow = row;
+      fillTargetCol = fillSource.col;
+    } else {
+      fillTargetRow = fillSource.row;
+      fillTargetCol = col;
+    }
+    clearFillPreview();
+    forEachFillCell((r, c) => tdFor(r, c)?.classList.add('g-fill-preview'));
+  }
+
+  function onFillDragEnd(): void {
+    document.removeEventListener('mousemove', onFillDragMove);
+    document.removeEventListener('mouseup', onFillDragEnd);
+    clearFillPreview();
+    // forEachFillCell이 module 범위의 fillSource를 그대로 읽으므로, 실제 작업이 끝나기 전까지는
+    // null로 되돌리면 안 된다(먼저 비우면 forEachFillCell이 바로 빈 채로 리턴해버려 아무 칸도
+    // 못 채운다) — 다 쓰고 나서 맨 마지막에만 정리한다.
+    if (!fillSource || !canEdit) {
+      fillSource = null;
+      return;
+    }
+    const sourceRow = fillSource.row;
+    const sourceCol = fillSource.col;
+    const sourceValue = cells.get(fillSource.key) ?? '';
+    const touched: Array<{ r: number; c: number }> = [];
+    ydoc.transact(() => {
+      forEachFillCell((r, c) => {
+        const key = gridCellKey(activeSheet, r, c);
+        const targetStyle = styles.get(key);
+        if (targetStyle?.lk === 1) return; // 잠긴 칸은 건너뜀
+        if (targetStyle?.nu === 1 && sourceValue !== '' && !NUMERIC_VALUE.test(sourceValue)) return; // 숫자 전용 칸에 숫자가 아니면 건너뜀
+        if (sourceValue === '') cells.delete(key);
+        else cells.set(key, sourceValue);
+        touched.push({ r, c });
+      });
+      const s = currentStructure();
+      const maxRow = Math.max(sourceRow, fillTargetRow);
+      const maxCol = Math.max(sourceCol, fillTargetCol);
+      if (maxRow >= s.rowCount || maxCol >= s.colCount) {
+        structure.set(String(activeSheet), {
+          ...s,
+          rowCount: Math.max(s.rowCount, maxRow + 1),
+          colCount: Math.max(s.colCount, maxCol + 1),
+        });
+      }
+    });
+    touched.forEach(({ r, c }) => {
+      const td = tdFor(r, c);
+      if (td) renderCellDisplay(td, gridCellKey(activeSheet, r, c));
+    });
+    recalcFormulaCells();
+    fillSource = null;
+  }
+
+  fillHandleEl.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!activeCellKey) return;
+    const parsed = parseGridCellKey(activeCellKey);
+    if (!parsed) return;
+    fillSource = { row: parsed.row, col: parsed.col, key: activeCellKey };
+    fillTargetRow = parsed.row;
+    fillTargetCol = parsed.col;
+    document.addEventListener('mousemove', onFillDragMove);
+    document.addEventListener('mouseup', onFillDragEnd);
+  });
 
   /**
    * 위 freezeRows행 / 왼쪽 freezeCols열을 실제로 sticky 처리한다. 렌더링 직후 DOM에 실제로 붙은
@@ -510,9 +921,32 @@ async function main(): Promise<void> {
   }
   function setActiveHeaders(row: number, col: number): void {
     clearActiveHeaders();
+    clearHeaderSelection();
     tableEl.querySelector(`thead th[data-col="${col}"]`)?.classList.add('g-col-active');
     tableEl.querySelector(`tbody th[data-row="${row}"]`)?.classList.add('g-row-active');
   }
+
+  // 열/행 머리글(A, 1 등)을 직접 클릭했을 때 — 엑셀처럼 그 열/행 전체를 선택 표시한다.
+  function clearHeaderSelection(): void {
+    tableEl.querySelectorAll('.g-col-selected, .g-row-selected').forEach((el) => {
+      el.classList.remove('g-col-selected', 'g-row-selected');
+    });
+  }
+  function selectColumn(col: number): void {
+    clearActiveHeaders();
+    clearHeaderSelection();
+    tableEl.querySelectorAll(`[data-col="${col}"]`).forEach((el) => el.classList.add('g-col-selected'));
+  }
+  function selectRow(row: number): void {
+    clearActiveHeaders();
+    clearHeaderSelection();
+    tableEl.querySelectorAll(`[data-row="${row}"]`).forEach((el) => el.classList.add('g-row-selected'));
+  }
+  // 잠긴 칸은 focus 리스너 자체가 안 붙으므로(편집 불가) setActiveHeaders를 못 거친다 — 어떤 칸을
+  // 클릭하든(잠금 여부와 무관하게) 열/행 전체 선택 표시는 항상 풀리도록 여기서 한 번 더 잡는다.
+  tableEl.addEventListener('click', (event) => {
+    if ((event.target as HTMLElement).tagName === 'TD') clearHeaderSelection();
+  });
 
   // 셀 편집 영역을 완전히 벗어날 때만(다른 셀로 이동하는 경우는 제외) awareness의 cell을 지운다 —
   // focusout은 버블링되므로 표 전체에 한 번만 걸어 둔다.
@@ -566,7 +1000,9 @@ async function main(): Promise<void> {
       const parsed = parseGridCellKey(key);
       if (!parsed || parsed.sheetIdx !== activeSheet) continue;
       const td = tdFor(parsed.row, parsed.col);
-      if (!td || document.activeElement === td) continue; // 로컬에서 입력 중인 셀은 원격 갱신으로 덮지 않는다
+      // 선택만 된 칸(편집 중 아님)은 이제 원격 갱신을 그대로 반영해도 된다 — 실제로 로컬에서
+      // 타이핑 중인 칸(editingKey === key)만 덮지 않는다. (선택=focus일 뿐 편집과는 분리됐다.)
+      if (!td || editingKey === key) continue;
       const value = cells.get(key) ?? '';
       renderCellDisplay(td, key);
       applyStyleToTd(td, styles.get(key));
@@ -580,7 +1016,7 @@ async function main(): Promise<void> {
       const parsed = parseGridCellKey(key);
       if (!parsed || parsed.sheetIdx !== activeSheet) continue;
       const td = tdFor(parsed.row, parsed.col);
-      if (!td || document.activeElement === td) continue;
+      if (!td || editingKey === key) continue;
       applyStyleToTd(td, styles.get(key));
     }
   });

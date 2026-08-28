@@ -9,7 +9,16 @@ import {
   encodeAwarenessUpdate,
   removeAwarenessStates,
 } from 'y-protocols/awareness';
-import { readSyncMessage, writeSyncStep1, writeUpdate } from 'y-protocols/sync';
+import {
+  messageYjsSyncStep1,
+  messageYjsSyncStep2,
+  messageYjsUpdate,
+  readSyncStep1,
+  readSyncStep2,
+  readUpdate,
+  writeSyncStep1,
+  writeUpdate,
+} from 'y-protocols/sync';
 import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror';
 import { recordAudit } from '../audit.js';
 import { findConverter } from '../converters/index.js';
@@ -58,6 +67,12 @@ interface Room {
   readonly awareness: Awareness;
   /** 연결 → 그 연결이 소유한(생성한) awareness clientId 집합 */
   readonly conns: Map<WebSocket, Set<number>>;
+  /** 읽기 전용(canEdit:false)으로 참여한 연결 — 이 연결이 보낸 syncStep2/update는 무시한다.
+   *  syncStep1(자기 상태 벡터를 보내고 서버 diff를 요청하는 것뿐)은 그대로 응답해야 문서 내용을
+   *  받을 수 있으므로 막지 않는다 — 실제 "쓰기"에 해당하는 메시지만 서버에서 직접 걸러낸다
+   *  (클라이언트 쪽에서 편집 UI를 숨기는 것과 별개로, 조작된 소켓 메시지로 과거 연도 데이터가
+   *  바뀌는 일을 서버에서 원천 차단한다). */
+  readonly readOnlyConns: Set<WebSocket>;
   autosaveTimer: NodeJS.Timeout | null;
   /** 문서 시딩(원본 → Y.Doc)이 끝났는지 — 첫 연결에 syncStep1을 보내기 전에 기다린다 */
   readonly ready: Promise<void>;
@@ -171,6 +186,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     ydoc,
     awareness,
     conns,
+    readOnlyConns: new Set<WebSocket>(),
     autosaveTimer: null,
     ready: seedRoom(docId, kind, ydoc),
   };
@@ -207,6 +223,7 @@ function closeConn(room: Room, conn: WebSocket): void {
   const controlled = room.conns.get(conn);
   if (controlled) {
     room.conns.delete(conn);
+    room.readOnlyConns.delete(conn);
     removeAwarenessStates(room.awareness, [...controlled], null);
     if (room.conns.size === 0) {
       if (room.autosaveTimer) {
@@ -235,7 +252,20 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
     switch (messageType) {
       case MESSAGE_SYNC: {
         encoding.writeVarUint(encoder, MESSAGE_SYNC);
-        readSyncMessage(decoder, encoder, room.ydoc, conn);
+        // syncStep1은 "내 상태 벡터를 보낼 테니 diff를 달라"는 읽기 요청이라 읽기 전용 연결도
+        // 반드시 처리해야 문서 내용을 받는다 — syncStep2/update만 실제 쓰기이므로 읽기 전용
+        // 연결에서 온 것이면 조용히 버린다(클라이언트를 신뢰하지 않고 서버가 직접 막는다).
+        const syncMessageType = decoding.readVarUint(decoder);
+        const readOnly = room.readOnlyConns.has(conn);
+        if (syncMessageType === messageYjsSyncStep1) {
+          readSyncStep1(decoder, encoder, room.ydoc);
+        } else if (!readOnly) {
+          if (syncMessageType === messageYjsSyncStep2) {
+            readSyncStep2(decoder, room.ydoc, conn);
+          } else if (syncMessageType === messageYjsUpdate) {
+            readUpdate(decoder, room.ydoc, conn);
+          }
+        }
         if (encoding.length(encoder) > 1) send(room, conn, encoding.toUint8Array(encoder));
         break;
       }
@@ -275,11 +305,13 @@ export async function joinEditSession(
   docId: string,
   docExt: string,
   earlyMessages: ReadonlyArray<ArrayBuffer | Buffer> = [],
+  readOnly = false,
 ): Promise<void> {
   const room = getOrCreateRoom(docId, docExt);
 
   socket.binaryType = 'arraybuffer';
   room.conns.set(socket, new Set());
+  if (readOnly) room.readOnlyConns.add(socket);
 
   let seeded = false;
   const pendingMessages: Uint8Array[] = earlyMessages.map(toUint8Array);

@@ -227,12 +227,17 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
         viewer,
         detail: `print=${canPrint} download=${canDownload} copy=${canCopy} edit=${effectiveCanEdit}`,
       });
+      // 그리드(xlsx) 편집기는 canEdit:false여도 읽기 전용으로 그대로 열 수 있다(collab/room.ts가
+      // 그 연결의 실제 쓰기를 서버에서 막는다) — 과거 연도 접속현황처럼 "현재 연도와 같은 화면인데
+      // 손은 못 대는" 문서가 이 편집기를 그대로 재사용할 수 있게, xlsx는 편집 권한과 무관하게 항상
+      // editorUrl을 내려준다. docx는 editor.ts가 아직 읽기 전용을 지원하지 않아 기존대로 둔다.
+      const isGrid = meta.ext === 'xlsx';
       return {
         success: true,
         data: {
           token,
           viewerUrl: `/viewer.html?token=${encodeURIComponent(token)}`,
-          editorUrl: effectiveCanEdit
+          editorUrl: effectiveCanEdit || isGrid
             ? `${editorPathFor(meta.ext)}?token=${encodeURIComponent(token)}`
             : undefined,
           expiresInSeconds: config.tokenTtlSeconds,

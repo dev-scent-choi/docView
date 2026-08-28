@@ -56,13 +56,6 @@ export async function editRoutes(app: FastifyInstance): Promise<void> {
         throw error;
       }
 
-      if (!claims.perms.canEdit) {
-        socket.off('message', queueEarly);
-        await recordAudit({ type: 'edit_denied', docId: claims.docId, viewer: claims.viewer });
-        socket.close(4403, '편집 권한이 없습니다.');
-        return;
-      }
-
       const meta = await store.readMeta(claims.docId);
       if (!meta || meta.status !== 'ready') {
         socket.off('message', queueEarly);
@@ -70,9 +63,18 @@ export async function editRoutes(app: FastifyInstance): Promise<void> {
         return;
       }
 
-      await recordAudit({ type: 'edit_joined', docId: claims.docId, viewer: claims.viewer });
+      // canEdit:false여도 방에는 들어온다(과거 연도 접속현황처럼 "편집기와 똑같은 화면으로,
+      // 다만 조작은 못 하게" 보여줘야 하는 읽기 전용 뷰가 필요해졌다) — 실제 쓰기 차단은
+      // joinEditSession/handleMessage가 이 연결을 읽기 전용으로 표시해 서버 쪽에서 직접 막는다
+      // (클라이언트 UI가 편집을 숨기는 것과는 별개의, 신뢰할 수 있는 방어선).
+      const readOnly = !claims.perms.canEdit;
+      await recordAudit({
+        type: readOnly ? 'edit_joined_readonly' : 'edit_joined',
+        docId: claims.docId,
+        viewer: claims.viewer,
+      });
       socket.off('message', queueEarly);
-      await joinEditSession(socket, request.raw, claims.docId, meta.ext, earlyMessages);
+      await joinEditSession(socket, request.raw, claims.docId, meta.ext, earlyMessages, readOnly);
     },
   );
 }

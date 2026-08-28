@@ -815,6 +815,7 @@ body.chrome-hidden .grid-editor-surface { margin: 0; border-radius: 0; border: n
 body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; border-radius: 0; box-shadow: none; }
 
 .grid-editor-surface {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -827,7 +828,13 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   box-shadow: var(--shadow-page);
 }
 
-.grid-editor-scroll { flex: 1; min-height: 0; overflow: auto; }
+.grid-editor-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; }
+
+/* 최초 동기화 도중 테이블이 임시 폭으로 한 번 그려졌다가 실제 데이터로 다시 그려지며 폭이 바뀌는
+   깜빡임을 감춘다 — 이 상태에서 무엇을 보여줄지(스피너 등)는 부모 창(maintenance-management)의
+   책임이다: 부모는 이 iframe이 "docview:ready"를 보내기 전까지 자신이 이미 쓰던 로딩 스피너를
+   그대로 띄워 놓고, iframe은 그 뒤에서 조용히 준비된다. */
+.grid-editor-surface.g-render-pending .grid-editor-scroll { visibility: hidden; }
 
 /* ---------- 수식 입력줄 (이름 상자 + fx + 셀 내용) — 스프레드시트임을 가장 먼저 알려주는 요소 ---------- */
 .formula-bar {
@@ -880,7 +887,10 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 .formula-input:focus { background: var(--v-accent-soft); }
 
 .grid-edit-table {
-  border-collapse: collapse;
+  /* collapse는 position:sticky인 td/th의 페인트 순서를 브라우저마다 다르게 깨뜨린다(스크롤된
+     일반 셀이 sticky 고정 행/열 위로 잘못 그려지는 버그) — separate + 자체 border로 우회한다. */
+  border-collapse: separate;
+  border-spacing: 0;
   table-layout: fixed;
   font-size: 0.82rem;
 }
@@ -889,49 +899,65 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 .grid-edit-table td {
   /* 실제 엑셀의 기본 격자선(연한 회색, 실선)과 동일하게 — 이 앱의 따뜻한 톤 팔레트가 아니라
      중립 회색을 직접 쓴다(엑셀 격자선은 브랜드 색과 무관하게 항상 이 톤이라야 "엑셀 같다"). */
-  border: 1px solid #d4d4d4;
+  border-right: 1px solid #d4d4d4;
+  border-bottom: 1px solid #d4d4d4;
   min-width: 100px;
   padding: 0.18rem 0.4rem;
   box-sizing: border-box;
   height: 1.7rem;
 }
 
+.grid-edit-table tr:first-child th,
+.grid-edit-table tr:first-child td {
+  border-top: 1px solid #d4d4d4;
+}
+
+.grid-edit-table th:first-child,
+.grid-edit-table td:first-child {
+  border-left: 1px solid #d4d4d4;
+}
+
 .grid-edit-table thead th {
   position: sticky;
   top: 0;
-  background: var(--v-glass);
-  color: var(--v-text-dim);
+  /* 앱의 따뜻한 톤이 아니라 실제 엑셀 열/행 머리글과 동일한 중립 회색 배경+글자색을 그대로 쓴다. */
+  background: #f2f2f2;
+  color: #616161;
   font-family: var(--font-mono);
   font-size: 0.72rem;
   font-weight: 600;
   transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
   z-index: 2;
+  /* 엑셀처럼 열 머리글 위에 커서를 올리면 "이 열을 선택" 아래쪽 화살표로 바뀐다. */
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpolygon points='2,3 14,3 8,13' fill='%23000000' stroke='%23ffffff' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, pointer;
 }
 .grid-edit-table thead th.g-col-active {
-  background: color-mix(in srgb, var(--v-accent) 22%, var(--v-glass));
+  background: color-mix(in srgb, var(--v-accent) 22%, #f2f2f2);
   color: var(--v-accent);
 }
 
 .grid-edit-table .g-edit-rownum {
   position: sticky;
   left: 0;
-  background: var(--v-glass);
-  color: var(--v-text-dim);
+  background: #f2f2f2;
+  color: #616161;
   font-family: var(--font-mono);
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
   text-align: center;
-  min-width: 40px;
+  min-width: 28px;
   transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
   z-index: 1;
+  /* 엑셀처럼 행 머리글 위에 커서를 올리면 "이 행을 선택" 오른쪽 화살표로 바뀐다. */
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpolygon points='3,2 3,14 13,8' fill='%23000000' stroke='%23ffffff' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, pointer;
 }
 .grid-edit-table .g-edit-rownum.g-row-active {
-  background: color-mix(in srgb, var(--v-accent) 22%, var(--v-glass));
+  background: color-mix(in srgb, var(--v-accent) 22%, #f2f2f2);
   color: var(--v-accent);
   font-weight: 700;
 }
 
-.grid-edit-table td[contenteditable] {
+.grid-edit-table td.g-editable {
   position: relative;
   color: var(--v-text);
   outline: none;
@@ -941,27 +967,53 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   text-overflow: ellipsis;
   transition: box-shadow var(--duration-fast) ease;
 }
-.grid-edit-table td[contenteditable]:hover { background: var(--v-hover); }
-/* 엑셀의 선택 셀은 배경을 칠하지 않고 뚜렷한 테두리만 두른다 */
-.grid-edit-table td[contenteditable]:focus {
-  cursor: text;
+.grid-edit-table td.g-editable:hover { background: var(--v-hover); }
+/* 엑셀처럼 셀을 클릭하면(선택만) 바로 편집모드가 되지 않고 뚜렷한 테두리로 "선택됨"만 표시한다 —
+   더블클릭이나 F2를 눌러야 실제로 편집모드(contenteditable=true)가 된다. 이 테두리 자체는 잠긴 칸을
+   포함해 어떤 칸이든(포커스만 되면) 항상 보여야 하므로 .g-editable 여부와 무관하게 td:focus에 건다. */
+.grid-edit-table td:focus {
+  position: relative;
   box-shadow: inset 0 0 0 2px var(--v-accent);
-  white-space: normal;
-  overflow: visible;
   z-index: 3;
 }
+/* 실제 편집모드(더블클릭/F2/직접 타이핑 진입)에서만 텍스트 커서 + 줄바꿈 허용으로 바뀐다 */
+.grid-edit-table td.g-editable[contenteditable="true"] {
+  cursor: text;
+  white-space: normal;
+  overflow: visible;
+}
 
-/* 잠긴 셀(헤더/이름 열 등) — 편집 불가를 시각적으로 드러낸다 */
+/* 잠긴 셀(헤더/이름 열 등) — 편집 불가를 시각적으로 드러낸다. 앱의 따뜻한 톤(var(--v-glass),
+   #f7f5f0)이 아니라 행/열 머리글과 동일한 중립 회색 배경+글자색을 써서 "구조/라벨" 성격의 칸이라는
+   인상을 통일한다. */
 .grid-edit-table td.g-locked {
-  background: var(--v-glass);
-  color: var(--v-text-dim);
+  background: #f2f2f2;
+  color: #616161;
   cursor: default;
   font-weight: 600;
 }
-.grid-edit-table td.g-locked:hover { background: var(--v-glass); }
+.grid-edit-table td.g-locked:hover { background: #f2f2f2; }
+
+/* 엑셀의 "자동 채우기 핸들" — 선택된 칸 오른쪽 아래 모서리의 작은 사각형을 드래그하면 그 값이
+   지나간 칸들에 복사된다(grid-editor.ts의 fillSource/onFillDragMove 로직과 짝). scrollHost(.grid-
+   editor-scroll) 안에 딱 한 번 만들어 두고 위치만 매번 옮긴다 — 그래야 스크롤할 때 셀과 같이 움직인다. */
+.g-fill-handle {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  background: var(--v-accent);
+  border: 1px solid #fff;
+  cursor: crosshair;
+  z-index: 4;
+}
+.grid-edit-table td.g-fill-preview {
+  box-shadow: inset 0 0 0 1px var(--v-accent);
+  background: var(--v-accent-soft);
+}
 
 /* 엑셀 "틀 고정" — 얼린 행/열은 스크롤해도 계속 보이고, 뒤로 스크롤된 내용이 비쳐 보이면 안 된다
-   (반드시 불투명한 배경이어야 함). 실제 sticky top/left 좌표는 JS에서 렌더 크기를 재서 계산한다. */
+   (반드시 불투명한 배경이어야 함). 실제 sticky top/left 좌표는 JS에서 렌더 크기를 재서 계산한다.
+   (행 간 z-index 역전 버그 자체는 grid-editor.ts가 각 <tr>을 자체 스태킹 컨텍스트로 격리해 막는다.) */
 .grid-edit-table .g-frozen-pane {
   background: var(--v-glass);
   box-shadow: 0 1px 0 0 rgba(0, 0, 0, 0.08);
@@ -970,11 +1022,15 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 /* 클릭하면 부모 창에 알림을 보내는 잠긴 병합 셀(예: 제목 배너) — 클릭 가능함을 드러낸다 */
 .grid-edit-table td.g-clickable-header { cursor: pointer; }
 .grid-edit-table td.g-clickable-header:hover { background: var(--v-hover); }
-.grid-edit-table td.g-clickable-header::after {
+/* 목록에서 고르는(연도 등) 칸에만 드롭다운 화살표를 붙인다 — 다른 클릭 가능한 칸은 텍스트 자체의
+   "(클릭)" 표기로 충분하다. */
+.grid-edit-table td.g-header-dropdown::after {
   content: '▾';
   margin-left: 0.4em;
-  opacity: 0.6;
-  font-size: 0.85em;
+  opacity: 0.8;
+  font-size: 1.4em;
+  font-weight: 700;
+  vertical-align: -0.05em;
 }
 
 /* 유효성 검사 실패 시 셀 옆에 잠깐 뜨는 안내 말풍선 */
@@ -1052,6 +1108,26 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 
 /* 셀 인라인 배경/글자색(applyStyleToTd)보다 검색 하이라이트가 항상 위에 보이도록 !important */
 .grid-edit-table td.g-hit-current { background: #ffd43b !important; outline: 2px solid #f59f00; }
+
+/* 열/행 머리글(A, 1 등)을 직접 클릭하면 엑셀처럼 그 열/행 전체가 선택 표시된다 — 머리글 자체는
+   진하게 칠하고, 그 열/행에 속한 칸들은 옅게 물들인다. 잠금/틀고정 칸의 자체 배경보다 항상 위에
+   보여야 하므로 스타일시트 뒤쪽에 둔다(동일 우선순위에서는 나중 규칙이 이긴다). */
+.grid-edit-table th.g-col-selected,
+.grid-edit-table th.g-row-selected {
+  /* 색을 새로 들이지 않고 행/열 머리글 자체가 쓰는 회색 계열을 그대로 진하게 쓴다. */
+  background: #616161 !important;
+  color: #fff !important;
+}
+.grid-edit-table td.g-col-selected,
+.grid-edit-table td.g-row-selected {
+  background: #e0e0e0 !important;
+}
+
+/* 드래그로 텍스트를 선택할 때 브라우저 기본 파란색 대신 같은 회색 계열을 쓴다(머리글 드래그 등). */
+.grid-edit-table th::selection,
+.grid-edit-table td::selection {
+  background: #e0e0e0;
+}
 
 .error-screen {
   min-height: 100vh;
