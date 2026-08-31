@@ -374,6 +374,23 @@ h2 {
 .icon-btn:hover:not(:disabled) { background: var(--v-hover); color: var(--v-text); }
 .icon-btn:active:not(:disabled) { transform: scale(0.92); }
 
+/* 굵게/기울임/밑줄/취소선 — 실제 엑셀처럼 그림 아이콘이 아니라 세리프 글꼴 글자(B/I/U/abc)
+   자체가 아이콘이다. 넷 다 같은 크기·굵기 기준으로 보이도록 맞춘다(글자 수가 다른 abc만 유독
+   작아 보이지 않게, line-height도 통일해 베이스라인이 흔들리지 않게). */
+.icon-btn.icon-btn-glyph {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+.icon-btn.icon-btn-glyph-wide { font-size: 0.82rem; letter-spacing: -0.03em; }
+
+/* 행/열 삽입·삭제 — 삽입은 초록(+), 삭제는 빨강(−)으로 엑셀의 "삽입/삭제" 아이콘 색 규칙을 그대로 쓴다. */
+.icon-btn.icon-btn-insert path:last-child,
+.icon-btn.icon-btn-delete path:last-child {
+  stroke: var(--v-accent);
+}
+.icon-btn.icon-btn-delete path:last-child { stroke: #c0392b; }
+
 .zoom-group {
   display: flex;
   align-items: center;
@@ -1346,6 +1363,85 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   font-size: 0.78rem;
   cursor: pointer;
 }
+
+/* ---------- 리본 툴바에 새로 추가된 도구(글꼴 이름/크기, 세로정렬+줄바꿈, 표시 형식, 테두리
+   드롭다운) — 기존 .mini-select와 같은 톤으로 맞추되 리본 버튼(34px)들 사이에 자연스럽게 낀다. */
+.ribbon-group-buttons-wrap { row-gap: 0.25rem; }
+.toolbar-select {
+  height: 30px;
+  padding: 0 0.3rem;
+  border-radius: 7px;
+  border: 1px solid var(--v-glass-line);
+  background: var(--color-surface);
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  cursor: pointer;
+  max-width: 6.4em;
+}
+.toolbar-select-wide { max-width: 4.6em; }
+.toolbar-number {
+  height: 30px;
+  width: 3.4em;
+  padding: 0 0.2rem;
+  border-radius: 7px;
+  border: 1px solid var(--v-glass-line);
+  background: var(--color-surface);
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+/* 테두리 버튼 — 아이콘 버튼 옆에 작은 드롭다운 화살표가 붙어 클릭하면 옵션 메뉴가 뜬다. */
+.dropdown-btn { position: relative; display: inline-flex; align-items: center; }
+.dropdown-btn .icon-btn { width: 30px; }
+.dropdown-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 34px;
+  border: none;
+  background: transparent;
+  color: var(--v-text-dim);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.dropdown-caret svg { width: 10px; height: 10px; }
+.dropdown-caret:hover { background: var(--v-hover); color: var(--v-text); }
+.dropdown-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  margin-top: 4px;
+  min-width: 9.5em;
+  padding: 0.3rem;
+  border-radius: 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--v-glass-line);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+/* display:flex가 클래스 선택자라 브라우저 기본 [hidden] { display:none } 규칙보다 우선해버려서,
+   hidden 속성을 줘도 계속 보이던 문제 — 명시적으로 다시 꺼준다. */
+.dropdown-menu[hidden] { display: none; }
+.dropdown-menu button {
+  border: none;
+  background: transparent;
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  text-align: left;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dropdown-menu button:hover { background: var(--v-hover); }
 
 /* 뷰어의 fixed 플로팅 검색바와 달리, 에디터는 sticky 툴바 바로 아래 일반 흐름으로 붙인다 */
 .editor-body .search-bar {

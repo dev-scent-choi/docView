@@ -52,6 +52,11 @@ export const GRID_STYLES_BASELINE_MAP = 'stylesBaseline';
 /** 테두리 굵기 — 1=가는 선, 2=굵은 선(엑셀 thin/medium을 단순화). 색은 항상 기본(검정 계열)만 지원. */
 export type BorderWeight = 1 | 2;
 
+/** 숫자 표시 형식 — 실제 엑셀 서식 코드를 그대로 저장하지 않고 자주 쓰는 몇 가지로 단순화한다
+ * (툴바의 회계/백분율/쉼표 버튼과 1:1 대응). 원본 값(cells)은 항상 그대로고, 이건 "어떻게
+ * 보여줄지"만 바꾼다 — 수식 계산 결과 표시와 같은 방식(값과 표시를 분리). */
+export type NumberFormatKind = 'number' | 'currency' | 'percent';
+
 export interface CellStyleAttrs {
   readonly b?: 1;
   readonly i?: 1;
@@ -60,6 +65,18 @@ export interface CellStyleAttrs {
   readonly col?: string;
   readonly bg?: string;
   readonly a?: 'l' | 'c' | 'r';
+  /** 세로 정렬 — 위/가운데/아래. 없으면 엑셀 기본(숫자는 아래, 대개 아래 정렬)과 동일하게 둔다. */
+  readonly va?: 't' | 'm' | 'b';
+  /** 자동 줄 바꿈 — 셀 안에서 내용이 길면 줄을 바꿔 여러 줄로 보여준다. */
+  readonly wrap?: 1;
+  /** 글꼴 이름. 기본 글꼴과 같으면 굳이 저장하지 않는다. */
+  readonly ff?: string;
+  /** 글자 크기(px). */
+  readonly fs?: number;
+  /** 숫자 표시 형식 종류(쉼표/통화/백분율) — 없으면 "일반"(원본 텍스트 그대로). */
+  readonly nf?: NumberFormatKind;
+  /** nf가 있을 때만 의미 있는 소수 자릿수. 없으면 0. */
+  readonly nd?: number;
   /** 시트 보호가 걸려 있고 이 셀이 잠겨 있음(=편집 불가) — 엑셀의 "시트 보호 + 셀 잠금" 그대로. */
   readonly lk?: 1;
   /** 엑셀 데이터 유효성 검사(정수/소수)가 걸려 있음 — 숫자가 아닌 값 입력을 막고 안내를 띄운다. */

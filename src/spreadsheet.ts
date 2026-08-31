@@ -28,6 +28,10 @@ export interface GridSheet {
 /** 테두리 굵기 — 1=가는 선, 2=굵은 선(엑셀 thin/medium을 단순화. 그 외 스타일은 가장 가까운 쪽으로 반올림). */
 export type BorderWeight = 1 | 2;
 
+/** 숫자 표시 형식 종류 — gridShared.ts의 CellStyleAttrs와 동일한 단순화(원본 서식 코드를 몇 가지
+ * 자주 쓰는 범주로 분류). */
+export type NumberFormatKind = 'number' | 'currency' | 'percent';
+
 export interface GridStyle {
   readonly b?: 1;
   readonly i?: 1;
@@ -35,10 +39,17 @@ export interface GridStyle {
   readonly st?: 1;
   /** 글자 크기(px). 기본(11pt≈15px)과 다를 때만 기록 */
   readonly fs?: number;
+  /** 글꼴 이름. 기본 글꼴과 같으면 기록하지 않는다. */
+  readonly ff?: string;
   readonly col?: string;
   readonly bg?: string;
   readonly a?: 'l' | 'c' | 'r';
+  /** 세로 정렬 — 위/가운데/아래. */
+  readonly va?: 't' | 'm' | 'b';
   readonly w?: 1;
+  /** 숫자 표시 형식(쉼표/통화/백분율) + 소수 자릿수. */
+  readonly nf?: NumberFormatKind;
+  readonly nd?: number;
   /** 시트 보호가 걸려 있고 이 셀이 잠겨 있음(=편집 불가) */
   readonly lk?: 1;
   /** 엑셀 데이터 유효성 검사(정수/소수)가 걸려 있음 */
@@ -286,6 +297,18 @@ function borderWeight(border?: Partial<ExcelJS.Border>): BorderWeight | undefine
   return border.style === 'medium' || border.style === 'thick' || border.style === 'double' ? 2 : 1;
 }
 
+/** 원본 엑셀 서식 코드(예: "#,##0.00", "0.0%", "\"₩\"#,##0")를 그대로 저장하지 않고, 툴바가 다루는
+ * 몇 가지 자주 쓰는 범주(쉼표/통화/백분율)+소수 자릿수로 단순화해서 읽는다 — 서식 코드 전체를
+ * 파싱하는 건 범위 밖이고, 어차피 우리 툴바도 이 세 가지 버튼만 제공한다. */
+function classifyNumFmt(numFmt?: string): { nf?: NumberFormatKind; nd?: number } {
+  if (!numFmt || numFmt === 'General' || numFmt === '@') return {};
+  const decimals = numFmt.match(/\.(0+)/)?.[1].length ?? 0;
+  if (numFmt.includes('%')) return { nf: 'percent', nd: decimals };
+  if (/[$₩¥€]|"[^"]+"/.test(numFmt)) return { nf: 'currency', nd: decimals };
+  if (numFmt.includes('#,##0') || /^0(\.0+)?$/.test(numFmt.trim())) return { nf: 'number', nd: decimals };
+  return {};
+}
+
 function extractStyle(
   cell: ExcelJS.Cell,
   palette: StylePalette,
@@ -298,10 +321,14 @@ function extractStyle(
     u?: 1;
     st?: 1;
     fs?: number;
+    ff?: string;
     col?: string;
     bg?: string;
     a?: 'l' | 'c' | 'r';
+    va?: 't' | 'm' | 'b';
     w?: 1;
+    nf?: NumberFormatKind;
+    nd?: number;
     lk?: 1;
     nu?: 1;
     bt?: BorderWeight;
@@ -317,6 +344,7 @@ function extractStyle(
   if (font?.size && font.size !== DEFAULT_FONT_SIZE_PT) {
     style.fs = Math.min(MAX_FONT_PX, Math.round(font.size * PT_TO_PX));
   }
+  if (font?.name && font.name !== 'Calibri') style.ff = font.name;
   const fontColor = resolveColor(font?.color, themeColors);
   if (fontColor && fontColor.toUpperCase() !== '#000000') style.col = fontColor;
   const fill = cell.fill;
@@ -329,7 +357,16 @@ function extractStyle(
   const horizontal = cell.alignment?.horizontal;
   if (horizontal === 'center') style.a = 'c';
   else if (horizontal === 'right') style.a = 'r';
+  const vertical = cell.alignment?.vertical;
+  if (vertical === 'top') style.va = 't';
+  else if (vertical === 'middle') style.va = 'm';
+  else if (vertical === 'bottom') style.va = 'b';
   if (cell.alignment?.wrapText) style.w = 1;
+  const { nf, nd } = classifyNumFmt(cell.numFmt);
+  if (nf) {
+    style.nf = nf;
+    if (nd) style.nd = nd;
+  }
   // 시트 보호가 걸려 있을 때만 잠금 여부가 실제로 의미를 가진다(엑셀도 그렇게 동작함) — 그렇지
   // 않은 대부분의 일반 문서는 셀마다 protection.locked가 true(엑셀 기본값)라도 편집 가능해야 한다.
   if (sheetProtected && cell.protection?.locked !== false) style.lk = 1;

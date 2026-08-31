@@ -25,6 +25,12 @@ function toCellStyleAttrs(style: GridStyle): CellStyleAttrs {
   if (style.col) attrs.col = style.col;
   if (style.bg) attrs.bg = style.bg;
   if (style.a) attrs.a = style.a;
+  if (style.va) attrs.va = style.va;
+  if (style.w) attrs.wrap = 1;
+  if (style.ff) attrs.ff = style.ff;
+  if (style.fs) attrs.fs = style.fs;
+  if (style.nf) attrs.nf = style.nf;
+  if (style.nd) attrs.nd = style.nd;
   if (style.lk) attrs.lk = 1;
   if (style.nu) attrs.nu = 1;
   if (style.bt) attrs.bt = style.bt;
@@ -114,12 +120,37 @@ const ALIGN_TO_EXCEL: Record<'l' | 'c' | 'r', ExcelJS.Alignment['horizontal']> =
   c: 'center',
   r: 'right',
 };
+const VALIGN_TO_EXCEL: Record<'t' | 'm' | 'b', ExcelJS.Alignment['vertical']> = {
+  t: 'top',
+  m: 'middle',
+  b: 'bottom',
+};
+const BORDER_WEIGHT_TO_EXCEL: Record<1 | 2, ExcelJS.BorderStyle> = {
+  1: 'thin',
+  2: 'medium',
+};
+/** spreadsheet.ts의 PT_TO_PX(96/72)와 정반대 변환 — 저장은 항상 px 기준(CellStyleAttrs.fs)이라
+ * 실제 엑셀 파일에 쓸 때만 pt로 되돌린다. */
+const PX_TO_PT = 72 / 96;
+
+function numFmtStringFor(style: CellStyleAttrs): string | undefined {
+  if (!style.nf) return undefined;
+  const decimals = style.nd ? `.${'0'.repeat(style.nd)}` : '';
+  switch (style.nf) {
+    case 'number': return `#,##0${decimals}`;
+    case 'currency': return `"₩"#,##0${decimals}`;
+    case 'percent': return `0${decimals}%`;
+    default: return undefined;
+  }
+}
 
 function applyStyleToCell(cell: ExcelJS.Cell, style: CellStyleAttrs | undefined): void {
   if (!style) {
     cell.font = {};
     cell.fill = { type: 'pattern', pattern: 'none' };
     cell.alignment = {};
+    cell.border = {};
+    cell.numFmt = 'General';
     return;
   }
   cell.font = {
@@ -128,11 +159,24 @@ function applyStyleToCell(cell: ExcelJS.Cell, style: CellStyleAttrs | undefined)
     underline: style.u === 1,
     strike: style.st === 1,
     color: style.col ? { argb: `FF${style.col.replace('#', '').toUpperCase()}` } : undefined,
+    name: style.ff,
+    size: style.fs ? Math.round(style.fs * PX_TO_PT) : undefined,
   };
   cell.fill = style.bg
     ? { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${style.bg.replace('#', '').toUpperCase()}` } }
     : { type: 'pattern', pattern: 'none' };
-  cell.alignment = style.a ? { horizontal: ALIGN_TO_EXCEL[style.a] } : {};
+  cell.alignment = {
+    horizontal: style.a ? ALIGN_TO_EXCEL[style.a] : undefined,
+    vertical: style.va ? VALIGN_TO_EXCEL[style.va] : undefined,
+    wrapText: style.wrap === 1,
+  };
+  cell.border = {
+    top: style.bt ? { style: BORDER_WEIGHT_TO_EXCEL[style.bt] } : undefined,
+    right: style.br ? { style: BORDER_WEIGHT_TO_EXCEL[style.br] } : undefined,
+    bottom: style.bb ? { style: BORDER_WEIGHT_TO_EXCEL[style.bb] } : undefined,
+    left: style.bl ? { style: BORDER_WEIGHT_TO_EXCEL[style.bl] } : undefined,
+  };
+  cell.numFmt = numFmtStringFor(style) ?? 'General';
 }
 
 /**

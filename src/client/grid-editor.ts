@@ -32,6 +32,12 @@ interface ViewInfo {
 }
 
 const ALIGN_TO_CSS: Record<'l' | 'c' | 'r', string> = { l: 'left', c: 'center', r: 'right' };
+/** 글꼴 드롭다운에서 고른 이름이 이 컴퓨터/브라우저에 없을 때를 위한 대체 글꼴 목록. */
+const DEFAULT_CELL_FONT_STACK = "'맑은 고딕', Malgun Gothic, Calibri, sans-serif";
+/** CellStyleAttrs.fs는 항상 px로 저장한다(기존 관례) — 툴바 입력창은 엑셀처럼 pt로 보여주므로
+ * 여기서만 서로 변환한다. */
+const PT_TO_PX = 96 / 72;
+const PX_TO_PT = 72 / 96;
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -103,14 +109,25 @@ function borderCss(weight: 1 | 2 | undefined): string {
   return weight ? `${weight}px solid var(--v-text)` : '';
 }
 
+const VALIGN_TO_CSS: Record<'t' | 'm' | 'b', string> = { t: 'top', m: 'middle', b: 'bottom' };
+
 function applyStyleToTd(td: HTMLTableCellElement, style: CellStyleAttrs | undefined): void {
   td.style.fontWeight = style?.b ? '700' : '400';
   td.style.fontStyle = style?.i ? 'italic' : 'normal';
   td.style.textDecoration = [style?.u ? 'underline' : '', style?.st ? 'line-through' : ''].filter(Boolean).join(' ');
   td.style.color = style?.col ?? '';
   td.style.background = style?.bg ?? '';
+  td.style.fontFamily = style?.ff ? `"${style.ff}", ${DEFAULT_CELL_FONT_STACK}` : '';
+  td.style.fontSize = style?.fs ? `${style.fs}px` : '';
+  td.style.verticalAlign = style?.va ? VALIGN_TO_CSS[style.va] : '';
+  // 자동 줄 바꿈 — 셀 높이는 고정이라(틀고정 sticky 좌표 계산이 고정 행 높이를 전제로 함) 줄이
+  // 너무 많아지면 아래가 잘릴 수 있다. 그래도 한 줄에 다 몰아넣고 말줄임표로 자르는 것보다는
+  // 실제로 줄바꿈되는 쪽이 "자동 줄 바꿈"이라는 기능 자체엔 맞다.
+  td.style.whiteSpace = style?.wrap ? 'normal' : '';
   if (style?.a) {
     td.style.textAlign = ALIGN_TO_CSS[style.a];
+  } else if (style?.nf) {
+    td.style.textAlign = 'right'; // 숫자 서식이 있으면 서식이 적용된 텍스트(₩1,000 등)라 정규식 판정이 안 먹는다
   } else {
     td.style.textAlign = NUMERIC_VALUE.test((td.textContent ?? '').trim()) ? 'right' : '';
   }
@@ -285,6 +302,26 @@ async function main(): Promise<void> {
     return String(Math.round(value * 1e10) / 1e10);
   }
 
+  /** 원본 값(또는 수식 계산 결과)에 셀의 숫자 표시 형식(쉼표/통화/백분율)을 입힌다 — 저장된 값
+   * 자체는 절대 안 바꾸고 "화면에 어떻게 보일지"만 바꾼다(수식 계산 결과 표시와 같은 원리). */
+  function formatNumberForDisplay(text: string, style: CellStyleAttrs | undefined): string {
+    if (!style?.nf || text.trim() === '') return text;
+    const num = Number(text);
+    if (!Number.isFinite(num)) return text;
+    const decimals = style.nd ?? 0;
+    const opts = { minimumFractionDigits: decimals, maximumFractionDigits: decimals };
+    switch (style.nf) {
+      case 'percent':
+        return `${(num * 100).toLocaleString('ko-KR', opts)}%`;
+      case 'currency':
+        return `₩${num.toLocaleString('ko-KR', opts)}`;
+      case 'number':
+        return num.toLocaleString('ko-KR', opts);
+      default:
+        return text;
+    }
+  }
+
   /** 셀 하나를 "지금 이 셀이 포커스 중인지"에 맞춰 원본 수식 또는 계산 결과로 그린다. */
   function renderCellDisplay(td: HTMLTableCellElement, key: string): void {
     const raw = cells.get(key) ?? '';
@@ -292,12 +329,14 @@ async function main(): Promise<void> {
       td.textContent = raw; // 편집 중에는 계산 결과가 아니라 실제 입력한 수식이 보여야 한다
       return;
     }
+    const style = styles.get(key);
     if (!raw.startsWith('=')) {
-      td.textContent = raw;
+      td.textContent = formatNumberForDisplay(raw, style);
       return;
     }
     const parsed = parseGridCellKey(key);
-    td.textContent = parsed ? formatComputedValue(computeCellDisplay(parsed.sheetIdx, parsed.row, parsed.col)) : raw;
+    const computed = parsed ? formatComputedValue(computeCellDisplay(parsed.sheetIdx, parsed.row, parsed.col)) : raw;
+    td.textContent = formatNumberForDisplay(computed, style);
   }
 
   /** 어떤 셀이든 값이 바뀌면, 그 값을 참조할 수 있는 다른 수식 셀들도 다시 계산해 보여준다
@@ -1226,10 +1265,11 @@ async function main(): Promise<void> {
   document.getElementById('btn-undo')?.addEventListener('click', () => undoManager.undo());
   document.getElementById('btn-redo')?.addEventListener('click', () => undoManager.redo());
 
-  // ---------- 서식 도구 (현재 포커스된 셀에 적용, 오피스처럼 눌린 상태로 반영) ----------
+  // ---------- 서식 도구 (선택 범위 전체에 적용, 오피스처럼 눌린 상태로 반영) ----------
   function setPressed(id: string, pressed: boolean): void {
     document.getElementById(id)?.setAttribute('aria-pressed', String(pressed));
   }
+  const DEFAULT_FONT_SIZE_PT = 11;
   function syncCellToolbarState(key: string | null): void {
     const style = key ? styles.get(key) : undefined;
     setPressed('btn-cell-bold', style?.b === 1);
@@ -1239,22 +1279,48 @@ async function main(): Promise<void> {
     setPressed('btn-cell-align-l', !style?.a || style.a === 'l');
     setPressed('btn-cell-align-c', style?.a === 'c');
     setPressed('btn-cell-align-r', style?.a === 'r');
+    setPressed('btn-valign-top', style?.va === 't');
+    setPressed('btn-valign-middle', style?.va === 'm');
+    setPressed('btn-valign-bottom', !style?.va || style.va === 'b');
+    setPressed('btn-wrap-text', style?.wrap === 1);
+    const fontFamilySelect = document.getElementById('cell-font-family') as HTMLSelectElement | null;
+    if (fontFamilySelect) fontFamilySelect.value = style?.ff ?? '';
+    const fontSizeInput = document.getElementById('cell-font-size') as HTMLInputElement | null;
+    if (fontSizeInput) {
+      const pt = style?.fs ? Math.round(style.fs * PX_TO_PT) : DEFAULT_FONT_SIZE_PT;
+      fontSizeInput.value = String(pt);
+    }
+    const numfmtSelect = document.getElementById('cell-numfmt-select') as HTMLSelectElement | null;
+    if (numfmtSelect) numfmtSelect.value = style?.nf ?? 'general';
   }
 
+  /** 지금 선택 범위(다중 드래그 선택이면 그 사각형 전체, 아니면 칸 하나)에 서식을 적용한다 —
+   * 셀마다 "지금 그 칸의 서식"을 기준으로 mutate가 따로 호출되므로, 굵게 상태가 섞인 범위를
+   * 선택해도 엑셀처럼 칸별로 자연스럽게 토글된다. */
   function updateStyle(mutate: (current: CellStyleAttrs) => CellStyleAttrs): void {
     if (!activeCellKey) return;
-    const current = styles.get(activeCellKey) ?? {};
-    const next = mutate(current);
-    if (Object.keys(next).length === 0) styles.delete(activeCellKey);
-    else styles.set(activeCellKey, next);
+    const { r0, r1, c0, c1 } = rangeBounds();
+    ydoc.transact(() => {
+      for (let r = r0; r <= r1; r += 1) {
+        for (let c = c0; c <= c1; c += 1) {
+          const key = gridCellKey(activeSheet, r, c);
+          const current = styles.get(key) ?? {};
+          const next = mutate(current);
+          if (Object.keys(next).length === 0) styles.delete(key);
+          else styles.set(key, next);
+          const td = tdFor(r, c);
+          if (td) {
+            applyStyleToTd(td, styles.get(key));
+            renderCellDisplay(td, key); // 숫자 서식은 텍스트 자체가 바뀌므로 다시 그린다
+          }
+        }
+      }
+    });
     // 툴바 버튼을 누르면 버튼이 포커스를 가져가 셀은 이미 blur된 상태이므로 :focus로는 못 찾는다
-    // — activeCellKey(마지막으로 선택했던 셀)를 좌표로 풀어 직접 찾는다.
-    const parsed = parseGridCellKey(activeCellKey);
-    const td = parsed ? tdFor(parsed.row, parsed.col) : null;
-    if (td) applyStyleToTd(td, styles.get(activeCellKey));
+    // — activeCellKey(범위의 기준 칸)를 좌표로 풀어 직접 찾아 눌림 상태를 갱신한다.
     syncCellToolbarState(activeCellKey);
   }
-  function toggleFlag(flag: 'b' | 'i' | 'u' | 'st'): void {
+  function toggleFlag(flag: 'b' | 'i' | 'u' | 'st' | 'wrap'): void {
     updateStyle((current) => {
       const next = { ...current };
       if (next[flag]) delete next[flag];
@@ -1266,12 +1332,23 @@ async function main(): Promise<void> {
   document.getElementById('btn-cell-italic')?.addEventListener('click', () => toggleFlag('i'));
   document.getElementById('btn-cell-underline')?.addEventListener('click', () => toggleFlag('u'));
   document.getElementById('btn-cell-strike')?.addEventListener('click', () => toggleFlag('st'));
+  document.getElementById('btn-wrap-text')?.addEventListener('click', () => toggleFlag('wrap'));
   document.getElementById('btn-cell-clear-format')?.addEventListener('click', () => {
     if (!activeCellKey) return;
-    styles.delete(activeCellKey);
-    const parsed = parseGridCellKey(activeCellKey);
-    const td = parsed ? tdFor(parsed.row, parsed.col) : null;
-    if (td) applyStyleToTd(td, undefined);
+    const { r0, r1, c0, c1 } = rangeBounds();
+    ydoc.transact(() => {
+      for (let r = r0; r <= r1; r += 1) {
+        for (let c = c0; c <= c1; c += 1) {
+          const key = gridCellKey(activeSheet, r, c);
+          styles.delete(key);
+          const td = tdFor(r, c);
+          if (td) {
+            applyStyleToTd(td, undefined);
+            renderCellDisplay(td, key);
+          }
+        }
+      }
+    });
     syncCellToolbarState(activeCellKey);
   });
 
@@ -1295,6 +1372,144 @@ async function main(): Promise<void> {
       updateStyle((current) => ({ ...current, a: align }));
     });
   });
+  (['t', 'm', 'b'] as const).forEach((va) => {
+    const id = va === 't' ? 'btn-valign-top' : va === 'm' ? 'btn-valign-middle' : 'btn-valign-bottom';
+    document.getElementById(id)?.addEventListener('click', () => {
+      updateStyle((current) => ({ ...current, va }));
+    });
+  });
+
+  // ---------- 글꼴 이름/크기 ----------
+  const fontFamilySelect = document.getElementById('cell-font-family') as HTMLSelectElement | null;
+  fontFamilySelect?.addEventListener('change', () => {
+    updateStyle((current) => {
+      const next = { ...current };
+      if (fontFamilySelect.value) next.ff = fontFamilySelect.value;
+      else delete next.ff;
+      return next;
+    });
+  });
+  const fontSizeInput = document.getElementById('cell-font-size') as HTMLInputElement | null;
+  function applyFontSizePt(pt: number): void {
+    const clamped = Math.max(6, Math.min(96, Math.round(pt)));
+    if (fontSizeInput) fontSizeInput.value = String(clamped);
+    updateStyle((current) => {
+      const next = { ...current };
+      if (clamped === DEFAULT_FONT_SIZE_PT) delete next.fs;
+      else next.fs = Math.round(clamped * PT_TO_PX);
+      return next;
+    });
+  }
+  fontSizeInput?.addEventListener('change', () => {
+    const pt = Number(fontSizeInput.value);
+    applyFontSizePt(Number.isFinite(pt) && pt > 0 ? pt : DEFAULT_FONT_SIZE_PT);
+  });
+  document.getElementById('btn-font-size-up')?.addEventListener('click', () => {
+    applyFontSizePt(Number(fontSizeInput?.value ?? DEFAULT_FONT_SIZE_PT) + 1);
+  });
+  document.getElementById('btn-font-size-down')?.addEventListener('click', () => {
+    applyFontSizePt(Number(fontSizeInput?.value ?? DEFAULT_FONT_SIZE_PT) - 1);
+  });
+
+  // ---------- 표시 형식(숫자 서식) ----------
+  const numfmtSelect = document.getElementById('cell-numfmt-select') as HTMLSelectElement | null;
+  numfmtSelect?.addEventListener('change', () => {
+    updateStyle((current) => {
+      const next = { ...current };
+      if (numfmtSelect.value === 'general') {
+        delete next.nf;
+        delete next.nd;
+      } else {
+        next.nf = numfmtSelect.value as CellStyleAttrs['nf'];
+        if (!next.nd) next.nd = next.nf === 'percent' ? 0 : 2;
+      }
+      return next;
+    });
+  });
+  function applyQuickNumFmt(nf: NonNullable<CellStyleAttrs['nf']>, nd: number): void {
+    updateStyle((current) => ({ ...current, nf, nd }));
+  }
+  document.getElementById('btn-numfmt-currency')?.addEventListener('click', () => applyQuickNumFmt('currency', 2));
+  document.getElementById('btn-numfmt-percent')?.addEventListener('click', () => applyQuickNumFmt('percent', 0));
+  document.getElementById('btn-numfmt-comma')?.addEventListener('click', () => applyQuickNumFmt('number', 2));
+  function stepDecimals(delta: number): void {
+    updateStyle((current) => {
+      const nextDecimals = Math.max(0, (current.nd ?? 0) + delta);
+      return { ...current, nf: current.nf ?? 'number', nd: nextDecimals };
+    });
+  }
+  document.getElementById('btn-numfmt-decimal-up')?.addEventListener('click', () => stepDecimals(1));
+  document.getElementById('btn-numfmt-decimal-down')?.addEventListener('click', () => stepDecimals(-1));
+
+  // ---------- 테두리 ----------
+  type BorderPreset = 'none' | 'all' | 'outside' | 'outside-thick' | 'top' | 'bottom' | 'left' | 'right';
+  function applyBorderPreset(preset: BorderPreset): void {
+    if (!activeCellKey) return;
+    const { r0, r1, c0, c1 } = rangeBounds();
+    ydoc.transact(() => {
+      for (let r = r0; r <= r1; r += 1) {
+        for (let c = c0; c <= c1; c += 1) {
+          const key = gridCellKey(activeSheet, r, c);
+          const next: { -readonly [K in keyof CellStyleAttrs]?: CellStyleAttrs[K] } = { ...(styles.get(key) ?? {}) };
+          const isTop = r === r0;
+          const isBottom = r === r1;
+          const isLeft = c === c0;
+          const isRight = c === c1;
+          const weight = preset === 'outside-thick' ? 2 : 1;
+          switch (preset) {
+            case 'none':
+              delete next.bt; delete next.br; delete next.bb; delete next.bl;
+              break;
+            case 'all':
+              next.bt = 1; next.br = 1; next.bb = 1; next.bl = 1;
+              break;
+            case 'outside':
+            case 'outside-thick':
+              if (isTop) next.bt = weight; else delete next.bt;
+              if (isBottom) next.bb = weight; else delete next.bb;
+              if (isLeft) next.bl = weight; else delete next.bl;
+              if (isRight) next.br = weight; else delete next.br;
+              break;
+            case 'top':
+              if (isTop) next.bt = 1;
+              break;
+            case 'bottom':
+              if (isBottom) next.bb = 1;
+              break;
+            case 'left':
+              if (isLeft) next.bl = 1;
+              break;
+            case 'right':
+              if (isRight) next.br = 1;
+              break;
+          }
+          if (Object.keys(next).length === 0) styles.delete(key);
+          else styles.set(key, next as CellStyleAttrs);
+          const td = tdFor(r, c);
+          if (td) applyStyleToTd(td, styles.get(key));
+        }
+      }
+    });
+  }
+  const borderDropdown = document.getElementById('border-dropdown') as HTMLElement | null;
+  const borderMenu = document.getElementById('border-menu') as HTMLElement | null;
+  function closeBorderMenu(): void {
+    if (borderMenu) borderMenu.hidden = true;
+  }
+  borderDropdown?.querySelector('.dropdown-caret')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (borderMenu) borderMenu.hidden = !borderMenu.hidden;
+  });
+  borderMenu?.addEventListener('click', (event) => {
+    const target = (event.target as HTMLElement).closest('button[data-border]') as HTMLButtonElement | null;
+    if (!target) return;
+    applyBorderPreset(target.dataset.border as BorderPreset);
+    closeBorderMenu();
+  });
+  document.addEventListener('click', (event) => {
+    if (borderDropdown && !borderDropdown.contains(event.target as Node)) closeBorderMenu();
+  });
+  document.getElementById('btn-border')?.addEventListener('click', () => applyBorderPreset('all'));
 
   // ---------- 확대/축소 ----------
   const zoomLevelEl = document.getElementById('zoom-level') as HTMLElement;
