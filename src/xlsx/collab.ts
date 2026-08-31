@@ -59,6 +59,18 @@ function mergeCoveredCells(merges: readonly GridMergeShape[]): Set<string> {
   return covered;
 }
 
+/** parseXlsxToGrid가 만든 표시용 텍스트(예: "2,287")를 협업 문서의 실제 셀 값으로 그대로 심으면
+ * 안 된다 — Number("2,287")는 NaN이라, 이 값을 참조하는 다른 수식(SUM 등)이 이 셀을 숫자가 아닌
+ * 것으로 취급해 조용히 0으로 계산해버린다(실제 재현된 버그: 합계 열이 항상 0으로 보임). 쉼표 구분
+ * 표시 형식(number/currency)이 걸린 칸만, 화면표시용 텍스트에서 쉼표를 제거해 원래 숫자 문자열로
+ * 되돌린 뒤 심는다 — "화면에 어떻게 보일지"는 style.nf/nd로 이미 별도로 심어지므로 여기서는 순수
+ * 값만 복원하면 된다. */
+function seedableCellValue(text: string, style: GridStyle | undefined): string {
+  if (!style?.nf || (style.nf !== 'number' && style.nf !== 'currency')) return text;
+  const stripped = text.replace(/[₩,\s]/g, '');
+  return Number.isFinite(Number(stripped)) && stripped !== '' ? stripped : text;
+}
+
 /** 읽기전용 그리드 뷰(parseXlsxToGrid의 결과)를 협업용 Y.Doc에 시딩한다. */
 export function seedGridFromXlsx(ydoc: Y.Doc, grid: GridDocument): void {
   const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
@@ -83,18 +95,17 @@ export function seedGridFromXlsx(ydoc: Y.Doc, grid: GridDocument): void {
         if (cell === 0) return;
         if (covered.has(`${r}:${c}`)) return; // 병합에 덮인 칸 — 앵커의 중복 값이라 시딩하지 않는다
         const key = gridCellKey(sheetIdx, r, c);
+        const style = cell.s !== undefined ? grid.styles[cell.s] : undefined;
         if (cell.v !== '') {
-          cells.set(key, cell.v);
-          baseline.set(key, cell.v);
+          const value = seedableCellValue(cell.v, style);
+          cells.set(key, value);
+          baseline.set(key, value);
         }
-        if (cell.s !== undefined) {
-          const style = grid.styles[cell.s];
-          if (style) {
-            const attrs = toCellStyleAttrs(style);
-            if (Object.keys(attrs).length > 0) {
-              styles.set(key, attrs);
-              stylesBaseline.set(key, attrs);
-            }
+        if (style) {
+          const attrs = toCellStyleAttrs(style);
+          if (Object.keys(attrs).length > 0) {
+            styles.set(key, attrs);
+            stylesBaseline.set(key, attrs);
           }
         }
       });

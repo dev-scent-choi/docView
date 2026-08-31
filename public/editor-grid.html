@@ -49,128 +49,139 @@
     </div>
     <div class="toolbar-group toolbar-format">
       <div class="ribbon-group">
-        <div class="ribbon-group-buttons">
-          <button id="btn-undo" class="icon-btn" title="실행 취소 (Ctrl+Z)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.51 13a9 9 0 1 0 2.13-9.36L3 7"/></svg>
-          </button>
-          <button id="btn-redo" class="icon-btn" title="다시 실행 (Ctrl+Y)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M20.49 13a9 9 0 1 1-2.13-9.36L21 7"/></svg>
-          </button>
-        </div>
-        <span class="ribbon-group-label">실행 취소</span>
-      </div>
-
-      <div class="ribbon-group">
         <div class="ribbon-group-buttons ribbon-group-buttons-wrap">
-          <select id="cell-font-family" class="toolbar-select" title="글꼴">
-            <option value="">기본 글꼴</option>
-            <option value="맑은 고딕">맑은 고딕</option>
-            <option value="Calibri">Calibri</option>
-            <option value="Arial">Arial</option>
-            <option value="바탕">바탕</option>
-            <option value="굴림">굴림</option>
-            <option value="Georgia">Georgia</option>
-            <option value="Times New Roman">Times New Roman</option>
-            <option value="Courier New">Courier New</option>
-          </select>
-          <input id="cell-font-size" class="toolbar-number" type="number" min="6" max="96" step="1" value="11" title="글자 크기" aria-label="글자 크기" />
-          <button id="btn-font-size-up" class="icon-btn" title="글자 크기 크게">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18 9 6l5 12M5.5 14h7"/><path d="M17 9v8M13.5 13h7"/></svg>
-          </button>
-          <button id="btn-font-size-down" class="icon-btn" title="글자 크기 작게">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18 9 6l5 12M5.5 14h7"/><path d="M13.5 13h7"/></svg>
-          </button>
-          <button id="btn-cell-bold" class="icon-btn icon-btn-glyph" title="굵게 (Ctrl+B)"><strong>B</strong></button>
-          <button id="btn-cell-italic" class="icon-btn icon-btn-glyph" title="기울임 (Ctrl+I)"><em>I</em></button>
-          <button id="btn-cell-underline" class="icon-btn icon-btn-glyph" title="밑줄 (Ctrl+U)"><u>U</u></button>
-          <button id="btn-cell-strike" class="icon-btn icon-btn-glyph icon-btn-glyph-wide" title="취소선"><s>abc</s></button>
-          <span class="color-btn" id="cell-font-color-btn">
-            <span class="color-btn-glyph">A</span>
-            <span class="color-btn-bar"></span>
-            <input id="cell-font-color" class="color-btn-input" type="color" value="#1b1a17" title="글자 색" aria-label="셀 글자 색" />
-          </span>
-          <span class="color-btn" id="cell-bg-color-btn">
-            <span class="color-btn-glyph">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M12 2s6 7.5 6 12a6 6 0 1 1-12 0c0-4.5 6-12 6-12Z"/></svg>
+          <div class="ribbon-row">
+            <select id="cell-font-family" class="toolbar-select" title="글꼴">
+              <option value="">기본 글꼴</option>
+              <option value="맑은 고딕">맑은 고딕</option>
+              <option value="Calibri">Calibri</option>
+              <option value="Arial">Arial</option>
+              <option value="바탕">바탕</option>
+              <option value="굴림">굴림</option>
+              <option value="Georgia">Georgia</option>
+              <option value="Times New Roman">Times New Roman</option>
+              <option value="Courier New">Courier New</option>
+            </select>
+            <input id="cell-font-size" class="toolbar-number" type="number" min="6" max="96" step="1" value="11" title="글자 크기" aria-label="글자 크기" />
+            <button id="btn-font-size-up" class="icon-btn icon-btn-fontsize" title="글자 크기 크게">
+              <span class="fontsize-glyph">가</span><span class="fontsize-arrow">▲</span>
+            </button>
+            <button id="btn-font-size-down" class="icon-btn icon-btn-fontsize" title="글자 크기 작게">
+              <span class="fontsize-glyph">가</span><span class="fontsize-arrow">▼</span>
+            </button>
+          </div>
+          <div class="ribbon-row">
+            <button id="btn-cell-bold" class="icon-btn icon-btn-glyph" title="굵게 (Ctrl+B)"><strong>가</strong></button>
+            <button id="btn-cell-italic" class="icon-btn icon-btn-glyph" title="기울임 (Ctrl+I)"><em>가</em></button>
+            <button id="btn-cell-underline" class="icon-btn icon-btn-glyph" title="밑줄 (Ctrl+U)"><u>가</u></button>
+            <span class="dropdown-btn" id="border-dropdown">
+              <button id="btn-border" class="icon-btn" title="테두리">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17"/><path d="M3.5 12h17M12 3.5v17"/></svg>
+              </button>
+              <button class="dropdown-caret" aria-label="테두리 옵션 더 보기">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <div class="dropdown-menu" id="border-menu" hidden>
+                <button data-border="all">모든 테두리</button>
+                <button data-border="outside">바깥쪽 테두리</button>
+                <button data-border="outside-thick">굵은 바깥쪽 테두리</button>
+                <button data-border="top">위쪽 테두리</button>
+                <button data-border="bottom">아래쪽 테두리</button>
+                <button data-border="left">왼쪽 테두리</button>
+                <button data-border="right">오른쪽 테두리</button>
+                <button data-border="none">테두리 없음</button>
+              </div>
             </span>
-            <span class="color-btn-bar"></span>
-            <input id="cell-bg-color" class="color-btn-input" type="color" value="#ffff00" title="배경 색" aria-label="셀 배경 색" />
-          </span>
-          <span class="dropdown-btn" id="border-dropdown">
-            <button id="btn-border" class="icon-btn" title="테두리">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17"/><path d="M3.5 12h17M12 3.5v17"/></svg>
+            <span class="dropdown-btn color-dropdown-btn" id="cell-bg-color-btn">
+              <button id="btn-bg-color-apply" class="icon-btn color-apply-btn" title="배경 색 채우기">
+                <span class="color-btn-glyph">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M3 13 10 6l8 8-7 7a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8Z"/><path d="M3 13h9"/><path d="M17.5 11.5c1.2 1.6 2 2.8 2 3.9a2 2 0 1 1-4 0c0-1.1.8-2.3 2-3.9Z" fill="currentColor" stroke="none"/></svg>
+                </span>
+                <span class="color-btn-bar"></span>
+              </button>
+              <span class="dropdown-caret color-caret-wrap" aria-label="배경 색 선택">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                <input id="cell-bg-color" class="color-caret-input" type="color" value="#ffff00" title="배경 색 선택" aria-label="셀 배경 색 선택" />
+              </span>
+            </span>
+            <span class="dropdown-btn color-dropdown-btn" id="cell-font-color-btn">
+              <button id="btn-font-color-apply" class="icon-btn color-apply-btn" title="글자 색 채우기">
+                <span class="color-btn-glyph">가</span>
+                <span class="color-btn-bar"></span>
+              </button>
+              <span class="dropdown-caret color-caret-wrap" aria-label="글자 색 선택">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                <input id="cell-font-color" class="color-caret-input" type="color" value="#c0392b" title="글자 색 선택" aria-label="셀 글자 색 선택" />
+              </span>
+            </span>
+            <button id="btn-cell-strike" class="icon-btn icon-btn-glyph icon-btn-glyph-wide" title="취소선"><s>가</s></button>
+            <button id="btn-cell-clear-format" class="icon-btn" title="서식 지우기">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 21-4.3-4.3c-.94-.94-.94-2.46 0-3.4l9.6-9.6c.94-.94 2.46-.94 3.4 0l5.6 5.6c.94.94.94 2.46 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>
             </button>
-            <button class="dropdown-caret" aria-label="테두리 옵션 더 보기">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-            </button>
-            <div class="dropdown-menu" id="border-menu" hidden>
-              <button data-border="all">모든 테두리</button>
-              <button data-border="outside">바깥쪽 테두리</button>
-              <button data-border="outside-thick">굵은 바깥쪽 테두리</button>
-              <button data-border="top">위쪽 테두리</button>
-              <button data-border="bottom">아래쪽 테두리</button>
-              <button data-border="left">왼쪽 테두리</button>
-              <button data-border="right">오른쪽 테두리</button>
-              <button data-border="none">테두리 없음</button>
-            </div>
-          </span>
-          <button id="btn-cell-clear-format" class="icon-btn" title="서식 지우기">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 21-4.3-4.3c-.94-.94-.94-2.46 0-3.4l9.6-9.6c.94-.94 2.46-.94 3.4 0l5.6 5.6c.94.94.94 2.46 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>
-          </button>
+          </div>
         </div>
         <span class="ribbon-group-label">글꼴</span>
       </div>
 
       <div class="ribbon-group">
         <div class="ribbon-group-buttons ribbon-group-buttons-wrap">
-          <button id="btn-valign-top" class="icon-btn" title="위쪽 맞춤">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4h16"/><path d="M8 9v11M8 9l-2.5 2.5M8 9l2.5 2.5"/><path d="M16 9v7M16 9l-2.5 2.5M16 9l2.5 2.5"/></svg>
-          </button>
-          <button id="btn-valign-middle" class="icon-btn" title="가운데 맞춤">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h4M16 12h4"/><path d="M8 4v6M8 4l-2.5 2.5M8 4l2.5 2.5M8 20v-6M8 20l-2.5-2.5M8 20l2.5-2.5"/><path d="M16 8v-4M16 8l-2.5-2.5M16 8l2.5-2.5M16 16v4M16 16l-2.5 2.5M16 16l2.5 2.5"/></svg>
-          </button>
-          <button id="btn-valign-bottom" class="icon-btn" title="아래쪽 맞춤">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20h16"/><path d="M8 15V4M8 15l-2.5-2.5M8 15l2.5-2.5"/><path d="M16 15V8M16 15l-2.5-2.5M16 15l2.5-2.5"/></svg>
-          </button>
-          <button id="btn-cell-align-l" class="icon-btn" title="왼쪽 정렬">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h14"/></svg>
-          </button>
-          <button id="btn-cell-align-c" class="icon-btn" title="가운데 정렬">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M8 12h8M6 18h12"/></svg>
-          </button>
-          <button id="btn-cell-align-r" class="icon-btn" title="오른쪽 정렬">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M10 12h10M6 18h14"/></svg>
-          </button>
-          <button id="btn-wrap-text" class="icon-btn" title="자동 줄 바꿈">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h13a3 3 0 0 1 0 6h-3"/><path d="m15.5 15.5 2.5 2.5-2.5 2.5"/><path d="M3 18h6"/></svg>
-          </button>
+          <div class="ribbon-row">
+            <button id="btn-valign-top" class="icon-btn" title="위쪽 맞춤">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" stroke-opacity=".55"/><path d="M6.5 7h11M6.5 10h7" stroke-width="2"/></svg>
+            </button>
+            <button id="btn-valign-middle" class="icon-btn" title="가운데 맞춤">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" stroke-opacity=".55"/><path d="M6.5 10.5h11M6.5 13.5h7" stroke-width="2"/></svg>
+            </button>
+            <button id="btn-valign-bottom" class="icon-btn" title="아래쪽 맞춤">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" stroke-opacity=".55"/><path d="M6.5 14h11M6.5 17h7" stroke-width="2"/></svg>
+            </button>
+            <button id="btn-wrap-text" class="icon-btn ribbon-btn-labeled" title="자동 줄 바꿈">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h13a3 3 0 0 1 0 6h-3"/><path d="m15.5 15.5 2.5 2.5-2.5 2.5"/><path d="M3 18h6"/></svg>
+              <span class="ribbon-btn-label">자동 줄 바꿈</span>
+            </button>
+          </div>
+          <div class="ribbon-row">
+            <button id="btn-cell-align-l" class="icon-btn" title="왼쪽 정렬">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h14"/></svg>
+            </button>
+            <button id="btn-cell-align-c" class="icon-btn" title="가운데 정렬">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M8 12h8M6 18h12"/></svg>
+            </button>
+            <button id="btn-cell-align-r" class="icon-btn" title="오른쪽 정렬">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M10 12h10M6 18h14"/></svg>
+            </button>
+          </div>
         </div>
         <span class="ribbon-group-label">맞춤</span>
       </div>
 
       <div class="ribbon-group">
         <div class="ribbon-group-buttons ribbon-group-buttons-wrap">
-          <select id="cell-numfmt-select" class="toolbar-select toolbar-select-wide" title="표시 형식">
-            <option value="general">일반</option>
-            <option value="number">숫자</option>
-            <option value="currency">통화</option>
-            <option value="percent">백분율</option>
-          </select>
-          <button id="btn-numfmt-currency" class="icon-btn" title="회계 표시 형식">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H12"/><path d="M7 12h9"/><path d="M9.5 12a3.5 3.5 0 1 0 0 7H17"/></svg>
-          </button>
-          <button id="btn-numfmt-percent" class="icon-btn" title="백분율 스타일 (Ctrl+Shift+%)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5 5 19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>
-          </button>
-          <button id="btn-numfmt-comma" class="icon-btn" title="쉼표 스타일">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h16M4 14h10"/><path d="M9 18c0 1.4-.6 2.2-1.6 2.6"/></svg>
-          </button>
-          <button id="btn-numfmt-decimal-down" class="icon-btn" title="자릿수 줄임">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><text x="2" y="16" font-size="11" stroke="none" fill="currentColor">.0</text><path d="M15 5v6M12.5 8.5 15 11l2.5-2.5"/></svg>
-          </button>
-          <button id="btn-numfmt-decimal-up" class="icon-btn" title="자릿수 늘림">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><text x="1" y="16" font-size="10" stroke="none" fill="currentColor">.00</text><path d="M18 11V5M15.5 7.5 18 5l2.5 2.5"/></svg>
-          </button>
+          <div class="ribbon-row">
+            <select id="cell-numfmt-select" class="toolbar-select toolbar-select-wide toolbar-select-full" title="표시 형식">
+              <option value="general">일반</option>
+              <option value="number">숫자</option>
+              <option value="currency">통화</option>
+              <option value="percent">백분율</option>
+            </select>
+          </div>
+          <div class="ribbon-row">
+            <button id="btn-numfmt-currency" class="icon-btn" title="회계 표시 형식">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H12"/><path d="M7 12h9"/><path d="M9.5 12a3.5 3.5 0 1 0 0 7H17"/></svg>
+            </button>
+            <button id="btn-numfmt-percent" class="icon-btn" title="백분율 스타일 (Ctrl+Shift+%)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5 5 19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>
+            </button>
+            <button id="btn-numfmt-comma" class="icon-btn" title="쉼표 스타일">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h16M4 14h10"/><path d="M9 18c0 1.4-.6 2.2-1.6 2.6"/></svg>
+            </button>
+            <button id="btn-numfmt-decimal-down" class="icon-btn" title="자릿수 줄임">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><text x="2" y="16" font-size="11" stroke="none" fill="currentColor">.0</text><path d="M15 5v6M12.5 8.5 15 11l2.5-2.5"/></svg>
+            </button>
+            <button id="btn-numfmt-decimal-up" class="icon-btn" title="자릿수 늘림">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><text x="1" y="16" font-size="10" stroke="none" fill="currentColor">.00</text><path d="M18 11V5M15.5 7.5 18 5l2.5 2.5"/></svg>
+            </button>
+          </div>
         </div>
         <span class="ribbon-group-label">표시 형식</span>
       </div>

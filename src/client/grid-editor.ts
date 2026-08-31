@@ -308,6 +308,7 @@ async function main(): Promise<void> {
     if (!style?.nf || text.trim() === '') return text;
     const num = Number(text);
     if (!Number.isFinite(num)) return text;
+    if (num === 0) return ''; // 값 없음(0)은 화면을 어지럽히지 않게 빈 칸으로 보여준다
     const decimals = style.nd ?? 0;
     const opts = { minimumFractionDigits: decimals, maximumFractionDigits: decimals };
     switch (style.nf) {
@@ -1090,16 +1091,32 @@ async function main(): Promise<void> {
       el.classList.remove('g-col-selected', 'g-row-selected');
     });
   }
+  // 열/행 머리글을 클릭하면 시각적 표시만 하는 게 아니라, 서식 툴바가 실제로 적용할 범위
+  // (selAnchor~selFocus)도 그 열/행 전체로 잡아야 한다 — 안 그러면 rangeBounds()가 여전히
+  // 마지막으로 포커스했던 칸 하나만 가리켜, 열/행을 선택한 채 서식을 바꿔도 그 칸에만 적용되고
+  // 나머지는 그대로인 것처럼 보였다(실제로는 "적용이 안 되는" 게 아니라 "한 칸에만 적용되는" 버그).
   function selectColumn(col: number): void {
     clearActiveHeaders();
     clearHeaderSelection();
-    clearRangeHighlight();
+    const { rowCount } = currentStructure();
+    selAnchorRow = 0;
+    selFocusRow = Math.max(0, rowCount - 1);
+    selAnchorCol = col;
+    selFocusCol = col;
+    activeCellKey = gridCellKey(activeSheet, selAnchorRow, col);
+    renderRangeHighlight();
     tableEl.querySelectorAll(`[data-col="${col}"]`).forEach((el) => el.classList.add('g-col-selected'));
   }
   function selectRow(row: number): void {
     clearActiveHeaders();
     clearHeaderSelection();
-    clearRangeHighlight();
+    const { colCount } = currentStructure();
+    selAnchorRow = row;
+    selFocusRow = row;
+    selAnchorCol = 0;
+    selFocusCol = Math.max(0, colCount - 1);
+    activeCellKey = gridCellKey(activeSheet, row, selAnchorCol);
+    renderRangeHighlight();
     tableEl.querySelectorAll(`[data-row="${row}"]`).forEach((el) => el.classList.add('g-row-selected'));
   }
   // 잠긴 칸은 focus 리스너 자체가 안 붙으므로(편집 불가) setActiveHeaders를 못 거친다 — 어떤 칸을
@@ -1262,8 +1279,6 @@ async function main(): Promise<void> {
     if (s.colCount <= 1) return;
     structure.set(String(activeSheet), { ...s, colCount: s.colCount - 1 });
   });
-  document.getElementById('btn-undo')?.addEventListener('click', () => undoManager.undo());
-  document.getElementById('btn-redo')?.addEventListener('click', () => undoManager.redo());
 
   // ---------- 서식 도구 (선택 범위 전체에 적용, 오피스처럼 눌린 상태로 반영) ----------
   function setPressed(id: string, pressed: boolean): void {
@@ -1352,11 +1367,17 @@ async function main(): Promise<void> {
     syncCellToolbarState(activeCellKey);
   });
 
+  // 글자 색/배경 색 — 아이콘을 누르면 막대에 표시된 마지막 색이 바로 적용되고, 캐럿을
+  // 눌러야 네이티브 색상 선택기가 뜬다(엑셀과 동일하게 "적용 버튼"과 "색 고르기"를 분리).
   const cellColorInput = document.getElementById('cell-font-color') as HTMLInputElement | null;
   const cellColorBtn = document.getElementById('cell-font-color-btn') as HTMLElement | null;
-  cellColorBtn?.style.setProperty('--btn-color', cellColorInput?.value ?? '#1b1a17');
+  cellColorBtn?.style.setProperty('--btn-color', cellColorInput?.value ?? '#c0392b');
   cellColorInput?.addEventListener('input', () => {
     cellColorBtn?.style.setProperty('--btn-color', cellColorInput.value);
+    updateStyle((current) => ({ ...current, col: cellColorInput.value }));
+  });
+  document.getElementById('btn-font-color-apply')?.addEventListener('click', () => {
+    if (!cellColorInput) return;
     updateStyle((current) => ({ ...current, col: cellColorInput.value }));
   });
   const cellBgInput = document.getElementById('cell-bg-color') as HTMLInputElement | null;
@@ -1364,6 +1385,10 @@ async function main(): Promise<void> {
   cellBgBtn?.style.setProperty('--btn-color', cellBgInput?.value ?? '#ffff00');
   cellBgInput?.addEventListener('input', () => {
     cellBgBtn?.style.setProperty('--btn-color', cellBgInput.value);
+    updateStyle((current) => ({ ...current, bg: cellBgInput.value }));
+  });
+  document.getElementById('btn-bg-color-apply')?.addEventListener('click', () => {
+    if (!cellBgInput) return;
     updateStyle((current) => ({ ...current, bg: cellBgInput.value }));
   });
 
@@ -1421,7 +1446,7 @@ async function main(): Promise<void> {
         delete next.nd;
       } else {
         next.nf = numfmtSelect.value as CellStyleAttrs['nf'];
-        if (!next.nd) next.nd = next.nf === 'percent' ? 0 : 2;
+        if (!next.nd) next.nd = next.nf === 'currency' ? 2 : 0;
       }
       return next;
     });
@@ -1431,7 +1456,7 @@ async function main(): Promise<void> {
   }
   document.getElementById('btn-numfmt-currency')?.addEventListener('click', () => applyQuickNumFmt('currency', 2));
   document.getElementById('btn-numfmt-percent')?.addEventListener('click', () => applyQuickNumFmt('percent', 0));
-  document.getElementById('btn-numfmt-comma')?.addEventListener('click', () => applyQuickNumFmt('number', 2));
+  document.getElementById('btn-numfmt-comma')?.addEventListener('click', () => applyQuickNumFmt('number', 0));
   function stepDecimals(delta: number): void {
     updateStyle((current) => {
       const nextDecimals = Math.max(0, (current.nd ?? 0) + delta);
@@ -1618,6 +1643,19 @@ async function main(): Promise<void> {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
       event.preventDefault();
       openSearch();
+      return;
+    }
+    // Ctrl/Cmd+Z(실행 취소), Ctrl/Cmd+Y(다시 실행) — 셀 편집 중(입력창에 포커스)이 아닐 때만
+    // 그리드 단위 undo/redo로 처리한다. 편집 중이면 브라우저의 기본 텍스트 입력 undo가 자연스럽다.
+    const target = event.target as HTMLElement | null;
+    const isTextInput = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+    if (isTextInput) return;
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      undoManager.undo();
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+      event.preventDefault();
+      undoManager.redo();
     }
   });
 
