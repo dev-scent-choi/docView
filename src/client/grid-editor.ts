@@ -421,6 +421,13 @@ async function main(): Promise<void> {
   const GRID_COL_PADDING = 6;
   const GRID_MIN_RENDER_ROWS = 25;
   const GRID_MIN_RENDER_COLS = 12;
+  /** spreadsheet.ts의 DEFAULT_COL_WIDTH_PX와 같은 값 — 클라이언트 번들에 ExcelJS를 끌어오는
+   * spreadsheet.ts를 직접 import할 수 없어(gridShared.ts와 동일한 이유) 값만 맞춰 둔다. */
+  const DEFAULT_COL_WIDTH_PX = 100;
+  /** .g-edit-rownum의 min-width와 맞춘 대략치 — 아래 tableEl.style.width 계산에만 쓰이고, 실제
+   * 행번호 열 폭은 여전히 CSS(min-width)가 정한다. 정확히 안 맞아도 상관없다: 테이블에 "auto가
+   * 아닌" width를 준다는 사실 자체가 중요하지, 합계가 1px이라도 틀리면 안 되는 게 아니다. */
+  const ROWNUM_COL_WIDTH_PX = 28;
 
   /** 병합 정보(1-based)를 0-based (row:col) 조회표로 바꾼다 — viewer.js의 buildMergeIndex와 동일한 원리.
    * anchors: 병합의 왼쪽위 칸 → {rs,cs}(rowspan/colspan). covered: 그 외 병합에 덮인 칸(<td>를 아예 안 그림). */
@@ -460,6 +467,27 @@ async function main(): Promise<void> {
     const { anchors, covered } = buildMergeLookup(activeSheet);
     const freezeRows = sheet.freezeRows ?? 0;
     const freezeCols = sheet.freezeCols ?? 0;
+
+    // table-layout:fixed에서 열 너비를 정확히 고정하려면 <colgroup>이 가장 확실하다(그 전까진
+    // 첫 번째 행 셀 너비에 의존해 왔음 — 실제 엑셀 열 너비 정보가 없던 시절의 임시 방편이었다).
+    // 행번호 열은 폭을 지정하지 않아 기존 CSS(.g-edit-rownum min-width)가 그대로 정한다 — 실제
+    // 엑셀 열이 아니라 에디터가 그리는 것이라 colWidths에 대응하는 값이 없다.
+    const colgroup = document.createElement('colgroup');
+    colgroup.appendChild(document.createElement('col'));
+    let totalColWidthPx = ROWNUM_COL_WIDTH_PX;
+    for (let c = 0; c < renderColCount; c += 1) {
+      const width = sheet.colWidths?.[c] ?? DEFAULT_COL_WIDTH_PX;
+      const col = document.createElement('col');
+      col.style.width = `${width}px`;
+      colgroup.appendChild(col);
+      totalColWidthPx += width;
+    }
+    tableEl.appendChild(colgroup);
+    // Chromium은 table-layout:fixed + <colgroup>이어도, 테이블 자체 width가 auto인 채로 열이
+    // 많으면(대략 12~15개 이상) 개별 <col> 폭을 조용히 무시하고 자체적으로 재분배해버린다(실측
+    // 확인됨 — 열이 적을 때는 정상 동작). 테이블에 명시적 width를 주면(정확한 합계가 아니어도,
+    // "auto가 아니다"라는 사실만으로) 이 경로를 피하고 각 열이 지정한 폭 그대로 그려진다.
+    tableEl.style.width = `${totalColWidthPx}px`;
 
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');

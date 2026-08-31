@@ -162,6 +162,28 @@ async function flushToStore(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<
   await recordAudit({ type: 'edit_saved', docId });
 }
 
+/**
+ * 지금 그 문서를 편집 중인 세션(룸)이 메모리에 떠 있으면, 아직 유휴 자동저장(8초 debounce) 전이라
+ * 디스크의 원본은 최신이 아닐 수 있다 — 그런 경우 디스크에 쓰지는 않고 그 자리에서만 최신 Y.Doc
+ * 상태로 바이트를 만들어 돌려준다("방금 입력한 값을 바로 다운로드"가 안 되던 문제의 원인). 룸이
+ * 없으면(=마지막 참여자가 나가며 이미 flushToStore로 디스크에 반영됨) null을 돌려주고, 호출측은
+ * store.readOriginal을 그대로 쓰면 된다.
+ */
+export async function getCurrentBytes(docId: string): Promise<Uint8Array | null> {
+  const room = rooms.get(docId);
+  if (!room) return null;
+  await room.ready;
+  const meta = await store.readMeta(docId);
+  if (!meta) return null;
+  const original = await store.readOriginal(docId, meta.ext);
+  if (room.kind === 'xlsx') {
+    return exportXlsxFromGrid(original, room.ydoc);
+  }
+  const fragment = room.ydoc.getXmlFragment(XML_FRAGMENT_NAME);
+  const pmDoc = yXmlFragmentToProseMirrorRootNode(fragment, docxSchema);
+  return exportDocx(original, pmDoc);
+}
+
 function scheduleAutosave(room: Room): void {
   if (room.autosaveTimer) clearTimeout(room.autosaveTimer);
   room.autosaveTimer = setTimeout(() => {

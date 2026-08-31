@@ -10,6 +10,7 @@ import { PageOutOfRangeError, buildPrintPdf, getPageDimensions, renderPage } fro
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { extractPdfText, searchPdfText, type PageText } from '../search.js';
 import { docxHasUnsupportedContent } from '../docx/import.js';
+import { getCurrentBytes } from '../collab/room.js';
 import type { GridCell, GridHeader } from '../spreadsheet.js';
 import { store } from '../storage.js';
 import type { DocumentMeta, ViewClaims } from '../types.js';
@@ -416,7 +417,10 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
         await recordAudit({ type: 'download_denied', docId: view.meta.id, viewer: view.claims.viewer });
         return reply.code(403).send({ success: false, error: '저장(다운로드) 권한이 없습니다.' });
       }
-      const data = await store.readOriginal(view.meta.id, view.meta.ext);
+      // 지금 이 문서를 편집 중인 동시편집 세션이 떠 있으면(=유휴 자동저장 8초 debounce가 아직 안
+      // 지났을 수 있음) 디스크의 원본이 최신이 아닐 수 있다 — 그 경우 메모리의 Y.Doc에서 바로 최신
+      // 바이트를 만든다. 세션이 없으면(이미 디스크에 반영 완료) 원본을 그대로 쓴다.
+      const data = (await getCurrentBytes(view.meta.id)) ?? (await store.readOriginal(view.meta.id, view.meta.ext));
       await recordAudit({ type: 'downloaded', docId: view.meta.id, viewer: view.claims.viewer });
       const encodedName = encodeURIComponent(view.meta.name);
       return reply

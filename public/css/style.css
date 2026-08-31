@@ -967,7 +967,13 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   text-overflow: ellipsis;
   transition: box-shadow var(--duration-fast) ease;
 }
-.grid-edit-table td.g-editable:hover { background: var(--v-hover); }
+/* 셀 마우스 호버 배경도 행/열 머리글을 클릭해 선택했을 때와 같은 회색(#e0e0e0)을 쓴다 —
+   앱 공통 톤(var(--v-hover), 따뜻한 베이지)이 아니라 그리드 자체의 선택색과 통일한다.
+   !important가 필요한 이유: applyStyleToTd가 엑셀의 실제 배경색(예: 이름 열의 회색 채우기)을
+   인라인 style.background로 직접 써 넣는데, 인라인 스타일은 일반 클래스 선택자보다 항상 이겨서
+   그냥 :hover만으로는 그 칸에서 호버 색이 전혀 안 보인다 — g-hit-current/g-col-selected 등
+   같은 이유로 이미 !important를 쓰고 있는 것과 동일한 패턴. */
+.grid-edit-table td.g-editable:hover { background: #e0e0e0 !important; }
 /* 엑셀처럼 셀을 클릭하면(선택만) 바로 편집모드가 되지 않고 뚜렷한 테두리로 "선택됨"만 표시한다 —
    더블클릭이나 F2를 눌러야 실제로 편집모드(contenteditable=true)가 된다. 이 테두리 자체는 잠긴 칸을
    포함해 어떤 칸이든(포커스만 되면) 항상 보여야 하므로 .g-editable 여부와 무관하게 td:focus에 건다. */
@@ -992,7 +998,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   cursor: default;
   font-weight: 600;
 }
-.grid-edit-table td.g-locked:hover { background: #f2f2f2; }
+.grid-edit-table td.g-locked:hover { background: #e0e0e0 !important; }
 
 /* 엑셀의 "자동 채우기 핸들" — 선택된 칸 오른쪽 아래 모서리의 작은 사각형을 드래그하면 그 값이
    지나간 칸들에 복사된다(grid-editor.ts의 fillSource/onFillDragMove 로직과 짝). scrollHost(.grid-
@@ -1021,7 +1027,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 
 /* 클릭하면 부모 창에 알림을 보내는 잠긴 병합 셀(예: 제목 배너) — 클릭 가능함을 드러낸다 */
 .grid-edit-table td.g-clickable-header { cursor: pointer; }
-.grid-edit-table td.g-clickable-header:hover { background: var(--v-hover); }
+.grid-edit-table td.g-clickable-header:hover { background: #e0e0e0 !important; }
 /* 목록에서 고르는(연도 등) 칸에만 드롭다운 화살표를 붙인다 — 다른 클릭 가능한 칸은 텍스트 자체의
    "(클릭)" 표기로 충분하다. */
 .grid-edit-table td.g-header-dropdown::after {

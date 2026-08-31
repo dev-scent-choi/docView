@@ -35,6 +35,10 @@ export interface SheetStructure {
   /** 엑셀 "틀 고정" — 위 N행/왼쪽 N열은 스크롤해도 계속 보인다. 없으면 둘 다 0. */
   readonly freezeRows?: number;
   readonly freezeCols?: number;
+  /** 열별 실제 엑셀 너비(px, 시딩 시 spreadsheet.ts가 문자 단위를 변환해 넣는다) — 시트에 실제로
+   * 있는 열 개수만큼만 있고, 그 뒤(편집기가 여백으로 더 그리는 빈 열들)는 없다. 없으면(구버전 문서
+   * 등) 그리드 에디터가 기본 폭으로 그린다. */
+  readonly colWidths?: readonly number[];
 }
 
 /**

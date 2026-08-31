@@ -68,6 +68,7 @@ export function seedGridFromXlsx(ydoc: Y.Doc, grid: GridDocument): void {
       colCount: sheet.colCount,
       freezeRows: sheet.freezeRows,
       freezeCols: sheet.freezeCols,
+      colWidths: sheet.colWidths,
     });
     if (sheet.merges.length > 0) merges.set(String(sheetIdx), sheet.merges);
     const covered = mergeCoveredCells(sheet.merges);
