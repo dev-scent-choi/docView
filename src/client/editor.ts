@@ -17,7 +17,7 @@ import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { redo, undo, ySyncPlugin, yCursorPlugin, yUndoPlugin } from 'y-prosemirror';
 import { docxSchema } from '../docx/schema.js';
-import { pickPresenceColor, renderPresenceAvatars } from './presence.js';
+import { pickPresenceColorForName, renderPresenceAvatars } from './presence.js';
 
 interface Permissions {
   readonly canPrint: boolean;
@@ -284,7 +284,9 @@ async function main(): Promise<void> {
     params: { token },
   });
 
-  const localColor = pickPresenceColor(ydoc.clientID);
+  // 이름 기준으로 색을 정한다(ydoc.clientID는 접속마다 무작위라 같은 사람이 다른 브라우저로
+  // 들어오면 매번 색이 달라져 버린다) — 같은 이름이면 항상 같은 색.
+  const localColor = pickPresenceColorForName(info.viewer);
   provider.awareness.setLocalStateField('user', { name: info.viewer, color: localColor });
 
   provider.on('status', (event: { status: string }) => {

@@ -1060,26 +1060,9 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   100% { opacity: 0; }
 }
 
-/* 다른 참여자가 지금 편집 중인 셀 — "누가 어디를 수정 중인지" 표시 */
+/* 다른 참여자가 지금 편집 중인 셀 — 이름표 없이 그 사람 색 테두리만으로 "누가 여기 있다"를 표시 */
 .grid-edit-table td.g-remote-cell {
   box-shadow: inset 0 0 0 2px var(--remote-color);
-}
-.g-remote-tag {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-  max-width: calc(100% - 4px);
-  padding: 0 0.3rem;
-  border-radius: 3px;
-  font-size: 0.6rem;
-  font-weight: 600;
-  line-height: 1.4;
-  color: #08201d;
-  background: var(--remote-color);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  pointer-events: none;
 }
 
 .grid-sheet-tabs {

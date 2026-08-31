@@ -15,7 +15,7 @@ import {
   type SheetStructure,
 } from '../collab/gridShared.js';
 import { formulaFunctions, formulaFunctionsNeedContext } from './formulaOverrides.js';
-import { pickPresenceColor, renderPresenceAvatars, type AwarenessUserState } from './presence.js';
+import { dedupeByName, pickPresenceColorForName, renderPresenceAvatars, type AwarenessUserState } from './presence.js';
 
 interface Permissions {
   readonly canPrint: boolean;
@@ -159,7 +159,9 @@ async function main(): Promise<void> {
     params: { token },
   });
 
-  const localColor = pickPresenceColor(ydoc.clientID);
+  // 이름 기준으로 색을 정한다(ydoc.clientID는 접속마다 무작위라 같은 사람이 다른 브라우저로
+  // 들어오면 매번 색이 달라져 버린다) — 같은 이름이면 항상 같은 색.
+  const localColor = pickPresenceColorForName(info.viewer);
   provider.awareness.setLocalStateField('user', { name: info.viewer, color: localColor });
 
   provider.on('status', (event: { status: string }) => {
@@ -188,11 +190,25 @@ async function main(): Promise<void> {
       });
     }
   });
+  /** 이 문서를 iframe으로 임베드한 부모 창(예: 업체별 접속현황 탭)이 자기 UI 안에 접속자 아바타를
+   * 직접 그릴 수 있도록, webviewer 자신의 툴바(chrome=hidden이면 안 보임)와는 별개로 접속자 목록을
+   * 그대로 postMessage로도 흘려보낸다 — webviewer는 그 목록을 "어디에" 보여줄지 전혀 몰라도 된다. */
+  function postPresenceToParent(): void {
+    if (window.parent === window) return;
+    const states = [...provider.awareness.getStates().entries()] as Array<[number, AwarenessUserState]>;
+    const users = dedupeByName(states).map(([, state]) => ({
+      name: state.user!.name!,
+      color: state.user!.color ?? pickPresenceColorForName(state.user!.name!),
+    }));
+    window.parent.postMessage({ type: 'docview:presence', users }, '*');
+  }
   provider.awareness.on('change', () => {
     renderPresenceAvatars(presenceEl, provider.awareness);
     renderRemoteCellHighlights();
+    postPresenceToParent();
   });
   renderPresenceAvatars(presenceEl, provider.awareness);
+  postPresenceToParent();
 
   const undoManager = new Y.UndoManager([cells, structure, styles]);
 
@@ -652,10 +668,34 @@ async function main(): Promise<void> {
     sel?.addRange(range);
   }
 
+  /** 지금 이 칸을 다른 참여자가 편집 중이면 그 사람 정보를 돌려준다(없으면 null) — 있으면 이 칸은
+   * 편집모드로 못 들어간다(같은 칸을 동시에 고치는 충돌을 막는다. 서버가 강제하는 진짜 락은 아니고
+   * awareness 브로드캐스트 기반의 느슨한 락이라, 정확히 동시에 누르는 극단적인 경우까지 완벽히
+   * 막지는 못하지만 — 실사용에서 충분하다). */
+  function remoteEditorOf(row: number, col: number): { name: string; color: string } | null {
+    const states = provider.awareness.getStates() as Map<number, RemoteCellState>;
+    for (const [clientId, state] of states) {
+      if (clientId === ydoc.clientID) continue;
+      const cell = state.cell;
+      if (!cell || cell.sheetIdx !== activeSheet || cell.row !== row || cell.col !== col) continue;
+      const name = state.user?.name;
+      if (!name) continue;
+      return { name, color: state.user?.color ?? pickPresenceColorForName(name) };
+    }
+    return null;
+  }
+
   function enterEditMode(td: HTMLTableCellElement, key: string, replaceWith?: string): void {
     if (!td.classList.contains('g-editable')) return; // 잠긴 칸/읽기전용 문서는 편집모드 자체가 없다
-    editingKey = key;
     const parsed = parseGridCellKey(key);
+    if (parsed) {
+      const other = remoteEditorOf(parsed.row, parsed.col);
+      if (other) {
+        showCellTooltip(td, `${other.name}님이 편집 중입니다.`);
+        return;
+      }
+    }
+    editingKey = key;
     if (parsed) provider.awareness.setLocalStateField('cell', parsed); // "지금 편집 중" — 다른 참여자에게 표시
     td.contentEditable = 'true';
     td.textContent = replaceWith !== undefined ? replaceWith : cells.get(key) ?? '';
@@ -998,11 +1038,12 @@ async function main(): Promise<void> {
   }
 
   /** 다른 참여자가 지금 편집 중인 셀에 색 테두리 + 작은 이름표를 띄운다("누가 어디를 수정 중인지"). */
+  /** 다른 참여자가 지금 편집 중인 셀에 그 사람 색으로 테두리만 두른다(이름표는 따로 안 보여준다 —
+   * 색만으로 "누군가 지금 여기 있다"는 걸 충분히 알 수 있으면 됨). */
   function renderRemoteCellHighlights(): void {
     tableEl.querySelectorAll<HTMLTableCellElement>('.g-remote-cell').forEach((td) => {
       td.classList.remove('g-remote-cell');
       td.style.removeProperty('--remote-color');
-      td.querySelector('.g-remote-tag')?.remove();
     });
     const states = provider.awareness.getStates() as Map<number, RemoteCellState>;
     for (const [clientId, state] of states) {
@@ -1012,14 +1053,9 @@ async function main(): Promise<void> {
       if (!cell || !name || cell.sheetIdx !== activeSheet) continue;
       const td = tdFor(cell.row, cell.col);
       if (!td) continue;
-      const color = state.user?.color ?? pickPresenceColor(clientId);
+      const color = state.user?.color ?? pickPresenceColorForName(name);
       td.classList.add('g-remote-cell');
       td.style.setProperty('--remote-color', color);
-      const tag = document.createElement('span');
-      tag.className = 'g-remote-tag';
-      tag.style.setProperty('--remote-color', color);
-      tag.textContent = name;
-      td.appendChild(tag);
     }
   }
 
