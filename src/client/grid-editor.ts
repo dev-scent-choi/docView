@@ -163,6 +163,11 @@ async function main(): Promise<void> {
   // 들어오면 매번 색이 달라져 버린다) — 같은 이름이면 항상 같은 색.
   const localColor = pickPresenceColorForName(info.viewer);
   provider.awareness.setLocalStateField('user', { name: info.viewer, color: localColor });
+  // 그리드 전체의 기본 --remote-color를 내 색으로 깔아 둔다 — 그러면 칸을 선택만 한 순간부터도
+  // (편집모드에 들어가기 전부터) 이미 내 아바타 색 테두리로 보이고, 실제로 편집모드에 들어가도
+  // 색이 안 바뀌니 따로 트랜지션을 신경 쓸 필요가 없다. 다른 참여자가 편집 중인 칸은 그 칸에 직접
+  // 걸리는 인라인 --remote-color(renderRemoteCellHighlights)가 이 기본값보다 항상 우선한다.
+  tableEl.style.setProperty('--remote-color', localColor);
 
   provider.on('status', (event: { status: string }) => {
     statusEl.textContent =
@@ -219,6 +224,13 @@ async function main(): Promise<void> {
   /** 지금 실제로 편집 중(contenteditable=true, 텍스트 커서 보임)인 칸. 엑셀처럼 칸을 클릭만 하면
    * "선택"만 되고, F2·더블클릭·직접 타이핑을 해야 이 값이 채워지며 편집모드로 들어간다. */
   let editingKey: string | null = null;
+  /** 다중 셀 드래그 선택의 두 꼭짓점 — 드래그 안 하고 그냥 칸 하나만 클릭/이동했으면 앵커=포커스로
+   * 같아서(1×1 범위) 별도 배경 없이 기존 :focus 테두리만 보인다. */
+  let selAnchorRow = 0;
+  let selAnchorCol = 0;
+  let selFocusRow = 0;
+  let selFocusCol = 0;
+  let isRangeDragging = false;
 
   // ---------- 수식 계산 엔진: '='로 시작하는 셀은 실시간으로 계산 결과를 보여준다 ----------
   // fast-formula-parser(MIT)를 쓴다 — 자체 수식 파서/계산기를 새로 만들면 SUM/IF/VLOOKUP/범위
@@ -604,11 +616,35 @@ async function main(): Promise<void> {
         // 모든 칸에 건다. 편집 가능한 칸일 때만 채우기 핸들을 그 칸 오른쪽 아래에 놓는다.
         td.addEventListener('focus', () => {
           activeCellKey = key;
+          selAnchorRow = r;
+          selAnchorCol = c;
+          selFocusRow = r;
+          selFocusCol = c;
+          renderRangeHighlight();
           syncCellToolbarState(key);
           setActiveHeaders(r, c);
           cellRefBoxEl.textContent = cellRefLabel(r, c);
           formulaInputEl.value = cells.get(key) ?? '';
           positionFillHandle(canEditThisCell ? td : null);
+        });
+        // 다중 셀 드래그 선택 시작 — 편집 중인 칸 안에서는 텍스트 드래그 선택이 우선이라 건드리지 않는다.
+        td.addEventListener('mousedown', (event) => {
+          if (event.button !== 0 || editingKey === key) return;
+          // 기본 동작을 그대로 두면 브라우저가 "텍스트 드래그 선택"도 같이 시작해버린다 — 그건
+          // 사각형이 아니라 문서(행) 순서로 훑어서, 내가 계산한 범위보다 훨씬 넓게(중간 행의 다른
+          // 칸까지) 파랗게/회색으로 잡혀 보인다. preventDefault로 그 기본 동작을 끄고, 그때 같이
+          // 꺼지는 포커스만 아래에서 직접 다시 걸어준다.
+          event.preventDefault();
+          clearHeaderSelection();
+          selAnchorRow = r;
+          selAnchorCol = c;
+          selFocusRow = r;
+          selFocusCol = c;
+          isRangeDragging = true;
+          renderRangeHighlight();
+          td.focus();
+          document.addEventListener('mousemove', onRangeDragMove);
+          document.addEventListener('mouseup', onRangeDragEnd);
         });
         td.addEventListener('blur', () => {
           if (editingKey !== key) return; // 편집 중이 아니었으면(그냥 선택만) 커밋할 것이 없다
@@ -799,13 +835,28 @@ async function main(): Promise<void> {
         moveSelection(row, col, 0, 1);
         break;
       case 'Delete':
-      case 'Backspace':
-        if (canEditThisCell && (cells.get(key) ?? '') !== '') {
-          event.preventDefault();
-          ydoc.transact(() => cells.delete(key));
-        }
+      case 'Backspace': {
+        if (!canEdit) break;
+        event.preventDefault();
+        const { r0, r1, c0, c1 } = rangeBounds();
+        ydoc.transact(() => {
+          for (let r = r0; r <= r1; r += 1) {
+            for (let c = c0; c <= c1; c += 1) {
+              const k = gridCellKey(activeSheet, r, c);
+              if (styles.get(k)?.lk === 1) continue; // 잠긴 칸은 건너뜀(선택 범위에 섞여 있어도 됨)
+              if ((cells.get(k) ?? '') !== '') cells.delete(k);
+            }
+          }
+        });
         break;
+      }
       default:
+        // Ctrl/Cmd+C — 지금 선택된 범위를 TSV로 클립보드에 복사한다.
+        if ((event.ctrlKey || event.metaKey) && (event.key === 'c' || event.key === 'C')) {
+          event.preventDefault();
+          copySelectionToClipboard();
+          break;
+        }
         // 선택된 채로 문자를 바로 치면(엑셀처럼) 기존 값을 지우고 그 문자로 편집모드에 들어간다.
         if (canEditThisCell && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
           event.preventDefault();
@@ -1003,11 +1054,13 @@ async function main(): Promise<void> {
   function selectColumn(col: number): void {
     clearActiveHeaders();
     clearHeaderSelection();
+    clearRangeHighlight();
     tableEl.querySelectorAll(`[data-col="${col}"]`).forEach((el) => el.classList.add('g-col-selected'));
   }
   function selectRow(row: number): void {
     clearActiveHeaders();
     clearHeaderSelection();
+    clearRangeHighlight();
     tableEl.querySelectorAll(`[data-row="${row}"]`).forEach((el) => el.classList.add('g-row-selected'));
   }
   // 잠긴 칸은 focus 리스너 자체가 안 붙으므로(편집 불가) setActiveHeaders를 못 거친다 — 어떤 칸을
@@ -1015,6 +1068,64 @@ async function main(): Promise<void> {
   tableEl.addEventListener('click', (event) => {
     if ((event.target as HTMLElement).tagName === 'TD') clearHeaderSelection();
   });
+
+  // ---------- 다중 셀 드래그 선택 (엑셀처럼 클릭+드래그로 범위 선택) ----------
+  function rangeBounds(): { r0: number; r1: number; c0: number; c1: number } {
+    return {
+      r0: Math.min(selAnchorRow, selFocusRow),
+      r1: Math.max(selAnchorRow, selFocusRow),
+      c0: Math.min(selAnchorCol, selFocusCol),
+      c1: Math.max(selAnchorCol, selFocusCol),
+    };
+  }
+  function clearRangeHighlight(): void {
+    tableEl.querySelectorAll('.g-range-selected').forEach((el) => el.classList.remove('g-range-selected'));
+  }
+  /** 앵커~포커스 사각형에 배경을 칠한다 — 1칸짜리(드래그 안 한 보통 클릭)면 기존 :focus 테두리로
+   * 충분하니 별도 배경은 안 칠한다. */
+  function renderRangeHighlight(): void {
+    clearRangeHighlight();
+    const { r0, r1, c0, c1 } = rangeBounds();
+    if (r0 === r1 && c0 === c1) return;
+    for (let r = r0; r <= r1; r += 1) {
+      for (let c = c0; c <= c1; c += 1) {
+        tdFor(r, c)?.classList.add('g-range-selected');
+      }
+    }
+  }
+  function onRangeDragMove(event: MouseEvent): void {
+    const el = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+    const td = el?.closest('td[data-row][data-col]') as HTMLTableCellElement | null;
+    if (!td) return;
+    const row = Number(td.dataset.row);
+    const col = Number(td.dataset.col);
+    if (row === selFocusRow && col === selFocusCol) return;
+    selFocusRow = row;
+    selFocusCol = col;
+    renderRangeHighlight();
+  }
+  function onRangeDragEnd(): void {
+    isRangeDragging = false;
+    document.removeEventListener('mousemove', onRangeDragMove);
+    document.removeEventListener('mouseup', onRangeDragEnd);
+  }
+
+  /** 지금 선택된 범위를 엑셀과 같은 TSV(탭=열, 줄바꿈=행)로 클립보드에 담는다 — handlePaste가
+   * 읽는 형식과 대칭이라 그리드끼리, 또는 실제 엑셀과 오가는 복사/붙여넣기가 그대로 맞는다. */
+  function copySelectionToClipboard(): void {
+    const { r0, r1, c0, c1 } = rangeBounds();
+    const lines: string[] = [];
+    for (let r = r0; r <= r1; r += 1) {
+      const rowValues: string[] = [];
+      for (let c = c0; c <= c1; c += 1) {
+        rowValues.push(cells.get(gridCellKey(activeSheet, r, c)) ?? '');
+      }
+      lines.push(rowValues.join('\t'));
+    }
+    navigator.clipboard?.writeText(lines.join('\n')).catch(() => {
+      /* 클립보드 권한이 없는 환경이면 조용히 무시 — 복사 실패를 사용자에게 굳이 방해되게 알릴 정도는 아니다 */
+    });
+  }
 
   // 셀 편집 영역을 완전히 벗어날 때만(다른 셀로 이동하는 경우는 제외) awareness의 cell을 지운다 —
   // focusout은 버블링되므로 표 전체에 한 번만 걸어 둔다.
