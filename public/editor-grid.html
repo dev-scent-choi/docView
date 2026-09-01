@@ -212,27 +212,24 @@
     </div>
   </header>
 
-  <div id="search-bar" class="search-bar" hidden>
+  <div id="search-bar" class="search-bar" hidden role="dialog" aria-label="찾기 및 바꾸기">
     <div class="search-row">
-      <input id="search-input" type="text" placeholder="셀 값 검색…" autocomplete="off" />
-      <span id="search-count" class="search-count"></span>
-      <button id="search-prev" class="icon-btn" title="이전 결과" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
-      </button>
-      <button id="search-next" class="icon-btn" title="다음 결과" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-      </button>
-      <button id="search-toggle-replace" class="icon-btn" title="바꾸기 표시/숨기기" aria-expanded="false">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-      </button>
-      <button id="search-close" class="icon-btn" title="닫기">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-      </button>
+      <span class="search-label">찾을 내용:</span>
+      <input id="search-input" type="text" placeholder="찾을 내용…" autocomplete="off" />
+      <span id="search-scope-hint" class="search-scope-hint" hidden>선택 영역 안에서 찾음</span>
     </div>
     <div id="search-replace-row" class="search-row" hidden>
+      <span class="search-label">바꿀 내용:</span>
       <input id="search-replace-input" type="text" placeholder="바꿀 내용…" autocomplete="off" />
+    </div>
+    <div class="search-row search-actions">
+      <span id="search-count" class="search-count"></span>
+      <span class="search-actions-spacer"></span>
+      <button id="search-find-all" class="btn-mini">모두 찾기</button>
+      <button id="search-next" class="btn-mini" disabled>다음 찾기</button>
       <button id="search-replace-one" class="btn-mini">바꾸기</button>
       <button id="search-replace-all" class="btn-mini">모두 바꾸기</button>
+      <button id="search-close" class="btn-mini">닫기</button>
     </div>
   </div>
 

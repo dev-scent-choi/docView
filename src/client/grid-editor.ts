@@ -2297,11 +2297,17 @@ async function main(): Promise<void> {
   const searchBar = document.getElementById('search-bar') as HTMLElement;
   const searchInput = document.getElementById('search-input') as HTMLInputElement;
   const searchCount = document.getElementById('search-count') as HTMLElement;
-  const searchPrevBtn = document.getElementById('search-prev') as HTMLButtonElement;
   const searchNextBtn = document.getElementById('search-next') as HTMLButtonElement;
+  const searchScopeHintEl = document.getElementById('search-scope-hint') as HTMLElement | null;
+  const searchReplaceRow = document.getElementById('search-replace-row') as HTMLElement | null;
+  const searchReplaceInput = document.getElementById('search-replace-input') as HTMLInputElement | null;
   let searchMatches: CellMatch[] = [];
   let searchCurrent = -1;
   let lastHighlighted: HTMLTableCellElement | null = null;
+  let allHighlighted: HTMLTableCellElement[] = [];
+  // 엑셀처럼 — 다중 셀 범위를 선택한 채로 찾기/바꾸기를 열면 그 범위 안에서만 찾는다(셀 하나만
+  // 선택돼 있었으면 시트 전체). 대화상자를 여는 시점의 선택을 스냅샷으로 고정해 둔다.
+  let searchScope: { sheetIdx: number; r0: number; r1: number; c0: number; c1: number } | null = null;
 
   function findCellMatches(query: string): CellMatch[] {
     if (!query) return [];
@@ -2310,7 +2316,18 @@ async function main(): Promise<void> {
     for (const [key, value] of cells) {
       if (!value.toLowerCase().includes(lower)) continue;
       const parsed = parseGridCellKey(key);
-      if (parsed) matches.push(parsed);
+      if (!parsed) continue;
+      if (
+        searchScope &&
+        (parsed.sheetIdx !== searchScope.sheetIdx ||
+          parsed.row < searchScope.r0 ||
+          parsed.row > searchScope.r1 ||
+          parsed.col < searchScope.c0 ||
+          parsed.col > searchScope.c1)
+      ) {
+        continue;
+      }
+      matches.push(parsed);
     }
     matches.sort((a, b) => a.sheetIdx - b.sheetIdx || a.row - b.row || a.col - b.col);
     return matches;
@@ -2319,6 +2336,10 @@ async function main(): Promise<void> {
   function clearHighlight(): void {
     lastHighlighted?.classList.remove('g-hit-current');
     lastHighlighted = null;
+  }
+  function clearAllHighlight(): void {
+    allHighlighted.forEach((td) => td.classList.remove('g-hit-all'));
+    allHighlighted = [];
   }
 
   function jumpToMatch(index: number): void {
@@ -2339,23 +2360,44 @@ async function main(): Promise<void> {
   }
 
   function applySearch(jumpTo: number): void {
+    clearAllHighlight();
     searchMatches = findCellMatches(searchInput.value);
     searchCurrent =
       searchMatches.length > 0 ? ((jumpTo % searchMatches.length) + searchMatches.length) % searchMatches.length : -1;
     searchCount.textContent = searchMatches.length > 0 ? `${searchCurrent + 1}/${searchMatches.length}` : searchInput.value ? '0/0' : '';
-    searchPrevBtn.disabled = searchMatches.length === 0;
     searchNextBtn.disabled = searchMatches.length === 0;
     if (searchCurrent >= 0) jumpToMatch(searchCurrent);
     else clearHighlight();
   }
+  /** "모두 찾기" — 엑셀의 결과 목록 대신, 매치되는 칸을 전부(연한 노랑) 칠하고 첫 매치로 이동해
+   * (진한 노랑) 개수를 보여준다 — 지금 화면(활성 시트)에 실제로 그려진 칸만 칠할 수 있다. */
+  function findAllMatches(): void {
+    clearAllHighlight();
+    searchMatches = findCellMatches(searchInput.value);
+    searchCurrent = searchMatches.length > 0 ? 0 : -1;
+    searchCount.textContent = searchMatches.length > 0 ? `${searchMatches.length}개 찾음` : searchInput.value ? '0개 찾음' : '';
+    searchNextBtn.disabled = searchMatches.length === 0;
+    if (searchMatches.length === 0) {
+      clearHighlight();
+      return;
+    }
+    searchMatches.forEach((m) => {
+      if (m.sheetIdx !== activeSheet) return;
+      const td = tdFor(m.row, m.col);
+      if (td) {
+        td.classList.add('g-hit-all');
+        allHighlighted.push(td);
+      }
+    });
+    jumpToMatch(0);
+  }
   function openSearch(withReplace = false): void {
     searchBar.hidden = false;
-    if (withReplace) {
-      const replaceRow = document.getElementById('search-replace-row') as HTMLElement | null;
-      const toggleBtn = document.getElementById('search-toggle-replace');
-      if (replaceRow) replaceRow.hidden = false;
-      toggleBtn?.setAttribute('aria-expanded', 'true');
-    }
+    const range = rangeBounds();
+    const hasRealSelection = range.r0 !== range.r1 || range.c0 !== range.c1;
+    searchScope = hasRealSelection ? { sheetIdx: activeSheet, ...range } : null;
+    if (searchScopeHintEl) searchScopeHintEl.hidden = !hasRealSelection;
+    if (withReplace && searchReplaceRow) searchReplaceRow.hidden = false;
     searchInput.focus();
     searchInput.select();
   }
@@ -2363,12 +2405,13 @@ async function main(): Promise<void> {
     searchBar.hidden = true;
     searchInput.value = '';
     clearHighlight();
+    clearAllHighlight();
     searchMatches = [];
     searchCurrent = -1;
     searchCount.textContent = '';
-    const replaceRow = document.getElementById('search-replace-row') as HTMLElement | null;
-    if (replaceRow) replaceRow.hidden = true;
-    document.getElementById('search-toggle-replace')?.setAttribute('aria-expanded', 'false');
+    searchScope = null;
+    if (searchScopeHintEl) searchScopeHintEl.hidden = true;
+    if (searchReplaceRow) searchReplaceRow.hidden = true;
   }
   document.getElementById('search-btn')?.addEventListener('click', () => {
     if (searchBar.hidden) openSearch();
@@ -2380,18 +2423,15 @@ async function main(): Promise<void> {
     else closeSearch();
   });
   document.getElementById('search-close')?.addEventListener('click', closeSearch);
+  document.getElementById('search-find-all')?.addEventListener('click', () => findAllMatches());
   searchInput.addEventListener('input', () => applySearch(0));
   searchInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') applySearch(searchCurrent + (event.shiftKey ? -1 : 1));
     if (event.key === 'Escape') closeSearch();
   });
-  searchPrevBtn.addEventListener('click', () => applySearch(searchCurrent - 1));
   searchNextBtn.addEventListener('click', () => applySearch(searchCurrent + 1));
 
-  // ---------- 찾아서 바꾸기 (Ctrl+F 검색창에 바꾸기 줄을 펼쳐서 붙인다) ----------
-  const searchReplaceRow = document.getElementById('search-replace-row') as HTMLElement | null;
-  const searchReplaceInput = document.getElementById('search-replace-input') as HTMLInputElement | null;
-  const searchToggleReplaceBtn = document.getElementById('search-toggle-replace') as HTMLButtonElement | null;
+  // ---------- 찾아서 바꾸기 ----------
   function escapeForRegExp(text: string): string {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
@@ -2399,13 +2439,6 @@ async function main(): Promise<void> {
     if (!find) return text;
     return text.replace(new RegExp(escapeForRegExp(find), 'gi'), replace);
   }
-  searchToggleReplaceBtn?.addEventListener('click', () => {
-    if (!searchReplaceRow) return;
-    const nowHidden = !searchReplaceRow.hidden;
-    searchReplaceRow.hidden = nowHidden;
-    searchToggleReplaceBtn.setAttribute('aria-expanded', String(!nowHidden));
-    if (!nowHidden) searchReplaceInput?.focus();
-  });
   document.getElementById('search-replace-one')?.addEventListener('click', () => {
     if (!canEdit) return;
     const match = searchMatches[searchCurrent];

@@ -578,6 +578,10 @@ h2 {
 .search-bar[hidden] { display: none; }
 .search-row { display: flex; align-items: center; gap: 0.3rem; }
 .search-row[hidden] { display: none; }
+.search-label { flex: none; width: 4.4em; color: var(--v-text-dim); font-size: 0.78rem; }
+.search-scope-hint { flex: none; font-size: 0.72rem; color: var(--v-accent); white-space: nowrap; }
+.search-actions { justify-content: flex-end; flex-wrap: wrap; }
+.search-actions-spacer { flex: 1; }
 .btn-mini {
   flex: none;
   height: 30px;
@@ -1353,6 +1357,8 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 
 /* 셀 인라인 배경/글자색(applyStyleToTd)보다 검색 하이라이트가 항상 위에 보이도록 !important */
 .grid-edit-table td.g-hit-current { background: #ffd43b !important; outline: 2px solid #f59f00; }
+/* "모두 찾기" — 지금 위치(진한 노랑)와 나머지 매치(옅은 노랑)를 구분해 보여준다. */
+.grid-edit-table td.g-hit-all { background: #fff3bf !important; }
 
 /* 열/행 머리글(A, 1 등)을 직접 클릭하면 엑셀처럼 그 열/행 전체가 선택 표시된다 — 머리글 자체는
    진하게 칠하고, 그 열/행에 속한 칸들은 옅게 물들인다. 잠금/틀고정 칸의 자체 배경보다 항상 위에
