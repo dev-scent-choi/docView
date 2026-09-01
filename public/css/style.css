@@ -578,7 +578,7 @@ h2 {
 .search-bar[hidden] { display: none; }
 .search-row { display: flex; align-items: center; gap: 0.3rem; }
 .search-row[hidden] { display: none; }
-.search-label { flex: none; width: 4.4em; color: var(--v-text-dim); font-size: 0.78rem; }
+.search-label { flex: none; width: 5.2em; white-space: nowrap; color: var(--v-text-dim); font-size: 0.78rem; }
 .search-scope-hint { flex: none; font-size: 0.72rem; color: var(--v-accent); white-space: nowrap; }
 .search-actions { justify-content: flex-end; flex-wrap: wrap; }
 .search-actions-spacer { flex: 1; }
@@ -1735,13 +1735,37 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 }
 .dropdown-menu button:hover { background: var(--v-hover); }
 
-/* 뷰어의 fixed 플로팅 검색바와 달리, 에디터는 sticky 툴바 바로 아래 일반 흐름으로 붙인다 */
+/* 엑셀의 "찾기 및 바꾸기"는 툴바에 붙은 작은 바가 아니라, 시트 위에 떠 있는 진짜 대화상자다 —
+   그리드 영역 위쪽 중앙에(툴바/수식 입력줄 높이만큼 아래로) 떠 있게 한다. */
 .editor-body .search-bar {
-  position: static;
-  transform: none;
-  margin: 0.6rem auto 0;
-  width: fit-content;
+  position: fixed;
+  top: 7.6rem;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  width: 22rem;
+  padding: 0;
+  gap: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  box-shadow: 0 16px 40px rgba(27, 26, 23, 0.28);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
+.search-titlebar {
+  padding: 0.5rem 0.7rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--v-text);
+  background: var(--v-glass);
+  border-bottom: 1px solid var(--v-glass-line);
+}
+.editor-body .search-row,
+.editor-body .search-actions {
+  padding: 0.4rem 0.7rem;
+}
+.editor-body .search-row + .search-row { padding-top: 0; }
+.editor-body .search-bar input { width: auto; flex: 1; }
 
 #editor-zoom-host { flex: 1; display: flex; flex-direction: column; transform-origin: top center; }
 
