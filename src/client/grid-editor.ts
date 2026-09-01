@@ -416,7 +416,7 @@ async function main(): Promise<void> {
     return sheetTabsEl.querySelector(`[data-sheet-idx="${idx}"]`);
   }
   function closeSheetPopup(): void {
-    document.querySelectorAll('.sheet-context-menu, .sheet-move-menu').forEach((el) => el.remove());
+    document.querySelectorAll('.sheet-context-menu, .sheet-move-menu, .grid-context-menu').forEach((el) => el.remove());
   }
 
   function renderSheetTabs(): void {
@@ -585,7 +585,7 @@ async function main(): Promise<void> {
   }
 
   function onSheetPopupOutsideClick(event: MouseEvent): void {
-    const popups = document.querySelectorAll('.sheet-context-menu, .sheet-move-menu');
+    const popups = document.querySelectorAll('.sheet-context-menu, .sheet-move-menu, .grid-context-menu');
     const inside = [...popups].some((el) => el.contains(event.target as Node));
     if (!inside) {
       closeSheetPopup();
@@ -610,6 +610,230 @@ async function main(): Promise<void> {
       btn.textContent = label;
       btn.addEventListener('click', () => {
         if (label !== '이동') closeSheetPopup();
+        action();
+      });
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    positionSheetPopup(menu, x, y);
+    setTimeout(() => document.addEventListener('mousedown', onSheetPopupOutsideClick), 0);
+  }
+
+  /** 행 삽입/삭제 시 그 아래(또는 위) 행들의 cells/styles를 옮기고, 병합 정보도 같이 보정한다.
+   * delta는 +1(삽입, atRow 이후를 한 칸씩 아래로) 또는 -1(삭제, atRow+1 이후를 한 칸씩 위로)이다. */
+  function shiftRowsAndMerges(sheetIdx: number, atRow: number, delta: 1 | -1, oldColCount: number): void {
+    if (delta === 1) {
+      for (let r = 999; r >= atRow; r -= 1) {
+        for (let c = 0; c < oldColCount; c += 1) {
+          const fromKey = gridCellKey(sheetIdx, r, c);
+          const toKey = gridCellKey(sheetIdx, r + 1, c);
+          const val = cells.get(fromKey);
+          if (val !== undefined) cells.set(toKey, val);
+          const style = styles.get(fromKey);
+          if (style) styles.set(toKey, style);
+        }
+      }
+      for (let c = 0; c < oldColCount; c += 1) {
+        cells.delete(gridCellKey(sheetIdx, atRow, c));
+        styles.delete(gridCellKey(sheetIdx, atRow, c));
+      }
+    } else {
+      for (let r = atRow + 1; r <= 1000; r += 1) {
+        for (let c = 0; c < oldColCount; c += 1) {
+          const fromKey = gridCellKey(sheetIdx, r, c);
+          const toKey = gridCellKey(sheetIdx, r - 1, c);
+          const val = cells.get(fromKey);
+          if (val !== undefined) cells.set(toKey, val);
+          else cells.delete(toKey);
+          const style = styles.get(fromKey);
+          if (style) styles.set(toKey, style);
+          else styles.delete(toKey);
+          cells.delete(fromKey);
+          styles.delete(fromKey);
+        }
+      }
+    }
+    const sheetMerges = merges.get(String(sheetIdx));
+    if (sheetMerges && sheetMerges.length > 0) {
+      const adjusted = sheetMerges
+        .map((m): GridMergeShape | null => {
+          const r0 = m.r - 1;
+          if (delta === 1) {
+            if (r0 >= atRow) return { ...m, r: m.r + 1 };
+            if (atRow > r0 && atRow < r0 + m.rs) return { ...m, rs: m.rs + 1 };
+            return m;
+          }
+          if (r0 === atRow) return m.rs > 1 ? { ...m, rs: m.rs - 1 } : null; // 병합 첫 행이 삭제되면 다음 행이 새 앵커
+          if (r0 > atRow) return { ...m, r: m.r - 1 };
+          if (atRow > r0 && atRow < r0 + m.rs) return { ...m, rs: m.rs - 1 };
+          return m;
+        })
+        .filter((m): m is GridMergeShape => m !== null && m.rs > 0 && m.cs > 0);
+      merges.set(String(sheetIdx), adjusted);
+    }
+  }
+
+  /** 열 버전 — 위 shiftRowsAndMerges와 같은 원리를 행↔열 바꿔서 적용한다. */
+  function shiftColsAndMerges(sheetIdx: number, atCol: number, delta: 1 | -1, oldRowCount: number): void {
+    if (delta === 1) {
+      for (let c = 999; c >= atCol; c -= 1) {
+        for (let r = 0; r < oldRowCount; r += 1) {
+          const fromKey = gridCellKey(sheetIdx, r, c);
+          const toKey = gridCellKey(sheetIdx, r, c + 1);
+          const val = cells.get(fromKey);
+          if (val !== undefined) cells.set(toKey, val);
+          const style = styles.get(fromKey);
+          if (style) styles.set(toKey, style);
+        }
+      }
+      for (let r = 0; r < oldRowCount; r += 1) {
+        cells.delete(gridCellKey(sheetIdx, r, atCol));
+        styles.delete(gridCellKey(sheetIdx, r, atCol));
+      }
+    } else {
+      for (let c = atCol + 1; c <= 1000; c += 1) {
+        for (let r = 0; r < oldRowCount; r += 1) {
+          const fromKey = gridCellKey(sheetIdx, r, c);
+          const toKey = gridCellKey(sheetIdx, r, c - 1);
+          const val = cells.get(fromKey);
+          if (val !== undefined) cells.set(toKey, val);
+          else cells.delete(toKey);
+          const style = styles.get(fromKey);
+          if (style) styles.set(toKey, style);
+          else styles.delete(toKey);
+          cells.delete(fromKey);
+          styles.delete(fromKey);
+        }
+      }
+    }
+    const sheetMerges = merges.get(String(sheetIdx));
+    if (sheetMerges && sheetMerges.length > 0) {
+      const adjusted = sheetMerges
+        .map((m): GridMergeShape | null => {
+          const c0 = m.c - 1;
+          if (delta === 1) {
+            if (c0 >= atCol) return { ...m, c: m.c + 1 };
+            if (atCol > c0 && atCol < c0 + m.cs) return { ...m, cs: m.cs + 1 };
+            return m;
+          }
+          if (c0 === atCol) return m.cs > 1 ? { ...m, cs: m.cs - 1 } : null;
+          if (c0 > atCol) return { ...m, c: m.c - 1 };
+          if (atCol > c0 && atCol < c0 + m.cs) return { ...m, cs: m.cs - 1 };
+          return m;
+        })
+        .filter((m): m is GridMergeShape => m !== null && m.rs > 0 && m.cs > 0);
+      merges.set(String(sheetIdx), adjusted);
+    }
+  }
+
+  function insertRowAt(row: number): void {
+    const sheet = structure.get(String(activeSheet));
+    if (!sheet) return;
+    ydoc.transact(() => {
+      shiftRowsAndMerges(activeSheet, row, 1, sheet.colCount);
+      structure.set(String(activeSheet), { ...sheet, rowCount: sheet.rowCount + 1 });
+    });
+  }
+  function deleteRowAt(row: number): void {
+    const sheet = structure.get(String(activeSheet));
+    if (!sheet || sheet.rowCount <= 1) return;
+    ydoc.transact(() => {
+      shiftRowsAndMerges(activeSheet, row, -1, sheet.colCount);
+      structure.set(String(activeSheet), { ...sheet, rowCount: sheet.rowCount - 1 });
+    });
+  }
+  function insertColumnAt(col: number): void {
+    const sheet = structure.get(String(activeSheet));
+    if (!sheet) return;
+    ydoc.transact(() => {
+      shiftColsAndMerges(activeSheet, col, 1, sheet.rowCount);
+      structure.set(String(activeSheet), { ...sheet, colCount: sheet.colCount + 1 });
+    });
+  }
+  function deleteColumnAt(col: number): void {
+    const sheet = structure.get(String(activeSheet));
+    if (!sheet || sheet.colCount <= 1) return;
+    ydoc.transact(() => {
+      shiftColsAndMerges(activeSheet, col, -1, sheet.rowCount);
+      structure.set(String(activeSheet), { ...sheet, colCount: sheet.colCount - 1 });
+    });
+  }
+
+  /** 선택한 열 기준 오름차순/내림차순 정렬 — 데이터 행(구조상 실제 rowCount) 전체를 그 열의
+   * 값으로 재배열한다. 숫자로 보이면 숫자 비교, 아니면 문자열 비교(로캘 기준)로 — 엑셀의
+   * "간단한 오름차순/내림차순 정렬"과 같은 수준의 단순한 구현이다. */
+  function sortByColumn(col: number, direction: 'asc' | 'desc'): void {
+    const sheet = structure.get(String(activeSheet));
+    if (!sheet) return;
+    const rows = Array.from({ length: sheet.rowCount }, (_, r) => r);
+    const valueOf = (r: number) => cells.get(gridCellKey(activeSheet, r, col)) ?? '';
+    rows.sort((a, b) => {
+      const va = valueOf(a);
+      const vb = valueOf(b);
+      const na = NUMERIC_VALUE.test(va.trim()) ? Number(va) : null;
+      const nb = NUMERIC_VALUE.test(vb.trim()) ? Number(vb) : null;
+      const cmp = na !== null && nb !== null ? na - nb : va.localeCompare(vb, 'ko');
+      return direction === 'asc' ? cmp : -cmp;
+    });
+    ydoc.transact(() => {
+      // 원본을 전부 스냅샷으로 떠 둔 뒤(재배치 중 원본을 덮어써도 안전하게) 새 순서로 다시 쓴다.
+      const snapshot = rows.map((r) =>
+        Array.from({ length: sheet.colCount }, (_, c) => ({
+          value: cells.get(gridCellKey(activeSheet, r, c)),
+          style: styles.get(gridCellKey(activeSheet, r, c)),
+        })),
+      );
+      snapshot.forEach((rowData, newR) => {
+        rowData.forEach((cell, c) => {
+          const key = gridCellKey(activeSheet, newR, c);
+          if (cell.value !== undefined) cells.set(key, cell.value);
+          else cells.delete(key);
+          if (cell.style) styles.set(key, cell.style);
+          else styles.delete(key);
+        });
+      });
+    });
+  }
+
+  function openRowContextMenu(row: number, x: number, y: number): void {
+    closeSheetPopup();
+    const menu = document.createElement('div');
+    menu.className = 'grid-context-menu sheet-context-menu';
+    const items: Array<[string, () => void]> = [
+      ['위에 행 삽입', () => insertRowAt(row)],
+      ['행 삭제', () => deleteRowAt(row)],
+    ];
+    items.forEach(([label, action]) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        closeSheetPopup();
+        action();
+      });
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    positionSheetPopup(menu, x, y);
+    setTimeout(() => document.addEventListener('mousedown', onSheetPopupOutsideClick), 0);
+  }
+
+  function openColumnContextMenu(col: number, x: number, y: number): void {
+    closeSheetPopup();
+    const menu = document.createElement('div');
+    menu.className = 'grid-context-menu sheet-context-menu';
+    const items: Array<[string, () => void]> = [
+      ['왼쪽에 열 삽입', () => insertColumnAt(col)],
+      ['열 삭제', () => deleteColumnAt(col)],
+      ['오름차순 정렬', () => sortByColumn(col, 'asc')],
+      ['내림차순 정렬', () => sortByColumn(col, 'desc')],
+    ];
+    items.forEach(([label, action]) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        closeSheetPopup();
         action();
       });
       menu.appendChild(btn);
@@ -736,6 +960,30 @@ async function main(): Promise<void> {
    * 행번호 열 폭은 여전히 CSS(min-width)가 정한다. 정확히 안 맞아도 상관없다: 테이블에 "auto가
    * 아닌" width를 준다는 사실 자체가 중요하지, 합계가 1px이라도 틀리면 안 되는 게 아니다. */
   const ROWNUM_COL_WIDTH_PX = 28;
+  /** 실제 렌더된 <td>의 border-box 높이(1.7rem + 위아래 패딩 0.18rem*2, 대략 27~28px)와 맞춘
+   * 근사치 — 화면을 채우는 데 필요한 행 수를 계산하는 용도라 1px 오차는 문제 되지 않는다. */
+  const ROW_HEIGHT_PX = 27;
+
+  /** 시트 크기만으로는 "확대율을 낮추면 화면에 빈 칸이 더 많이 보여야 한다"(실제 엑셀은 격자가
+   * 사실상 무한이라 화면에 보이는 만큼 항상 그려진다)는 걸 반영 못 한다 — 지금 뷰포트/줌 배율로
+   * 실제 보이는 픽셀 영역을 재서, 그걸 채우는 데 필요한 행/열 수까지 함께 반영한다. CSS zoom은
+   * 확대율이 낮을수록 이 컨테이너의 clientWidth/clientHeight를(줌이 적용되기 전 좌표계 기준으로)
+   * 더 크게 보고하므로, 별도로 zoom 값을 나눌 필요 없이 그대로 쓰면 된다. */
+  function renderCountsFor(sheet: SheetStructure): { rows: number; cols: number } {
+    const availWidth = scrollHostEl.clientWidth;
+    const availHeight = scrollHostEl.clientHeight;
+    let usedWidth = ROWNUM_COL_WIDTH_PX;
+    let fillCols = 0;
+    while (usedWidth < availWidth && fillCols < 1000) {
+      usedWidth += sheet.colWidths?.[fillCols] ?? DEFAULT_COL_WIDTH_PX;
+      fillCols += 1;
+    }
+    const fillRows = Math.max(0, Math.ceil(availHeight / ROW_HEIGHT_PX) - 1);
+    return {
+      rows: Math.max(sheet.rowCount + GRID_ROW_PADDING, GRID_MIN_RENDER_ROWS, fillRows),
+      cols: Math.max(sheet.colCount + GRID_COL_PADDING, GRID_MIN_RENDER_COLS, fillCols),
+    };
+  }
 
   /** 병합 정보(1-based)를 0-based (row:col) 조회표로 바꾼다 — viewer.js의 buildMergeIndex와 동일한 원리.
    * anchors: 병합의 왼쪽위 칸 → {rs,cs}(rowspan/colspan). covered: 그 외 병합에 덮인 칸(<td>를 아예 안 그림). */
@@ -770,8 +1018,7 @@ async function main(): Promise<void> {
     if (!sheet) return;
 
     warningEl.hidden = !(sheet.rowCount > EDIT_SOFT_ROW_LIMIT || sheet.colCount > EDIT_SOFT_COL_LIMIT);
-    const renderRowCount = Math.max(sheet.rowCount + GRID_ROW_PADDING, GRID_MIN_RENDER_ROWS);
-    const renderColCount = Math.max(sheet.colCount + GRID_COL_PADDING, GRID_MIN_RENDER_COLS);
+    const { rows: renderRowCount, cols: renderColCount } = renderCountsFor(sheet);
     const { anchors, covered } = buildMergeLookup(activeSheet);
     const freezeRows = sheet.freezeRows ?? 0;
     const freezeCols = sheet.freezeCols ?? 0;
@@ -812,6 +1059,12 @@ async function main(): Promise<void> {
       th.textContent = colLetter(c);
       th.dataset.col = String(c);
       th.addEventListener('click', () => selectColumn(c));
+      if (canEdit) {
+        th.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          openColumnContextMenu(c, event.clientX, event.clientY);
+        });
+      }
       headRow.appendChild(th);
     }
     thead.appendChild(headRow);
@@ -831,6 +1084,12 @@ async function main(): Promise<void> {
       rowHead.textContent = String(r + 1);
       rowHead.dataset.row = String(r);
       rowHead.addEventListener('click', () => selectRow(r));
+      if (canEdit) {
+        rowHead.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          openRowContextMenu(r, event.clientX, event.clientY);
+        });
+      }
       tr.appendChild(rowHead);
       for (let c = 0; c < renderColCount; c += 1) {
         if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커 쪽에서 colspan/rowspan으로 대신 차지한다
@@ -977,6 +1236,9 @@ async function main(): Promise<void> {
       if (parsed && parsed.sheetIdx === activeSheet) tdFor(parsed.row, parsed.col)?.focus({ preventScroll: true });
     }
     updateHScrollbar();
+    document
+      .getElementById('btn-freeze-panes')
+      ?.setAttribute('aria-pressed', String(freezeRows > 0 || freezeCols > 0));
   }
 
   // ---------- 셀 선택 vs 편집모드, 방향키 이동 (엑셀과 동일하게) ----------
@@ -1057,8 +1319,7 @@ async function main(): Promise<void> {
    * 칸이면(예: 1행 제목 병합) 같은 방향으로 한 칸씩 더 건너뛴다. 시트 렌더 범위 끝에 닿으면 멈춘다. */
   function moveSelection(fromRow: number, fromCol: number, dRow: number, dCol: number): void {
     const sheet = currentStructure();
-    const rowCount = Math.max(sheet.rowCount + GRID_ROW_PADDING, GRID_MIN_RENDER_ROWS);
-    const colCount = Math.max(sheet.colCount + GRID_COL_PADDING, GRID_MIN_RENDER_COLS);
+    const { rows: rowCount, cols: colCount } = renderCountsFor(sheet);
     let row = fromRow;
     let col = fromCol;
     for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -1535,6 +1796,46 @@ async function main(): Promise<void> {
     structure.set(String(activeSheet), { ...s, colCount: s.colCount - 1 });
   });
 
+  // ---------- 자동 합계 — 엑셀처럼 위쪽(없으면 왼쪽)으로 연속된 숫자 칸을 찾아 SUM 수식을 채운다 ----------
+  document.getElementById('btn-autosum')?.addEventListener('click', () => {
+    if (!activeCellKey || !canEdit) return;
+    const parsed = parseGridCellKey(activeCellKey);
+    if (!parsed) return;
+    const { row, col } = parsed;
+    const isNumericCell = (r: number, c: number): boolean => {
+      const v = cells.get(gridCellKey(activeSheet, r, c));
+      return v !== undefined && v !== '' && (NUMERIC_VALUE.test(v.trim()) || v.startsWith('='));
+    };
+    let formula = '';
+    let r = row - 1;
+    while (r >= 0 && isNumericCell(r, col)) r -= 1;
+    if (r < row - 1) {
+      formula = `=SUM(${cellRefLabel(r + 1, col)}:${cellRefLabel(row - 1, col)})`;
+    } else {
+      let c = col - 1;
+      while (c >= 0 && isNumericCell(row, c)) c -= 1;
+      if (c < col - 1) formula = `=SUM(${cellRefLabel(row, c + 1)}:${cellRefLabel(row, col - 1)})`;
+    }
+    if (!formula) return;
+    const td = tdFor(row, col);
+    if (!td || !td.classList.contains('g-editable')) return;
+    enterEditMode(td, activeCellKey, formula);
+    commitAndMove(td, activeCellKey, row, col, 0, 0);
+  });
+
+  // ---------- 틀 고정 — 선택한 칸의 위쪽 행 전체 + 왼쪽 열 전체를 고정한다(다시 누르면 해제) ----------
+  document.getElementById('btn-freeze-panes')?.addEventListener('click', () => {
+    if (!activeCellKey) return;
+    const parsed = parseGridCellKey(activeCellKey);
+    if (!parsed) return;
+    const s = currentStructure();
+    const isFrozen = (s.freezeRows ?? 0) > 0 || (s.freezeCols ?? 0) > 0;
+    structure.set(
+      String(activeSheet),
+      isFrozen ? { ...s, freezeRows: 0, freezeCols: 0 } : { ...s, freezeRows: parsed.row, freezeCols: parsed.col },
+    );
+  });
+
   // ---------- 서식 도구 (선택 범위 전체에 적용, 오피스처럼 눌린 상태로 반영) ----------
   function setPressed(id: string, pressed: boolean): void {
     document.getElementById(id)?.setAttribute('aria-pressed', String(pressed));
@@ -1799,13 +2100,32 @@ async function main(): Promise<void> {
   const ZOOM_MIN = 0.6;
   const ZOOM_MAX = 2;
   let zoom = 1;
+  // 확대율이 낮아질수록 화면에 보이는 실제 영역이 넓어지므로, 그 영역을 채우기에 지금 그려둔
+  // 행/열 수로 충분한지 다시 확인한다(rAF로 묶어서 슬라이더를 드래그하는 동안 매 프레임 전체
+  // 재렌더가 도는 걸 막는다).
+  let viewportRefitScheduled = false;
+  function scheduleViewportRefit(): void {
+    if (viewportRefitScheduled) return;
+    viewportRefitScheduled = true;
+    requestAnimationFrame(() => {
+      viewportRefitScheduled = false;
+      const sheet = structure.get(String(activeSheet));
+      if (!sheet) return;
+      const { rows, cols } = renderCountsFor(sheet);
+      const currentRows = tableEl.tBodies[0]?.rows.length ?? 0;
+      const currentCols = (tableEl.tHead?.rows[0]?.cells.length ?? 1) - 1;
+      if (rows > currentRows || cols > currentCols) renderTable();
+    });
+  }
   function applyZoom(): void {
     zoomHost.style.zoom = String(zoom);
     zoomLevelEl.textContent = `${Math.round(zoom * 100)}%`;
     const ratio = (zoom - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN);
     if (zoomSliderFillEl) zoomSliderFillEl.style.width = `${ratio * 100}%`;
     if (zoomSliderHandleEl) zoomSliderHandleEl.style.left = `${ratio * 100}%`;
+    scheduleViewportRefit();
   }
+  window.addEventListener('resize', scheduleViewportRefit);
   function setZoomFromRatio(ratio: number): void {
     const clamped = Math.max(0, Math.min(1, ratio));
     zoom = Math.round((ZOOM_MIN + clamped * (ZOOM_MAX - ZOOM_MIN)) * 20) / 20; // 5%p 단위로 스냅
@@ -1970,6 +2290,9 @@ async function main(): Promise<void> {
     searchMatches = [];
     searchCurrent = -1;
     searchCount.textContent = '';
+    const replaceRow = document.getElementById('search-replace-row') as HTMLElement | null;
+    if (replaceRow) replaceRow.hidden = true;
+    document.getElementById('search-toggle-replace')?.setAttribute('aria-expanded', 'false');
   }
   document.getElementById('search-btn')?.addEventListener('click', () => {
     if (searchBar.hidden) openSearch();
@@ -1983,6 +2306,60 @@ async function main(): Promise<void> {
   });
   searchPrevBtn.addEventListener('click', () => applySearch(searchCurrent - 1));
   searchNextBtn.addEventListener('click', () => applySearch(searchCurrent + 1));
+
+  // ---------- 찾아서 바꾸기 (Ctrl+F 검색창에 바꾸기 줄을 펼쳐서 붙인다) ----------
+  const searchReplaceRow = document.getElementById('search-replace-row') as HTMLElement | null;
+  const searchReplaceInput = document.getElementById('search-replace-input') as HTMLInputElement | null;
+  const searchToggleReplaceBtn = document.getElementById('search-toggle-replace') as HTMLButtonElement | null;
+  function escapeForRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  function replaceInText(text: string, find: string, replace: string): string {
+    if (!find) return text;
+    return text.replace(new RegExp(escapeForRegExp(find), 'gi'), replace);
+  }
+  searchToggleReplaceBtn?.addEventListener('click', () => {
+    if (!searchReplaceRow) return;
+    const nowHidden = !searchReplaceRow.hidden;
+    searchReplaceRow.hidden = nowHidden;
+    searchToggleReplaceBtn.setAttribute('aria-expanded', String(!nowHidden));
+    if (!nowHidden) searchReplaceInput?.focus();
+  });
+  document.getElementById('search-replace-one')?.addEventListener('click', () => {
+    if (!canEdit) return;
+    const match = searchMatches[searchCurrent];
+    if (!match) return;
+    const key = gridCellKey(match.sheetIdx, match.row, match.col);
+    if (styles.get(key)?.lk === 1) {
+      applySearch(searchCurrent + 1);
+      return;
+    }
+    const next = replaceInText(cells.get(key) ?? '', searchInput.value, searchReplaceInput?.value ?? '');
+    ydoc.transact(() => {
+      if (next === '') cells.delete(key);
+      else cells.set(key, next);
+    });
+    applySearch(searchCurrent); // 방금 바꾼 칸이 더 이상 검색어와 안 맞으면 자연히 다음 매치로 넘어간다
+  });
+  document.getElementById('search-replace-all')?.addEventListener('click', () => {
+    if (!canEdit || !searchInput.value) return;
+    const findText = searchInput.value;
+    const replaceText = searchReplaceInput?.value ?? '';
+    const matches = findCellMatches(findText);
+    ydoc.transact(() => {
+      matches.forEach((m) => {
+        const key = gridCellKey(m.sheetIdx, m.row, m.col);
+        if (styles.get(key)?.lk === 1) return;
+        const current = cells.get(key) ?? '';
+        const next = replaceInText(current, findText, replaceText);
+        if (next === current) return;
+        if (next === '') cells.delete(key);
+        else cells.set(key, next);
+      });
+    });
+    applySearch(0);
+  });
+
   window.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
       event.preventDefault();

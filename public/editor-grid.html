@@ -88,7 +88,7 @@
             <span class="dropdown-btn color-dropdown-btn" id="cell-bg-color-btn">
               <button id="btn-bg-color-apply" class="icon-btn color-apply-btn" title="배경 색 채우기">
                 <span class="color-btn-glyph">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M5 8h14l-1.6 10.2a2 2 0 0 1-2 1.8H8.6a2 2 0 0 1-2-1.8L5 8Z"/><path d="M8 8a4 4 0 0 1 8 0"/></svg>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8h14l-1.6 10.2a2 2 0 0 1-2 1.8H8.6a2 2 0 0 1-2-1.8L5 8Z"/><path d="M8 8a4 4 0 0 1 8 0"/></svg>
                 </span>
                 <span class="color-btn-bar"></span>
               </button>
@@ -196,21 +196,41 @@
         </div>
         <span class="ribbon-group-label">셀</span>
       </div>
+
+      <div class="ribbon-group">
+        <div class="ribbon-group-buttons">
+          <button id="btn-autosum" class="icon-btn icon-btn-glyph" title="자동 합계 — 위쪽(없으면 왼쪽)으로 연속된 숫자 칸을 더한다"><strong>Σ</strong></button>
+          <button id="btn-freeze-panes" class="icon-btn" title="틀 고정 — 선택한 칸의 위쪽 행과 왼쪽 열을 고정한다" aria-pressed="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" stroke-width="1.4"/><path d="M3.5 9h17M9 3.5v17" stroke-width="2.6"/></svg>
+          </button>
+        </div>
+        <span class="ribbon-group-label">편집</span>
+      </div>
     </div>
   </header>
 
   <div id="search-bar" class="search-bar" hidden>
-    <input id="search-input" type="text" placeholder="셀 값 검색…" autocomplete="off" />
-    <span id="search-count" class="search-count"></span>
-    <button id="search-prev" class="icon-btn" title="이전 결과" disabled>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
-    </button>
-    <button id="search-next" class="icon-btn" title="다음 결과" disabled>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-    </button>
-    <button id="search-close" class="icon-btn" title="닫기">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-    </button>
+    <div class="search-row">
+      <input id="search-input" type="text" placeholder="셀 값 검색…" autocomplete="off" />
+      <span id="search-count" class="search-count"></span>
+      <button id="search-prev" class="icon-btn" title="이전 결과" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+      </button>
+      <button id="search-next" class="icon-btn" title="다음 결과" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <button id="search-toggle-replace" class="icon-btn" title="바꾸기 표시/숨기기" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <button id="search-close" class="icon-btn" title="닫기">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+    <div id="search-replace-row" class="search-row" hidden>
+      <input id="search-replace-input" type="text" placeholder="바꿀 내용…" autocomplete="off" />
+      <button id="search-replace-one" class="btn-mini">바꾸기</button>
+      <button id="search-replace-all" class="btn-mini">모두 바꾸기</button>
+    </div>
   </div>
 
   <div id="unsupported-warning" class="unsupported-warning" hidden>

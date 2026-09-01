@@ -564,7 +564,7 @@ h2 {
   right: 1.2rem;
   z-index: 20;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 0.3rem;
   padding: 0.4rem 0.5rem;
   border-radius: 0;
@@ -576,6 +576,21 @@ h2 {
 }
 
 .search-bar[hidden] { display: none; }
+.search-row { display: flex; align-items: center; gap: 0.3rem; }
+.search-row[hidden] { display: none; }
+.btn-mini {
+  flex: none;
+  height: 30px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--v-glass-line);
+  background: transparent;
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-mini:hover { background: var(--v-hover); }
 
 .search-bar input {
   font-family: var(--font-sans);
@@ -1581,6 +1596,10 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   gap: 2px;
 }
 .color-btn-glyph { width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: 700; color: var(--v-text); line-height: 1; }
+/* 이 15x15 상자가 flex 컨테이너라, 안의 svg가 가로(주축)만 그 폭에 맞춰 찌그러지고 세로(교차축)는
+   자기 지정 높이(17px, .icon-btn svg 규칙)를 그대로 써서 15x17로 비정상 직사각형이 됐다 —
+   svg 자체를 상자와 똑같은 정사각형으로 고정해 찌그러짐 없이 채운다. */
+.color-btn-glyph svg { flex: none; width: 15px; height: 15px; }
 .color-btn-bar { width: 18px; height: 3px; border-radius: 0; background: var(--btn-color, currentColor); box-shadow: 0 0 0 1px var(--v-glass-line); }
 .color-caret-wrap { position: relative; }
 .color-caret-input {
