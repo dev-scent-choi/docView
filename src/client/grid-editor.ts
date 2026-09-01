@@ -1337,6 +1337,54 @@ async function main(): Promise<void> {
     }
   }
 
+  /** 엑셀의 Ctrl+방향키(End 모드) — 빈 칸이거나 바로 다음 칸이 비어 있으면 다음 데이터(또는
+   * 시트 끝)까지 건너뛰고, 데이터가 연속돼 있으면 그 블록이 끝나는 칸까지 단번에 이동한다. */
+  function moveSelectionToDataEdge(fromRow: number, fromCol: number, dRow: number, dCol: number): void {
+    const sheet = currentStructure();
+    const { rows: rowCount, cols: colCount } = renderCountsFor(sheet);
+    const inBounds = (r: number, c: number) => r >= 0 && c >= 0 && r < rowCount && c < colCount;
+    const isEmpty = (r: number, c: number): boolean => {
+      if (!inBounds(r, c)) return true;
+      const v = cells.get(gridCellKey(activeSheet, r, c));
+      return v === undefined || v === '';
+    };
+    let row = fromRow;
+    let col = fromCol;
+    if (isEmpty(row, col) || isEmpty(row + dRow, col + dCol)) {
+      let r = row + dRow;
+      let c = col + dCol;
+      while (inBounds(r, c) && isEmpty(r, c)) {
+        r += dRow;
+        c += dCol;
+      }
+      row = Math.min(Math.max(r, 0), rowCount - 1);
+      col = Math.min(Math.max(c, 0), colCount - 1);
+    } else {
+      let r = row;
+      let c = col;
+      while (inBounds(r + dRow, c + dCol) && !isEmpty(r + dRow, c + dCol)) {
+        r += dRow;
+        c += dCol;
+      }
+      row = r;
+      col = c;
+    }
+    // 병합에 덮인 칸이라 실제 <td>가 없으면(moveSelection과 동일한 보정) 같은 방향으로 한 칸 더 간다.
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const targetTd = tdFor(row, col);
+      if (targetTd) {
+        targetTd.focus();
+        targetTd.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+      const nextRow = Math.min(Math.max(row + dRow, 0), rowCount - 1);
+      const nextCol = Math.min(Math.max(col + dCol, 0), colCount - 1);
+      if (nextRow === row && nextCol === col) return;
+      row = nextRow;
+      col = nextCol;
+    }
+  }
+
   function handleCellKeydown(
     event: KeyboardEvent,
     td: HTMLTableCellElement,
@@ -1376,19 +1424,23 @@ async function main(): Promise<void> {
         break;
       case 'ArrowUp':
         event.preventDefault();
-        moveSelection(row, col, -1, 0);
+        if (event.ctrlKey || event.metaKey) moveSelectionToDataEdge(row, col, -1, 0);
+        else moveSelection(row, col, -1, 0);
         break;
       case 'ArrowDown':
         event.preventDefault();
-        moveSelection(row, col, 1, 0);
+        if (event.ctrlKey || event.metaKey) moveSelectionToDataEdge(row, col, 1, 0);
+        else moveSelection(row, col, 1, 0);
         break;
       case 'ArrowLeft':
         event.preventDefault();
-        moveSelection(row, col, 0, -1);
+        if (event.ctrlKey || event.metaKey) moveSelectionToDataEdge(row, col, 0, -1);
+        else moveSelection(row, col, 0, -1);
         break;
       case 'ArrowRight':
         event.preventDefault();
-        moveSelection(row, col, 0, 1);
+        if (event.ctrlKey || event.metaKey) moveSelectionToDataEdge(row, col, 0, 1);
+        else moveSelection(row, col, 0, 1);
         break;
       case 'Delete':
       case 'Backspace': {
