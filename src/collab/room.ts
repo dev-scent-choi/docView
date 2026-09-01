@@ -31,6 +31,7 @@ import { invalidateViewCaches } from '../routes/viewer.js';
 import { store } from '../storage.js';
 import { parseXlsxToGrid, serializeGrid } from '../spreadsheet.js';
 import { exportXlsxFromGrid, reparseGridForViewer, seedGridFromXlsx } from '../xlsx/collab.js';
+import { DOC_META_MAP, DOC_META_SAVED_AT_KEY } from './gridShared.js';
 
 /**
  * y-websocket이 제공하는 참조 서버 유틸(bin/utils.cjs)을 그대로 쓰지 않고 같은 프로토콜을
@@ -160,6 +161,26 @@ async function flushToStore(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<
   invalidateRenderCache(docId);
   invalidateViewCaches(docId);
   await recordAudit({ type: 'edit_saved', docId });
+  // 일반 Y.Map 쓰기라 기존 sync 프로토콜을 그대로 타고 모든 클라이언트에 전파된다 — 커스텀
+  // 메시지 없이도 클라이언트가 "저장됨" 표시를 실시간으로 띄울 수 있는 이유.
+  ydoc.getMap<number>(DOC_META_MAP).set(DOC_META_SAVED_AT_KEY, Date.now());
+}
+
+/**
+ * Ctrl+S 등 클라이언트가 명시적으로 "지금 저장" 요청을 보냈을 때 쓴다 — 8초 유휴 자동저장을
+ * 기다리지 않고 즉시 flushToStore를 돈다. 그 문서를 편집 중인 룸이 메모리에 없으면(아무도 안
+ * 열어봤거나 이미 유휴 저장까지 끝난 상태) 저장할 미변경 사항이 없다는 뜻이라 false를 돌려준다.
+ */
+export async function flushNow(docId: string): Promise<boolean> {
+  const room = rooms.get(docId);
+  if (!room) return false;
+  await room.ready;
+  if (room.autosaveTimer) {
+    clearTimeout(room.autosaveTimer);
+    room.autosaveTimer = null;
+  }
+  await flushToStore(room.docId, room.kind, room.ydoc);
+  return true;
 }
 
 /**

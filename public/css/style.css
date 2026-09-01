@@ -50,6 +50,14 @@ body {
 .editor-body :focus-visible {
   outline-color: var(--v-accent);
 }
+/* 그리드 셀은 이미 자체 포커스 표시(inset box-shadow, 위 .grid-edit-table td:focus)가 있다 —
+   위 전역 :focus-visible 규칙의 outline+border-radius:4px까지 겹치면 각진 엑셀 격자 모서리가
+   둥글게 보였다. 셀에서는 전역 규칙을 끈다. */
+.grid-edit-table td:focus-visible,
+.grid-edit-table th:focus-visible {
+  outline: none;
+  border-radius: 0;
+}
 
 /* ---------- 관리 페이지 ---------- */
 
@@ -342,6 +350,9 @@ h2 {
 }
 
 .toolbar-group { display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex-wrap: wrap; row-gap: 0.4rem; }
+/* 같은 종류의 버그(클래스의 display:flex가 [hidden]을 이겨버림) — 읽기 전용일 때 .toolbar-format만
+   숨기므로 여기서도 명시적으로 꺼줘야 한다. */
+.toolbar-group[hidden] { display: none; }
 .toolbar-left { flex: 1; min-width: 0; }
 
 .doc-title {
@@ -361,7 +372,7 @@ h2 {
   height: 34px;
   flex: none;
   border: none;
-  border-radius: 10px;
+  border-radius: 0;
   background: transparent;
   color: var(--v-text-dim);
   font-family: var(--font-sans);
@@ -401,11 +412,11 @@ h2 {
   align-items: center;
   gap: 0.1rem;
   padding: 0.15rem;
-  border-radius: 12px;
+  border-radius: 0;
   border: 1px solid var(--v-glass-line);
 }
 
-.zoom-group .icon-btn { width: 28px; height: 28px; border-radius: 8px; }
+.zoom-group .icon-btn { width: 28px; height: 28px; border-radius: 0; }
 .zoom-group .icon-btn svg { width: 14px; height: 14px; }
 
 .page-indicator, .zoom-level {
@@ -551,7 +562,7 @@ h2 {
   align-items: center;
   gap: 0.3rem;
   padding: 0.4rem 0.5rem;
-  border-radius: 12px;
+  border-radius: 0;
   background: var(--v-glass);
   border: 1px solid var(--v-glass-line);
   backdrop-filter: blur(20px) saturate(1.5);
@@ -567,7 +578,7 @@ h2 {
   border: none;
   outline: none;
   background: rgba(255, 255, 255, 0.06);
-  border-radius: 8px;
+  border-radius: 0;
   padding: 0.4rem 0.7rem;
   color: var(--v-text);
   font-size: 0.85rem;
@@ -830,7 +841,7 @@ h2 {
 body.chrome-hidden #toolbar,
 body.chrome-hidden #search-bar,
 body.chrome-hidden .formula-bar,
-body.chrome-hidden #sheet-tabs {
+body.chrome-hidden .grid-status-bar {
   display: none !important;
 }
 body.chrome-hidden .grid-editor-surface { margin: 0; border-radius: 0; border: none; }
@@ -843,14 +854,26 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   display: flex;
   flex-direction: column;
   margin: 0.75rem 0.75rem 0;
-  border-radius: var(--radius-lg);
+  /* 엑셀 그리드(행/열 머리글 포함)는 각진 사각형이라 둥근 모서리를 안 쓴다 — 이 radius가
+     overflow:hidden과 맞물려 모서리 칸의 포커스 테두리까지 둥글게 잘려 보였다. */
   overflow: hidden;
   border: 1px solid var(--color-line);
   background: var(--color-surface);
   box-shadow: var(--shadow-page);
 }
 
-.grid-editor-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; }
+/* 가로 스크롤바는 그리드 바로 밑(시트 탭 위)이 아니라 엑셀처럼 시트 탭과 같은 줄, 오른쪽 끝에
+   커스텀 UI로 따로 그린다(.grid-hscroll) — 그래서 네이티브 가로 스크롤바만 숨긴다. 세로
+   스크롤바는 엑셀도 그리드 오른쪽에 그대로 두므로 안 건드린다. */
+.grid-editor-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+/* Firefox는 축별로 스크롤바를 따로 숨길 수 없어 세로 스크롤바까지 같이 없어지므로,
+   가로만 숨길 수 있는 웹킷 계열(Chromium/Edge/Safari)에서만 적용한다. */
+.grid-editor-scroll::-webkit-scrollbar:horizontal { display: none; height: 0; }
 
 /* 최초 동기화 도중 테이블이 임시 폭으로 한 번 그려졌다가 실제 데이터로 다시 그려지며 폭이 바뀌는
    깜빡임을 감춘다 — 이 상태에서 무엇을 보여줄지(스피너 등)는 부모 창(maintenance-management)의
@@ -866,7 +889,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   gap: 0;
   margin: 0.6rem 0.75rem 0;
   border: 1px solid var(--color-line);
-  border-radius: var(--radius-sm);
+  border-radius: 0;
   background: var(--color-surface);
   box-shadow: var(--shadow-page);
   overflow: hidden;
@@ -942,11 +965,12 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 .grid-edit-table thead th {
   position: sticky;
   top: 0;
-  /* 앱의 따뜻한 톤이 아니라 실제 엑셀 열/행 머리글과 동일한 중립 회색 배경+글자색을 그대로 쓴다. */
+  /* 앱의 따뜻한 톤이 아니라 실제 엑셀 열/행 머리글과 동일한 중립 회색 배경+글자색을 그대로 쓴다.
+     예전엔 모노스페이스+연한 회색이라 흐릿해 보였다 — 엑셀처럼 일반 UI 글꼴+진한 색으로 바꾼다. */
   background: #f2f2f2;
-  color: #616161;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
+  color: #3c3c3c;
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
   font-weight: 600;
   transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
   z-index: 2;
@@ -962,9 +986,9 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   position: sticky;
   left: 0;
   background: #f2f2f2;
-  color: #616161;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
+  color: #3c3c3c;
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
   font-variant-numeric: tabular-nums;
   text-align: center;
   min-width: 28px;
@@ -1070,7 +1094,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   position: fixed;
   z-index: 9999;
   padding: 0.35rem 0.6rem;
-  border-radius: 6px;
+  border-radius: 0;
   background: var(--color-ink, #1b1a17);
   color: #fff;
   font-size: 0.78rem;
@@ -1093,35 +1117,219 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   box-shadow: inset 0 0 0 2px var(--remote-color);
 }
 
-.grid-sheet-tabs {
+/* 엑셀의 하단 두 줄 구성과 동일하게 — 1행은 시트 탭만, 2행은 왼쪽에 상태 텍스트("준비"/"편집"),
+   오른쪽 끝에 배율 컨트롤을 둔다. 위쪽 그리드 영역과 구분되는 옅은 회색 배경을 깔고, 탭 위쪽
+   구분선은 탭 개별 테두리가 아니라 이 컨테이너의 top border로 전체 폭에 걸쳐 이어지게 한다. */
+.grid-status-bar {
   flex: none;
   display: flex;
-  gap: 4px;
-  padding: 4px 6px;
-  margin: 0.6rem 0.75rem 0.75rem;
-  border-radius: 10px;
-  background: var(--v-glass);
-  border: 1px solid var(--v-glass-line);
-  overflow-x: auto;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0 0.75rem 0.3rem;
+  background: #f2f2f2;
+  border-top: 1px solid #c9c9c9;
 }
-
-.grid-sheet-tab {
+.grid-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding-top: 0.2rem;
+  border-top: 1px solid #d6d6d6;
+}
+.grid-status-text {
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--v-text-dim);
+  padding-left: 0.2rem;
+}
+/* 엑셀 하단 배율 컨트롤 — [－][드래그 슬라이더][＋] 구분선 [100%] 순서로, 슬라이더가
+   ZOOM_MIN~ZOOM_MAX(grid-editor.ts) 범위를 그대로 반영한다(장식이 아니라 실제 줌 값). */
+.grid-status-bar .zoom-group { flex: none; margin: 0; padding: 0 0.4rem; border: none; gap: 0.35rem; }
+.zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
   border: none;
-  border-radius: 7px;
-  padding: 5px 14px;
-  font-size: 0.78rem;
   background: transparent;
   color: var(--v-text-dim);
   cursor: pointer;
+}
+.zoom-btn:hover { color: var(--v-text); }
+.zoom-btn svg { width: 10px; height: 10px; }
+.zoom-slider-track {
+  position: relative;
+  width: 6.5rem;
+  height: 3px;
+  background: var(--v-glass-line);
+  cursor: pointer;
+}
+.zoom-slider-fill { position: absolute; top: 0; bottom: 0; left: 0; background: #a8a8a8; }
+.zoom-slider-handle {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  background: var(--color-surface);
+  border: 1px solid #8a8a8a;
+  transform: translate(-50%, -50%);
+  cursor: grab;
+}
+.zoom-slider-handle:active { cursor: grabbing; }
+.zoom-sep { width: 1px; height: 14px; background: var(--v-glass-line); }
+
+/* 엑셀처럼 시트 탭(왼쪽)과 가로 스크롤바(오른쪽)가 같은 줄에 있다 — 탭 쪽은 늘어나는 칸이라
+   시트가 많아지면 자기 안에서 스크롤되고(overflow-x:auto), 스크롤바는 항상 고정폭으로
+   오른쪽 끝에 붙는다. */
+.grid-tabs-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4rem;
+}
+
+/* 엑셀처럼 알약(pill) 모양 박스가 아니라, 폴더 탭처럼 위쪽만 둥글고 아래쪽 테두리가 없는 낱개
+   탭들이 배경 위에 바로 붙어 있는 모양 — 활성 탭만 흰 배경 + 아래쪽 굵은 강조선으로 구분한다. */
+.grid-sheet-tabs {
+  flex: 6;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 0;
+  padding: 0;
+  margin: 1px 0 0;
+  overflow-x: auto;
+}
+
+/* 엑셀 하단의 가로 스크롤바 — 그리드 자체 스크롤(scrollHostEl)과 JS로 양방향 동기화된다.
+   시트 탭:스크롤바 = 6:4 비율로 나눈다(실제 엑셀도 스크롤바 쪽이 꽤 넓다). */
+.grid-hscroll {
+  flex: 4;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  height: 20px;
+  margin-bottom: 1px;
+}
+.grid-hscroll-arrow {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--v-text-dim);
+  cursor: pointer;
+}
+.grid-hscroll-arrow:hover { color: var(--v-text); background: var(--v-hover); }
+.grid-hscroll-arrow svg { width: 12px; height: 12px; }
+.grid-hscroll-track {
+  position: relative;
+  flex: 1;
+  height: 14px;
+  margin: 0 2px;
+  background: var(--color-surface);
+  border: 1px solid var(--v-glass-line);
+}
+.grid-hscroll-thumb {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: 0;
+  min-width: 16px;
+  background: #c6c6c6;
+  cursor: pointer;
+}
+.grid-hscroll-thumb:hover { background: #b0b0b0; }
+.grid-hscroll[data-scrollable="false"] { opacity: 0.45; pointer-events: none; }
+.grid-sheet-tab-add {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: 0 0 2px 4px;
+  border-radius: 50%;
+  border: 1px solid var(--v-glass-line);
+  background: transparent;
+  color: var(--v-text-dim);
+  cursor: pointer;
+}
+.grid-sheet-tab-add:hover { background: var(--v-hover); color: var(--v-text); border-color: var(--v-text-dim); }
+.grid-sheet-tab-add svg { width: 13px; height: 13px; }
+
+.grid-sheet-tab {
+  border: 1px solid var(--v-glass-line);
+  border-bottom: none;
+  border-radius: 0;
+  padding: 4px 16px;
+  line-height: 1.3;
+  font-size: 0.78rem;
+  background: var(--v-glass);
+  color: var(--v-text);
+  cursor: pointer;
   white-space: nowrap;
+  box-shadow: inset 0 -2px 0 transparent;
   transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
 }
-.grid-sheet-tab:hover { background: var(--v-hover); }
+/* 탭끼리 서로 맞닿게 — 각자 왼쪽 테두리를 갖되 그 다음 탭이 -1px 겹쳐서 실제 엑셀처럼
+   탭 사이에 선 하나만(이중선 아님) 남고 틈은 없다. */
+.grid-sheet-tab + .grid-sheet-tab { margin-left: -1px; }
+.grid-sheet-tab:hover { background: var(--v-hover); z-index: 1; position: relative; }
 .grid-sheet-tab.active {
-  background: color-mix(in srgb, var(--v-accent) 16%, transparent);
+  background: var(--color-surface);
   color: var(--v-accent);
   font-weight: 600;
+  box-shadow: inset 0 -3px 0 var(--v-accent);
+  position: relative;
+  z-index: 2;
 }
+.grid-sheet-tab-rename {
+  border: 1px solid var(--v-accent);
+  border-radius: 0;
+  padding: 4px 8px;
+  font-size: 0.78rem;
+  font-family: var(--font-sans);
+  color: var(--v-text);
+  background: var(--color-surface);
+  width: 8em;
+}
+
+/* 시트 탭 우클릭 메뉴/이동 메뉴 — document.body에 바로 붙이므로 뷰포트 기준 고정 위치를 쓴다. */
+.sheet-context-menu,
+.sheet-move-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 9em;
+  padding: 0.3rem;
+  border-radius: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--v-glass-line);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.sheet-context-menu button,
+.sheet-move-menu button {
+  border: none;
+  background: transparent;
+  color: var(--v-text);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sheet-context-menu button:hover,
+.sheet-move-menu button:hover { background: var(--v-hover); }
 
 /* 셀 인라인 배경/글자색(applyStyleToTd)보다 검색 하이라이트가 항상 위에 보이도록 !important */
 .grid-edit-table td.g-hit-current { background: #ffd43b !important; outline: 2px solid #f59f00; }
@@ -1173,7 +1381,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   max-width: 26rem;
   padding: 2.2rem 2.4rem;
   text-align: center;
-  border-radius: 20px;
+  border-radius: 0;
   background: var(--v-glass);
   border: 1px solid var(--v-glass-line);
   backdrop-filter: blur(20px);
@@ -1225,6 +1433,10 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   border-bottom: 1px solid var(--v-glass-line);
   box-shadow: 0 2px 8px rgba(27, 26, 23, 0.06);
 }
+/* display:flex가 클래스 선택자라 브라우저 기본 [hidden]{display:none}보다 우선해버려서,
+   canEdit:false일 때 JS가 toolbar.hidden=true를 줘도 계속 보이던 문제 — 명시적으로 다시 꺼준다
+   (border-dropdown 메뉴에서 겪었던 것과 같은 종류의 버그). */
+.editor-toolbar[hidden] { display: none; }
 
 .toolbar-top-row {
   display: flex;
@@ -1275,7 +1487,9 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   justify-content: space-between;
   gap: 0.3rem;
   padding: 0.1rem 0.7rem 0;
-  border-right: 1px solid var(--v-glass-line);
+  /* 일반 --v-glass-line(옅은 크림색)은 도구 영역 배경과 거의 구분이 안 돼서, 그룹 구분선만
+     더 진한 색으로 따로 준다. */
+  border-right: 1px solid color-mix(in srgb, var(--v-glass-line) 40%, var(--color-ink-soft) 60%);
 }
 .ribbon-group:last-child { border-right: none; padding-right: 0; }
 .ribbon-group-buttons { display: flex; align-items: center; gap: 0.2rem; flex-wrap: wrap; justify-content: flex-start; }
@@ -1303,6 +1517,20 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   color: var(--v-accent);
 }
 .conn-status[data-status="disconnected"] { background: rgba(255, 107, 87, 0.18); color: #ff8b76; }
+
+/* Office 365 스타일 "저장 중… / 저장됨" 표시 — 아이콘 두 개를 겹쳐두고 data-status로 하나만 보인다. */
+.save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--v-text-dim);
+}
+.save-status svg { width: 13px; height: 13px; display: none; }
+.save-status[data-status="saving"] .save-status-icon-saving { display: block; animation: save-status-spin 0.9s linear infinite; }
+.save-status[data-status="saved"] .save-status-icon-saved { display: block; color: var(--v-accent); }
+.save-status[data-status="saved"] .save-status-text { color: var(--v-accent); }
+@keyframes save-status-spin { to { transform: rotate(360deg); } }
 
 /* 오피스 365 스타일 겹침 아바타 스택 — 뒤쪽 아바타일수록 왼쪽으로 겹친다 */
 .presence-list { display: flex; align-items: center; padding-left: 6px; }
@@ -1348,7 +1576,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   gap: 2px;
 }
 .color-btn-glyph { width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: 700; color: var(--v-text); line-height: 1; }
-.color-btn-bar { width: 18px; height: 3px; border-radius: 1px; background: var(--btn-color, currentColor); box-shadow: 0 0 0 1px var(--v-glass-line); }
+.color-btn-bar { width: 18px; height: 3px; border-radius: 0; background: var(--btn-color, currentColor); box-shadow: 0 0 0 1px var(--v-glass-line); }
 .color-caret-wrap { position: relative; }
 .color-caret-input {
   position: absolute;
@@ -1388,7 +1616,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 .toolbar-select {
   height: 34px;
   padding: 0 0.3rem;
-  border-radius: 7px;
+  border-radius: 0;
   border: 1px solid var(--v-glass-line);
   background: var(--color-surface);
   color: var(--v-text);
@@ -1398,12 +1626,15 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   max-width: 6.4em;
 }
 .toolbar-select-wide { max-width: 4.6em; }
+/* 글꼴 이름 select만 남는 폭을 다 채운다(글자크기 입력·크게/작게 버튼은 고정폭이라 밀리지 않음) —
+   엑셀도 "글꼴" 그룹 1행에서 글꼴명이 구분선 바로 앞까지 넓게 뻗어 있다. */
+#cell-font-family { flex: 1; max-width: none; }
 .toolbar-select-full { max-width: none; width: 100%; }
 .toolbar-number {
   height: 34px;
   width: 3.4em;
   padding: 0 0.2rem;
-  border-radius: 7px;
+  border-radius: 0;
   border: 1px solid var(--v-glass-line);
   background: var(--color-surface);
   color: var(--v-text);
@@ -1421,14 +1652,18 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   justify-content: center;
   width: 14px;
   height: 34px;
+  /* <button>은 브라우저 기본 패딩(좌우 ~6px)이 있어서, 14px짜리 상자 안에서 12px 화살표가
+     flex-shrink로 짜부라져 점처럼 보였다 — <span> 캐럿엔 원래 패딩이 없어서 안 겪던 문제. */
+  padding: 0;
   border: none;
   background: transparent;
-  color: var(--v-text-dim);
+  /* v-text-dim은 흐려서 옆의 굵은 아이콘에 묻혀 거의 안 보였다 — 본문 글자색만큼 진하게 올린다. */
+  color: var(--v-text);
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: 0;
 }
-.dropdown-caret svg { width: 10px; height: 10px; }
-.dropdown-caret:hover { background: var(--v-hover); color: var(--v-text); }
+.dropdown-caret svg { width: 12px; height: 12px; flex: none; stroke-width: 2.4; }
+.dropdown-caret:hover { background: var(--v-hover); }
 .dropdown-menu {
   position: absolute;
   top: 100%;
@@ -1437,7 +1672,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   margin-top: 4px;
   min-width: 9.5em;
   padding: 0.3rem;
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--color-surface);
   border: 1px solid var(--v-glass-line);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
@@ -1456,7 +1691,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   font-size: 0.8rem;
   text-align: left;
   padding: 0.4rem 0.55rem;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
   white-space: nowrap;
 }

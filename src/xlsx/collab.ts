@@ -202,6 +202,7 @@ export async function exportXlsxFromGrid(originalXlsxBytes: Uint8Array, ydoc: Y.
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(originalXlsxBytes as unknown as ArrayBuffer);
   const visibleSheets = workbook.worksheets.filter((sheet) => !sheet.state || sheet.state === 'visible');
+  const originalSheetCount = visibleSheets.length;
 
   // ExcelJS는 시트 보호(sheetProtection)를 읽어오긴 하지만, 아무 것도 안 건드리고 그대로
   // writeBuffer()만 하면 그 정보를 재직렬화하지 않고 조용히 잃어버린다(ExcelJS 자체의 한계로 보임 —
@@ -220,8 +221,17 @@ export async function exportXlsxFromGrid(originalXlsxBytes: Uint8Array, ydoc: Y.
 
   for (const [key, target] of structure) {
     const sheetIdx = Number(key);
-    const sheet = visibleSheets[sheetIdx];
-    if (!sheet) continue;
+    // 협업 중 새로 추가된 시트(webviewer 쪽 "+"/삽입 메뉴)는 원본 xlsx에 애초에 없어서
+    // visibleSheets에 자리가 없다 — 지금 이름으로 새 워크시트를 만들어 그 자리에 채워 넣는다.
+    let sheet = visibleSheets[sheetIdx];
+    if (!sheet) {
+      sheet = workbook.addWorksheet(target.name);
+      visibleSheets[sheetIdx] = sheet;
+    } else if (sheet.name !== target.name) {
+      // 시트 이름 변경(우클릭 "이름 바꾸기")도 지금까지 원본 워크시트 객체를 그대로 재사용하면서
+      // name만 안 옮겨 써서 저장 후 되돌아가 있었다 — 여기서 실제로 반영한다.
+      sheet.name = target.name;
+    }
 
     if (sheet.rowCount > target.rowCount) {
       sheet.spliceRows(target.rowCount + 1, sheet.rowCount - target.rowCount);
@@ -229,6 +239,14 @@ export async function exportXlsxFromGrid(originalXlsxBytes: Uint8Array, ydoc: Y.
     if (sheet.columnCount > target.colCount) {
       sheet.spliceColumns(target.colCount + 1, sheet.columnCount - target.colCount);
     }
+  }
+
+  // 반대로, 협업 중 삭제된 시트(원래 있었는데 지금 structure엔 없는 인덱스)는 원본에서 그대로
+  // 남아 재저장되고 있었다 — 실제로 워크북에서 제거한다.
+  for (let sheetIdx = 0; sheetIdx < originalSheetCount; sheetIdx += 1) {
+    if (structure.has(String(sheetIdx))) continue;
+    const sheet = visibleSheets[sheetIdx];
+    if (sheet) workbook.removeWorksheet(sheet.id);
   }
 
   const touchedValueKeys = new Set<string>([...baseline.keys(), ...cells.keys()]);

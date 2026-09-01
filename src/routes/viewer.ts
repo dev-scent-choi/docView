@@ -10,7 +10,7 @@ import { PageOutOfRangeError, buildPrintPdf, getPageDimensions, renderPage } fro
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { extractPdfText, searchPdfText, type PageText } from '../search.js';
 import { docxHasUnsupportedContent } from '../docx/import.js';
-import { getCurrentBytes } from '../collab/room.js';
+import { flushNow, getCurrentBytes } from '../collab/room.js';
 import type { GridCell, GridHeader } from '../spreadsheet.js';
 import { store } from '../storage.js';
 import type { DocumentMeta, ViewClaims } from '../types.js';
@@ -292,6 +292,22 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
           editHasUnsupportedContent,
         },
       };
+    },
+  );
+
+  // Ctrl+S — 8초 유휴 자동저장을 기다리지 않고 지금 바로 저장한다(Office 365의 수동 저장과 동일한
+  // 역할이지만, 이 앱은 이미 계속 자동저장하므로 사실상 "저장 큐를 지금 비워라"에 가깝다).
+  app.post<{ Querystring: TokenQuery }>(
+    '/api/view/save',
+    { schema: { querystring: tokenQuerySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if (!view.claims.perms.canEdit) {
+        return reply.code(403).send({ success: false, error: '편집 권한이 없습니다.' });
+      }
+      const saved = await flushNow(view.meta.id);
+      return { success: true, data: { saved } };
     },
   );
 

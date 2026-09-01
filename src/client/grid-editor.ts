@@ -2,6 +2,8 @@ import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import FormulaParser, { FormulaError, type CellRef, type RangeRef } from 'fast-formula-parser';
 import {
+  DOC_META_MAP,
+  DOC_META_SAVED_AT_KEY,
   EDIT_SOFT_COL_LIMIT,
   EDIT_SOFT_ROW_LIMIT,
   GRID_CELLS_MAP,
@@ -154,11 +156,12 @@ async function main(): Promise<void> {
 
   // canEdit:false여도 이 편집기 화면 자체는 그대로 보여준다(과거 연도 접속현황처럼 "현재 연도와
   // 똑같은 화면으로, 다만 손댈 수는 없게" 보여줘야 하는 경우가 있다) — 실제 쓰기 차단은 서버가
-  // 읽기 전용 연결로 처리한다(collab/room.ts). 여기서는 편집 UI(툴바·셀 입력)만 꺼서 애초에
-  // 사용자가 고칠 수 있다고 착각하지 않게 한다.
+  // 읽기 전용 연결로 처리한다(collab/room.ts). 여기서는 서식 도구(리본)만 꺼서 애초에 사용자가
+  // 고칠 수 있다고 착각하지 않게 한다 — 뒤로가기/제목/검색/참여자 같은 상단 줄은 도구가 아니라
+  // 계속 보여야 하므로 toolbar 전체가 아니라 .toolbar-format만 숨긴다.
   canEdit = info.permissions.canEdit;
   if (!canEdit) {
-    toolbar.hidden = true;
+    toolbar.querySelector('.toolbar-format')?.setAttribute('hidden', '');
     formulaInputEl.readOnly = true;
   }
 
@@ -212,6 +215,53 @@ async function main(): Promise<void> {
       });
     }
   });
+
+  // ---------- 저장 상태 표시(Office 365 스타일 "저장 중… / 저장됨") + Ctrl+S ----------
+  // docMeta.savedAt은 서버의 flushToStore가 실제로 디스크에 쓴 뒤에만 갱신하는 일반 Y.Map
+  // 값이라, 이 클라이언트뿐 아니라 같이 편집 중인 다른 사람 화면에도 똑같이 반영된다.
+  // 엑셀 하단 상태 표시줄의 "준비/입력/편집" 텍스트 — 지금 이 세션의 편집 동작 기준이라
+  // 다른 참여자에게는 전파하지 않는다(각자 자기 화면 기준 상태).
+  const gridStatusTextEl = document.getElementById('grid-status-text') as HTMLElement | null;
+  function setGridStatusText(text: string): void {
+    if (gridStatusTextEl) gridStatusTextEl.textContent = text;
+  }
+  if (!canEdit && gridStatusTextEl) gridStatusTextEl.textContent = '읽기 전용';
+
+  const docMeta = ydoc.getMap<number>(DOC_META_MAP);
+  const saveStatusEl = document.getElementById('save-status') as HTMLElement | null;
+  const saveStatusTextEl = saveStatusEl?.querySelector('.save-status-text') as HTMLElement | null;
+  let lastKnownSavedAt = docMeta.get(DOC_META_SAVED_AT_KEY) ?? 0;
+  function setSaveStatus(status: 'saving' | 'saved'): void {
+    if (!saveStatusEl) return;
+    saveStatusEl.hidden = false;
+    saveStatusEl.dataset.status = status;
+    if (saveStatusTextEl) saveStatusTextEl.textContent = status === 'saving' ? '저장 중…' : '모든 변경 내용이 저장됨';
+  }
+  if (canEdit) {
+    ydoc.on('afterTransaction', (tx) => {
+      if (!tx.local || tx.changed.size === 0) return;
+      setSaveStatus('saving');
+    });
+  }
+  docMeta.observe(() => {
+    const savedAt = docMeta.get(DOC_META_SAVED_AT_KEY) ?? 0;
+    if (savedAt > lastKnownSavedAt) {
+      lastKnownSavedAt = savedAt;
+      setSaveStatus('saved');
+    }
+  });
+  if (canEdit) {
+    window.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        setSaveStatus('saving');
+        fetch(`/api/view/save?token=${encodeURIComponent(token)}`, { method: 'POST' }).catch(() => {
+          // 네트워크 오류 등으로 실패해도 8초 유휴 자동저장이 알아서 다시 시도하므로 별도 안내는 생략한다.
+        });
+      }
+    });
+  }
+
   /** 이 문서를 iframe으로 임베드한 부모 창(예: 업체별 접속현황 탭)이 자기 UI 안에 접속자 아바타를
    * 직접 그릴 수 있도록, webviewer 자신의 툴바(chrome=hidden이면 안 보임)와는 별개로 접속자 목록을
    * 그대로 postMessage로도 흘려보낸다 — webviewer는 그 목록을 "어디에" 보여줄지 전혀 몰라도 된다. */
@@ -355,12 +405,30 @@ async function main(): Promise<void> {
     });
   }
 
+  /** 화면 순서는 order 필드 기준(없으면 시트 키 번호로 대체) — 키 번호는 cells/styles/merges가
+   * 참조하는 안정적인 식별자라 순서가 바뀌어도 그대로 두고, order만 바꿔서 재배치한다. */
   function sortedSheetIndices(): number[] {
-    return [...structure.keys()].map(Number).sort((a, b) => a - b);
+    return [...structure.keys()]
+      .map(Number)
+      .sort((a, b) => (structure.get(String(a))?.order ?? a) - (structure.get(String(b))?.order ?? b));
+  }
+  function tabElFor(idx: number): HTMLElement | null {
+    return sheetTabsEl.querySelector(`[data-sheet-idx="${idx}"]`);
+  }
+  function closeSheetPopup(): void {
+    document.querySelectorAll('.sheet-context-menu, .sheet-move-menu').forEach((el) => el.remove());
   }
 
   function renderSheetTabs(): void {
     const indices = sortedSheetIndices();
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'grid-sheet-tab-add';
+    addBtn.title = '시트 추가';
+    addBtn.setAttribute('aria-label', '시트 추가');
+    addBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+    addBtn.addEventListener('click', () => addSheet());
     sheetTabsEl.replaceChildren(
       ...indices.map((idx) => {
         const sheet = structure.get(String(idx))!;
@@ -368,15 +436,187 @@ async function main(): Promise<void> {
         tab.type = 'button';
         tab.className = 'grid-sheet-tab' + (idx === activeSheet ? ' active' : '');
         tab.textContent = sheet.name;
+        tab.dataset.sheetIdx = String(idx);
         tab.addEventListener('click', () => {
           if (activeSheet === idx) return;
           activeSheet = idx;
           renderSheetTabs();
           renderTable();
         });
+        tab.addEventListener('dblclick', () => startSheetRename(idx));
+        tab.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          openSheetContextMenu(idx, event.clientX, event.clientY);
+        });
         return tab;
       }),
+      addBtn,
     );
+  }
+
+  /** order 필드만 다시 매긴다 — 셀 데이터는 전혀 건드리지 않으므로 시트가 몇 개든 가벼운 연산이다. */
+  function applySheetOrder(orderedKeys: readonly number[]): void {
+    ydoc.transact(() => {
+      orderedKeys.forEach((key, i) => {
+        const sheet = structure.get(String(key));
+        if (sheet && sheet.order !== i) structure.set(String(key), { ...sheet, order: i });
+      });
+    });
+  }
+
+  /** 엑셀의 "새 시트"/시트 탭 우클릭 "삽입"과 동일 — 기존 이름과 안 겹치는 "SheetN" 이름으로 빈
+   * 시트를 만들어 바로 전환한다. afterIdx를 주면 그 시트 바로 뒤에, 안 주면 맨 뒤에 넣는다. */
+  function addSheet(afterIdx?: number): void {
+    const indices = sortedSheetIndices();
+    const newKey = indices.length ? Math.max(...indices) + 1 : 0;
+    const existingNames = new Set(indices.map((idx) => structure.get(String(idx))?.name));
+    let n = indices.length + 1;
+    while (existingNames.has(`Sheet${n}`)) n += 1;
+    const insertPos = afterIdx === undefined ? indices.length : indices.indexOf(afterIdx) + 1;
+    const orderedKeys = [...indices];
+    orderedKeys.splice(insertPos, 0, newKey);
+    activeSheet = newKey;
+    ydoc.transact(() => {
+      structure.set(String(newKey), { name: `Sheet${n}`, rowCount: 1, colCount: 1, order: insertPos });
+      orderedKeys.forEach((key, i) => {
+        if (key === newKey) return;
+        const sheet = structure.get(String(key));
+        if (sheet && sheet.order !== i) structure.set(String(key), { ...sheet, order: i });
+      });
+    });
+  }
+
+  /** 엑셀 시트 탭 우클릭 "삭제" — 마지막 남은 시트는 지울 수 없고, 지금 보고 있던 시트를 지우면
+   * 그 자리에 있던(원래 바로 뒤였던) 시트로 자동 전환한다. */
+  function deleteSheet(idx: number): void {
+    const indices = sortedSheetIndices();
+    if (indices.length <= 1) {
+      alert('마지막 남은 시트는 삭제할 수 없습니다.');
+      return;
+    }
+    const sheet = structure.get(String(idx));
+    if (!confirm(`"${sheet?.name ?? ''}" 시트를 삭제하시겠습니까? 이 시트의 모든 내용이 사라집니다.`)) return;
+    const pos = indices.indexOf(idx);
+    const remaining = indices.filter((i) => i !== idx);
+    if (activeSheet === idx) activeSheet = remaining[Math.min(pos, remaining.length - 1)];
+    ydoc.transact(() => {
+      structure.delete(String(idx));
+      remaining.forEach((key, i) => {
+        const s = structure.get(String(key));
+        if (s && s.order !== i) structure.set(String(key), { ...s, order: i });
+      });
+    });
+  }
+
+  /** 엑셀 시트 탭 우클릭/더블클릭 "이름 바꾸기" — 탭 자리에 바로 입력창을 띄운다. */
+  function startSheetRename(idx: number): void {
+    const tab = tabElFor(idx);
+    const sheet = structure.get(String(idx));
+    if (!tab || !sheet) return;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'grid-sheet-tab-rename';
+    input.value = sheet.name;
+    tab.replaceWith(input);
+    input.focus();
+    input.select();
+    const commit = () => {
+      const trimmed = input.value.trim();
+      if (trimmed && trimmed !== sheet.name) {
+        structure.set(String(idx), { ...sheet, name: trimmed });
+      } else {
+        renderSheetTabs(); // 값이 그대로면 observe가 안 불려 렌더가 안 되므로 직접 되돌린다
+      }
+    };
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') input.blur();
+      if (event.key === 'Escape') {
+        input.value = sheet.name;
+        input.blur();
+      }
+    });
+    input.addEventListener('blur', commit, { once: true });
+  }
+
+  /** 엑셀 시트 탭 우클릭 "이동/복사"의 단순화된 버전 — 목록에서 기준 시트를 고르면 그 앞으로
+   * 옮긴다(드래그 대신 클릭 한 번으로 재배치). */
+  function openMoveMenu(idx: number, anchorEl: HTMLElement): void {
+    closeSheetPopup();
+    const indices = sortedSheetIndices();
+    const menu = document.createElement('div');
+    menu.className = 'sheet-move-menu';
+    indices.forEach((targetIdx) => {
+      if (targetIdx === idx) return;
+      const targetSheet = structure.get(String(targetIdx));
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.textContent = `"${targetSheet?.name ?? ''}" 앞으로 이동`;
+      item.addEventListener('click', () => {
+        const reordered = indices.filter((i) => i !== idx);
+        reordered.splice(reordered.indexOf(targetIdx), 0, idx);
+        applySheetOrder(reordered);
+        closeSheetPopup();
+      });
+      menu.appendChild(item);
+    });
+    const toEnd = document.createElement('button');
+    toEnd.type = 'button';
+    toEnd.textContent = '맨 뒤로 이동';
+    toEnd.addEventListener('click', () => {
+      applySheetOrder([...indices.filter((i) => i !== idx), idx]);
+      closeSheetPopup();
+    });
+    menu.appendChild(toEnd);
+    document.body.appendChild(menu);
+    const anchorRect = anchorEl.getBoundingClientRect();
+    positionSheetPopup(menu, anchorRect.left, anchorRect.bottom + 4, anchorRect.top - 4);
+    setTimeout(() => document.addEventListener('mousedown', onSheetPopupOutsideClick), 0);
+  }
+
+  /** 뷰포트 아래쪽에 붙어 있는 시트 탭(항상 그렇다)에서 메뉴를 열면 아래로 펼칠 공간이 부족한
+   * 경우가 대부분이라, 실제로 렌더링된 높이를 재서 넘치면 위로 뒤집는다. */
+  function positionSheetPopup(menu: HTMLElement, x: number, belowY: number, aboveY: number = belowY): void {
+    const rect = menu.getBoundingClientRect();
+    const fitsBelow = belowY + rect.height <= window.innerHeight;
+    const top = fitsBelow ? belowY : Math.max(4, aboveY - rect.height);
+    const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function onSheetPopupOutsideClick(event: MouseEvent): void {
+    const popups = document.querySelectorAll('.sheet-context-menu, .sheet-move-menu');
+    const inside = [...popups].some((el) => el.contains(event.target as Node));
+    if (!inside) {
+      closeSheetPopup();
+      document.removeEventListener('mousedown', onSheetPopupOutsideClick);
+    }
+  }
+
+  /** 엑셀 시트 탭 우클릭 메뉴와 동일한 4가지: 삽입/삭제/이름 바꾸기/이동. */
+  function openSheetContextMenu(idx: number, x: number, y: number): void {
+    closeSheetPopup();
+    const menu = document.createElement('div');
+    menu.className = 'sheet-context-menu';
+    const items: Array<[string, () => void]> = [
+      ['삽입', () => addSheet(idx)],
+      ['삭제', () => deleteSheet(idx)],
+      ['이름 바꾸기', () => startSheetRename(idx)],
+      ['이동', () => openMoveMenu(idx, tabElFor(idx) ?? menu)],
+    ];
+    items.forEach(([label, action]) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        if (label !== '이동') closeSheetPopup();
+        action();
+      });
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    positionSheetPopup(menu, x, y);
+    setTimeout(() => document.addEventListener('mousedown', onSheetPopupOutsideClick), 0);
   }
 
 /** 셀 근처에 잠깐 떴다 사라지는 안내 말풍선 — 유효성 검사에 걸린 입력을 왜 안 받았는지 알려준다. */
@@ -705,6 +945,7 @@ async function main(): Promise<void> {
           td.contentEditable = 'false';
           renderCellDisplay(td, key); // 편집 종료 — 수식이면 계산 결과로 되돌린다
           recalcFormulaCells(); // 이 셀 값이 바뀌었으니 이를 참조하는 다른 수식 셀도 갱신
+          setGridStatusText('준비');
         });
         if (canEditThisCell) {
           td.addEventListener('dblclick', () => enterEditMode(td, key));
@@ -712,6 +953,14 @@ async function main(): Promise<void> {
             if (activeCellKey === key) formulaInputEl.value = td.textContent ?? '';
           });
           td.addEventListener('paste', (event) => handlePaste(event, td));
+          // 셀을 선택만 한 채(더블클릭 없이) 바로 한글 등 IME 문자를 치는 경우 — 조합 중인 글자는
+          // keydown의 event.key가 길이 1이 아니라("Process" 등) 아래 handleCellKeydown의 "글자 하나
+          // 치면 편집모드 진입" 분기를 못 타서, 셀이 그대로 선택 상태에 머물며 입력이 통째로
+          // 사라졌었다. compositionstart 시점에 직접 편집모드로 들어가면(내용은 비워서 시작 —
+          // 엑셀처럼 선택된 채 타이핑하면 기존 값을 덮어쓴다) 그 뒤 IME 조합이 이 칸에서 이어진다.
+          td.addEventListener('compositionstart', () => {
+            if (editingKey !== key) enterEditMode(td, key, '');
+          });
         }
         td.addEventListener('keydown', (event) => handleCellKeydown(event, td, r, c, key, canEditThisCell));
         tr.appendChild(td);
@@ -727,6 +976,7 @@ async function main(): Promise<void> {
       // 핸들 위치 재계산까지 같이 해 준다. 재렌더로 그 칸이 더 이상 없으면(시트 전환 등) 그냥 둔다.
       if (parsed && parsed.sheetIdx === activeSheet) tdFor(parsed.row, parsed.col)?.focus({ preventScroll: true });
     }
+    updateHScrollbar();
   }
 
   // ---------- 셀 선택 vs 편집모드, 방향키 이동 (엑셀과 동일하게) ----------
@@ -778,6 +1028,9 @@ async function main(): Promise<void> {
     td.focus();
     placeCaretAtEnd(td);
     formulaInputEl.value = td.textContent ?? '';
+    // replaceWith가 주어졌다는 건 기존 값을 지우고 새로 치는 중(엑셀의 "입력")이라는 뜻 —
+    // undefined면 더블클릭 등으로 기존 내용을 그대로 두고 이어 쓰는 "편집"이다.
+    setGridStatusText(replaceWith !== undefined ? '입력' : '편집');
   }
 
   function commitAndMove(td: HTMLTableCellElement, key: string, row: number, col: number, dRow: number, dCol: number): void {
@@ -788,6 +1041,7 @@ async function main(): Promise<void> {
     renderCellDisplay(td, key);
     recalcFormulaCells();
     moveSelection(row, col, dRow, dCol);
+    setGridStatusText('준비');
   }
 
   function cancelEdit(td: HTMLTableCellElement, key: string): void {
@@ -796,6 +1050,7 @@ async function main(): Promise<void> {
     td.contentEditable = 'false';
     renderCellDisplay(td, key); // 원래 값(수정 전)으로 되돌린다
     td.focus();
+    setGridStatusText('준비');
   }
 
   /** 지금 칸에서 (dRow,dCol)만큼 떨어진 칸으로 선택을 옮긴다. 병합에 덮여 실제 <td>가 없는
@@ -1536,14 +1791,25 @@ async function main(): Promise<void> {
   });
   document.getElementById('btn-border')?.addEventListener('click', () => applyBorderPreset('all'));
 
-  // ---------- 확대/축소 ----------
+  // ---------- 확대/축소 (엑셀처럼 드래그 슬라이더 포함) ----------
   const zoomLevelEl = document.getElementById('zoom-level') as HTMLElement;
+  const zoomSliderTrackEl = document.getElementById('zoom-slider-track') as HTMLElement | null;
+  const zoomSliderFillEl = document.getElementById('zoom-slider-fill') as HTMLElement | null;
+  const zoomSliderHandleEl = document.getElementById('zoom-slider-handle') as HTMLElement | null;
   const ZOOM_MIN = 0.6;
   const ZOOM_MAX = 2;
   let zoom = 1;
   function applyZoom(): void {
     zoomHost.style.zoom = String(zoom);
     zoomLevelEl.textContent = `${Math.round(zoom * 100)}%`;
+    const ratio = (zoom - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN);
+    if (zoomSliderFillEl) zoomSliderFillEl.style.width = `${ratio * 100}%`;
+    if (zoomSliderHandleEl) zoomSliderHandleEl.style.left = `${ratio * 100}%`;
+  }
+  function setZoomFromRatio(ratio: number): void {
+    const clamped = Math.max(0, Math.min(1, ratio));
+    zoom = Math.round((ZOOM_MIN + clamped * (ZOOM_MAX - ZOOM_MIN)) * 20) / 20; // 5%p 단위로 스냅
+    applyZoom();
   }
   document.getElementById('zoom-in')?.addEventListener('click', () => {
     zoom = Math.min(ZOOM_MAX, Math.round((zoom + 0.1) * 10) / 10);
@@ -1552,6 +1818,84 @@ async function main(): Promise<void> {
   document.getElementById('zoom-out')?.addEventListener('click', () => {
     zoom = Math.max(ZOOM_MIN, Math.round((zoom - 0.1) * 10) / 10);
     applyZoom();
+  });
+  function ratioFromClientX(clientX: number): number {
+    const rect = zoomSliderTrackEl!.getBoundingClientRect();
+    return (clientX - rect.left) / rect.width;
+  }
+  zoomSliderTrackEl?.addEventListener('mousedown', (event) => {
+    if (event.target === zoomSliderHandleEl) return; // 핸들 자체의 드래그는 아래 리스너가 처리
+    setZoomFromRatio(ratioFromClientX(event.clientX));
+  });
+  zoomSliderHandleEl?.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    const onMove = (moveEvent: MouseEvent) => setZoomFromRatio(ratioFromClientX(moveEvent.clientX));
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  applyZoom();
+
+  // ---------- 엑셀처럼 시트 탭 옆에 붙는 커스텀 가로 스크롤바 ----------
+  // 네이티브 가로 스크롤바는 CSS에서 숨기고(그리드 바로 아래에 뜨는 게 엑셀과 달라서), 이 위젯이
+  // scrollHostEl.scrollLeft를 그대로 읽고 쓴다 — 장식이 아니라 실제 스크롤을 대신한다.
+  const hscrollEl = document.querySelector('.grid-hscroll') as HTMLElement | null;
+  const hscrollTrackEl = document.getElementById('hscroll-track') as HTMLElement | null;
+  const hscrollThumbEl = document.getElementById('hscroll-thumb') as HTMLElement | null;
+  function updateHScrollbar(): void {
+    if (!hscrollEl || !hscrollTrackEl || !hscrollThumbEl) return;
+    const { scrollWidth, clientWidth, scrollLeft } = scrollHostEl;
+    const scrollable = scrollWidth > clientWidth + 1;
+    hscrollEl.dataset.scrollable = String(scrollable);
+    if (!scrollable) {
+      hscrollThumbEl.style.width = '100%';
+      hscrollThumbEl.style.left = '0';
+      return;
+    }
+    const trackWidth = hscrollTrackEl.clientWidth;
+    const thumbWidth = Math.max(16, (clientWidth / scrollWidth) * trackWidth);
+    const maxThumbLeft = trackWidth - thumbWidth;
+    const maxScrollLeft = scrollWidth - clientWidth;
+    const thumbLeft = maxScrollLeft > 0 ? (scrollLeft / maxScrollLeft) * maxThumbLeft : 0;
+    hscrollThumbEl.style.width = `${thumbWidth}px`;
+    hscrollThumbEl.style.left = `${thumbLeft}px`;
+  }
+  scrollHostEl.addEventListener('scroll', updateHScrollbar);
+  window.addEventListener('resize', updateHScrollbar);
+  document.getElementById('hscroll-left')?.addEventListener('click', () => {
+    scrollHostEl.scrollBy({ left: -100 });
+  });
+  document.getElementById('hscroll-right')?.addEventListener('click', () => {
+    scrollHostEl.scrollBy({ left: 100 });
+  });
+  hscrollThumbEl?.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startScrollLeft = scrollHostEl.scrollLeft;
+    const trackWidth = hscrollTrackEl!.clientWidth;
+    const thumbWidth = hscrollThumbEl.getBoundingClientRect().width;
+    const maxScrollLeft = scrollHostEl.scrollWidth - scrollHostEl.clientWidth;
+    const onMove = (moveEvent: MouseEvent) => {
+      const deltaPx = moveEvent.clientX - startX;
+      const deltaScroll = (deltaPx / (trackWidth - thumbWidth)) * maxScrollLeft;
+      scrollHostEl.scrollLeft = Math.max(0, Math.min(maxScrollLeft, startScrollLeft + deltaScroll));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  // 트랙의 빈 부분을 클릭하면 그 방향으로 한 화면씩 스크롤한다(엑셀과 동일).
+  hscrollTrackEl?.addEventListener('mousedown', (event) => {
+    if (event.target !== hscrollTrackEl) return;
+    const trackRect = hscrollTrackEl.getBoundingClientRect();
+    const clickedBeforeThumb = event.clientX < trackRect.left + (hscrollThumbEl?.offsetLeft ?? 0);
+    scrollHostEl.scrollBy({ left: clickedBeforeThumb ? -scrollHostEl.clientWidth : scrollHostEl.clientWidth });
   });
 
   // ---------- 문서(시트 전체) 내 검색 ----------

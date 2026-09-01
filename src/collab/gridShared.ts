@@ -11,6 +11,13 @@
 export const GRID_CELLS_MAP = 'cells';
 export const GRID_STRUCTURE_MAP = 'structure';
 /**
+ * 문서 종류(xlsx/docx) 공통 — 서버가 실제로 디스크에 저장을 마친 시각(epoch ms)을 담아두는 작은
+ * 맵. 일반 Y.Map이라 기존 sync 프로토콜을 그대로 타고 모든 클라이언트에 자동 전파되므로, 저장
+ * 상태 표시를 위해 별도 커스텀 WebSocket 메시지를 만들 필요가 없다.
+ */
+export const DOC_META_MAP = 'docMeta';
+export const DOC_META_SAVED_AT_KEY = 'savedAt';
+/**
  * 시딩 시점의 셀 값을 그대로 담아두는 불변 스냅샷 — 클라이언트는 절대 쓰지 않는다.
  * 수식 셀은 계산된 결괏값 문자열로 시딩되는데, 저장 시 `cells`에 있는 모든 키를 원본에
  * 그대로 쓰면 사용자가 손대지 않은 수식까지 정적 값으로 덮어써 버린다. `cells`와 이 값을
@@ -39,6 +46,11 @@ export interface SheetStructure {
    * 있는 열 개수만큼만 있고, 그 뒤(편집기가 여백으로 더 그리는 빈 열들)는 없다. 없으면(구버전 문서
    * 등) 그리드 에디터가 기본 폭으로 그린다. */
   readonly colWidths?: readonly number[];
+  /** 시트 탭이 표시되는 순서 — 시트를 가리키는 안정적인 키(cells/styles/merges가 전부 이 번호로
+   * 참조된다)와 화면상 순서를 분리해 둬야, 탭을 드래그해 순서를 바꿔도 그 많은 셀 데이터를 전부
+   * 다시 키잉하지 않고 이 작은 숫자 하나만 바꾸면 된다. 없으면(구버전 문서) 키 번호 자체를 순서로
+   * 쓴다. */
+  readonly order?: number;
 }
 
 /**

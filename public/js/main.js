@@ -41,10 +41,15 @@ async function issueToken(docId, viewer, canPrint, canDownload, canCopy, canEdit
   });
 }
 
-/** 업로더 본인 열람용 — 전체 권한 토큰을 발급해 뷰어로 이동한다. */
-async function openViewer(docId, viewer) {
+/** 업로더 본인 열람용 — 전체 권한(수정 제외) 토큰을 발급해 이동한다.
+ * xlsx는 서버가 canEdit 여부와 무관하게 항상 editorUrl을 내려주므로(collab/room.ts가 쓰기만
+ * 서버 쪽에서 막는다), "바로 보기"도 편집 화면과 완전히 같은 그리드 UI로 열되 수정만 못 하게
+ * 한다 — 읽기 전용이라고 다른 화면(viewer.html)을 따로 보여줄 이유가 없다. docx는 editor.ts가
+ * 아직 읽기 전용 모드를 지원하지 않아(server가 canEdit:false면 editorUrl 자체를 안 줌) 기존대로
+ * viewer.html을 쓴다. */
+async function openViewer(docId, viewer, ext) {
   const issued = await issueToken(docId, viewer, true, true, true, false);
-  location.href = issued.viewerUrl;
+  location.href = ext === 'xlsx' && issued.editorUrl ? issued.editorUrl : issued.viewerUrl;
 }
 
 /** 업로더 본인 편집용 — 전체 권한 + canEdit 토큰을 발급해 동시편집기로 이동한다(docx/xlsx). */
@@ -144,9 +149,16 @@ fileInput.addEventListener('change', async () => {
     const doc = await uploadWithProgress(file, (ratio) => showProgress('업로드 중…', ratio));
     showProgress('변환 중…', 0.1);
     const ready = await waitForConversion(doc.id);
-    showProgress('변환 완료 — 뷰어로 이동합니다', 1);
+    // docx/xlsx처럼 동시편집을 지원하는 형식은 업로드 직후 바로 편집기로 들어간다 — 굳이
+    // 읽기 전용 뷰어를 거쳤다가 다시 "편집" 버튼을 눌러야 하는 두 단계를 거칠 이유가 없다.
+    const canOpenEditor = supportsEdit(ready);
+    showProgress(canOpenEditor ? '변환 완료 — 편집기로 이동합니다' : '변환 완료 — 뷰어로 이동합니다', 1);
     setStatus(`${ready.pageCount}페이지 변환 완료`, 'ok');
-    await openViewer(ready.id, '업로더');
+    if (canOpenEditor) {
+      await openEditor(ready.id, '업로더');
+    } else {
+      await openViewer(ready.id, '업로더');
+    }
   } catch (error) {
     hideProgress();
     setStatus(error.message, 'error');
@@ -228,7 +240,7 @@ function renderDocItem(doc) {
   quickView.textContent = '바로 보기';
   quickView.addEventListener('click', () => {
     quickView.disabled = true;
-    openViewer(doc.id, '업로더').catch((error) => {
+    openViewer(doc.id, '업로더', doc.ext).catch((error) => {
       quickView.disabled = false;
       setStatus(error.message, 'error');
     });

@@ -27,25 +27,18 @@
         </a>
         <span id="doc-title" class="doc-title">문서 불러오는 중…</span>
         <span id="conn-status" class="conn-status" data-status="connecting">연결 중…</span>
+        <span id="save-status" class="save-status" data-status="idle" hidden>
+          <svg class="save-status-icon-saving" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/></svg>
+          <svg class="save-status-icon-saved" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          <span class="save-status-text"></span>
+        </span>
       </div>
       <div class="toolbar-group toolbar-right">
-        <div class="zoom-group" role="group" aria-label="확대/축소">
-          <button id="zoom-out" class="icon-btn" title="축소" aria-label="축소">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
-          </button>
-          <span id="zoom-level" class="zoom-level">100%</span>
-          <button id="zoom-in" class="icon-btn" title="확대" aria-label="확대">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-          </button>
-        </div>
         <button id="search-btn" class="icon-btn" title="시트 내 검색 (Ctrl+F)" aria-label="시트 내 검색">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
         </button>
         <div id="presence-list" class="presence-list" aria-label="현재 접속 중인 참여자"></div>
       </div>
-    </div>
-    <div class="ribbon-tabs" role="tablist">
-      <button type="button" class="ribbon-tab active" role="tab" aria-selected="true">홈</button>
     </div>
     <div class="toolbar-group toolbar-format">
       <div class="ribbon-group">
@@ -95,7 +88,7 @@
             <span class="dropdown-btn color-dropdown-btn" id="cell-bg-color-btn">
               <button id="btn-bg-color-apply" class="icon-btn color-apply-btn" title="배경 색 채우기">
                 <span class="color-btn-glyph">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M3 13 10 6l8 8-7 7a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8Z"/><path d="M3 13h9"/><path d="M17.5 11.5c1.2 1.6 2 2.8 2 3.9a2 2 0 1 1-4 0c0-1.1.8-2.3 2-3.9Z" fill="currentColor" stroke="none"/></svg>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M5 8h14l-1.6 10.2a2 2 0 0 1-2 1.8H8.6a2 2 0 0 1-2-1.8L5 8Z"/><path d="M8 8a4 4 0 0 1 8 0"/></svg>
                 </span>
                 <span class="color-btn-bar"></span>
               </button>
@@ -238,7 +231,39 @@
       </div>
     </main>
   </div>
-  <div id="sheet-tabs" class="grid-sheet-tabs" role="tablist"></div>
+  <div class="grid-status-bar">
+    <div class="grid-tabs-row">
+      <div id="sheet-tabs" class="grid-sheet-tabs" role="tablist"></div>
+      <div class="grid-hscroll" role="scrollbar" aria-orientation="horizontal" aria-controls="grid-editor">
+        <button id="hscroll-left" class="grid-hscroll-arrow" title="왼쪽으로 스크롤" aria-label="왼쪽으로 스크롤">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
+        <div class="grid-hscroll-track" id="hscroll-track">
+          <div class="grid-hscroll-thumb" id="hscroll-thumb"></div>
+        </div>
+        <button id="hscroll-right" class="grid-hscroll-arrow" title="오른쪽으로 스크롤" aria-label="오른쪽으로 스크롤">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="grid-status-row">
+      <span id="grid-status-text" class="grid-status-text">준비</span>
+      <div class="zoom-group" role="group" aria-label="확대/축소">
+        <button id="zoom-out" class="zoom-btn" title="축소" aria-label="축소">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg>
+        </button>
+        <div class="zoom-slider-track" id="zoom-slider-track">
+          <div class="zoom-slider-fill" id="zoom-slider-fill"></div>
+          <div class="zoom-slider-handle" id="zoom-slider-handle"></div>
+        </div>
+        <button id="zoom-in" class="zoom-btn" title="확대" aria-label="확대">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        </button>
+        <span class="zoom-sep"></span>
+        <span id="zoom-level" class="zoom-level">100%</span>
+      </div>
+    </div>
+  </div>
 
   <div id="error-screen" class="error-screen" hidden>
     <div class="error-card">
