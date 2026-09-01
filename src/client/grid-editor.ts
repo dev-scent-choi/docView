@@ -1315,6 +1315,24 @@ async function main(): Promise<void> {
     setGridStatusText('준비');
   }
 
+  /** td.scrollIntoView는 sticky thead/행번호 열이 실제로 화면을 가리고 있다는 걸 모른다 — 그
+   * 칸의 bounding box가 스크롤 컨테이너 사각형과 조금이라도 겹치면 "이미 보인다"고 판단해 스크롤을
+   * 안 해 버려서, 위로 점프한 칸이 고정 헤더 뒤에 숨어버리는 경우가 있었다(아래로 점프할 땐 그
+   * 자리를 가리는 고정 요소가 없어서 문제가 안 드러났다). 고정 헤더/행번호 열의 실제 두께만큼을
+   * "보이는 영역"에서 미리 빼고 직접 스크롤한다. */
+  function scrollCellIntoView(td: HTMLElement): void {
+    const hostRect = scrollHostEl.getBoundingClientRect();
+    const cellRect = td.getBoundingClientRect();
+    const theadHeight = tableEl.querySelector('thead')?.getBoundingClientRect().height ?? 0;
+    const rownumWidth = tableEl.querySelector<HTMLElement>('.g-edit-rownum')?.getBoundingClientRect().width ?? 0;
+    const visibleTop = hostRect.top + theadHeight;
+    const visibleLeft = hostRect.left + rownumWidth;
+    if (cellRect.top < visibleTop) scrollHostEl.scrollTop -= visibleTop - cellRect.top;
+    else if (cellRect.bottom > hostRect.bottom) scrollHostEl.scrollTop += cellRect.bottom - hostRect.bottom;
+    if (cellRect.left < visibleLeft) scrollHostEl.scrollLeft -= visibleLeft - cellRect.left;
+    else if (cellRect.right > hostRect.right) scrollHostEl.scrollLeft += cellRect.right - hostRect.right;
+  }
+
   /** 지금 칸에서 (dRow,dCol)만큼 떨어진 칸으로 선택을 옮긴다. 병합에 덮여 실제 <td>가 없는
    * 칸이면(예: 1행 제목 병합) 같은 방향으로 한 칸씩 더 건너뛴다. 시트 렌더 범위 끝에 닿으면 멈춘다. */
   function moveSelection(fromRow: number, fromCol: number, dRow: number, dCol: number): void {
@@ -1331,7 +1349,7 @@ async function main(): Promise<void> {
       const targetTd = tdFor(row, col);
       if (targetTd) {
         targetTd.focus();
-        targetTd.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        scrollCellIntoView(targetTd);
         return;
       }
     }
@@ -1374,7 +1392,7 @@ async function main(): Promise<void> {
       const targetTd = tdFor(row, col);
       if (targetTd) {
         targetTd.focus();
-        targetTd.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        scrollCellIntoView(targetTd);
         return;
       }
       const nextRow = Math.min(Math.max(row + dRow, 0), rowCount - 1);
