@@ -2,15 +2,17 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
+import { requireApiKey, type ApiKeyAuthenticatedRequest } from '../apiKeyAuth.js';
 import { recordAudit } from '../audit.js';
 import { config } from '../config.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
 import { ConversionError, type Converter } from '../converters/types.js';
-import { getPageCountFromBytes } from '../rendering.js';
+import { getPageCountFromBytes, invalidateRenderCache } from '../rendering.js';
 import { issueViewToken } from '../security.js';
 import { parseCsvToGrid, parseXlsxToGrid, serializeGrid, type GridDocument } from '../spreadsheet.js';
 import { newDocumentId, store } from '../storage.js';
 import type { DocumentMeta } from '../types.js';
+import { invalidateViewCaches } from './viewer.js';
 
 const tokenBodySchema = {
   type: 'object',
@@ -132,7 +134,8 @@ async function runConversion(app: FastifyInstance, converter: Converter, meta: D
 }
 
 export async function documentRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/api/documents', async (request, reply) => {
+  app.post('/api/documents', { preHandler: requireApiKey }, async (request, reply) => {
+    const callerProject = (request as ApiKeyAuthenticatedRequest).callerProject;
     let file;
     let data: Buffer;
     try {
@@ -172,7 +175,11 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
         progress: 10,
       };
       await store.writeMeta(meta);
-      await recordAudit({ type: 'uploaded', docId: id, detail: file.filename });
+      await recordAudit({
+        type: 'uploaded',
+        docId: id,
+        detail: callerProject ? `${file.filename} (caller=${callerProject})` : file.filename,
+      });
       // 변환은 백그라운드로 진행하고 즉시 응답한다. 클라이언트는 상태를 폴링한다.
       if (GRID_VIEW_EXTS.has(ext)) {
         void runGridExtraction(app, meta);
@@ -201,10 +208,27 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/formats', async () => ({ success: true, data: supportedExtensions }));
 
+  app.delete<{ Params: { id: string } }>(
+    '/api/documents/:id',
+    { preHandler: requireApiKey },
+    async (request, reply) => {
+      const meta = await store.readMeta(request.params.id);
+      if (!meta) {
+        return reply.code(404).send({ success: false, error: '문서를 찾을 수 없습니다.' });
+      }
+      await store.deleteDocument(meta.id);
+      invalidateRenderCache(meta.id);
+      invalidateViewCaches(meta.id);
+      await recordAudit({ type: 'deleted', docId: meta.id, detail: meta.name });
+      return { success: true, data: { id: meta.id } };
+    },
+  );
+
   app.post<{ Params: { id: string }; Body: TokenBody }>(
     '/api/documents/:id/tokens',
-    { schema: { body: tokenBodySchema } },
+    { schema: { body: tokenBodySchema }, preHandler: requireApiKey },
     async (request, reply) => {
+      const callerProject = (request as ApiKeyAuthenticatedRequest).callerProject;
       const meta = await store.readMeta(request.params.id);
       if (!meta || meta.status !== 'ready') {
         return reply.code(404).send({ success: false, error: '문서를 찾을 수 없습니다.' });
@@ -225,7 +249,7 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
         type: 'token_issued',
         docId: meta.id,
         viewer,
-        detail: `print=${canPrint} download=${canDownload} copy=${canCopy} edit=${effectiveCanEdit}`,
+        detail: `print=${canPrint} download=${canDownload} copy=${canCopy} edit=${effectiveCanEdit}${callerProject ? ` caller=${callerProject}` : ''}`,
       });
       // 그리드(xlsx) 편집기는 canEdit:false여도 읽기 전용으로 그대로 열 수 있다(collab/room.ts가
       // 그 연결의 실제 쓰기를 서버에서 막는다) — 과거 연도 접속현황처럼 "현재 연도와 같은 화면인데

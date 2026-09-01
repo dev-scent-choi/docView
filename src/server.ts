@@ -1,3 +1,4 @@
+import { isApiKeyAuthEnabled } from './apiKeyAuth.js';
 import { buildApp } from './app.js';
 import { config } from './config.js';
 import { supportedExtensions } from './converters/index.js';
@@ -11,6 +12,16 @@ async function main(): Promise<void> {
   if (isEphemeralSecret) {
     app.log.warn(
       'DOCVIEW_SECRET 환경변수가 없어 임시 시크릿을 생성했습니다. 서버 재시작 시 발급된 열람 토큰이 모두 무효화됩니다.',
+    );
+  }
+  if (!isApiKeyAuthEnabled) {
+    app.log.warn(
+      'DOCVIEW_API_KEYS가 설정되지 않아 업로드/토큰 발급 API가 인증 없이 열려 있습니다. 운영 환경에서는 반드시 설정하세요.',
+    );
+  }
+  if (config.allowedOrigins.length === 0) {
+    app.log.warn(
+      'DOCVIEW_ALLOWED_ORIGINS가 설정되지 않아 이 화면을 아무 출처에서나 iframe으로 띄울 수 있습니다. 운영 환경에서는 반드시 설정하세요.',
     );
   }
   if (!sofficePath) {

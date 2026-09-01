@@ -41,6 +41,10 @@ async function issueToken(docId, viewer, canPrint, canDownload, canCopy, canEdit
   });
 }
 
+async function deleteDocument(docId) {
+  return fetchJson(`/api/documents/${docId}`, { method: 'DELETE' });
+}
+
 /** 업로더 본인 열람용 — 전체 권한(수정 제외) 토큰을 발급해 이동한다.
  * xlsx는 서버가 canEdit 여부와 무관하게 항상 editorUrl을 내려주므로(collab/room.ts가 쓰기만
  * 서버 쪽에서 막는다), "바로 보기"도 편집 화면과 완전히 같은 그리드 UI로 열되 수정만 못 하게
@@ -214,7 +218,27 @@ function renderDocItem(doc) {
   }
   info.append(name, detail);
 
+  function makeDeleteButton() {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-danger';
+    button.textContent = '삭제';
+    button.addEventListener('click', async () => {
+      if (!confirm(`"${doc.name}" 문서를 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+      button.disabled = true;
+      try {
+        await deleteDocument(doc.id);
+        await refreshList();
+      } catch (error) {
+        button.disabled = false;
+        setStatus(error.message, 'error');
+      }
+    });
+    return button;
+  }
+
   if (doc.status !== 'ready') {
+    info.append(makeDeleteButton());
     li.append(info);
     if (doc.status === 'processing') {
       const gauge = document.createElement('div');
@@ -261,6 +285,8 @@ function renderDocItem(doc) {
     });
     info.append(quickEdit);
   }
+
+  info.append(makeDeleteButton());
 
   const form = document.createElement('form');
   form.className = 'token-form';

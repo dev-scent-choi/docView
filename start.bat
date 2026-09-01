@@ -8,6 +8,13 @@ set DOCVIEW_HOST=0.0.0.0
 set DOCVIEW_PORT=8000
 set DOCVIEW_SECRET=ROTATED_OUT_SECRET_REDACTED_FROM_HISTORY
 
+rem 업로드/토큰 발급 API 인증 — "이름:키" 쌍을 콤마로 나열. 실제 운영 값으로 바꾸고, 각
+rem 연동 프로젝트(예: maintenance-management)의 설정에도 똑같은 키를 넣어야 한다.
+set DOCVIEW_API_KEYS=maintenance-management:CHANGE_ME_TO_A_REAL_SECRET_KEY
+
+rem 이 화면을 iframe으로 띄울 수 있는 출처. 실제로 임베드할 사이트 주소로 바꾼다(콤마로 여러 개 가능).
+set DOCVIEW_ALLOWED_ORIGINS=http://localhost:5173,http://vdi.openminds.co.kr:30443
+
 if not exist node_modules (
     echo [webviewer] node_modules not found, running npm install first...
     call npm install

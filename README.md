@@ -53,6 +53,8 @@ npm run build:editor && npm start
 | `DOCVIEW_MEMORY_BUDGET_MB` | `1024` | `memory` 모드일 때 원본 보관 메모리 상한 |
 | `DOCVIEW_CACHE_BUDGET_MB` | `512` | 렌더링/파싱 캐시(그리드·PDF 텍스트·페이지 이미지) 메모리 상한 |
 | `DOCVIEW_SOFFICE` | (자동 탐지) | LibreOffice(`soffice`) 실행 파일 경로를 직접 지정할 때 |
+| `DOCVIEW_API_KEYS` | (미설정 시 인증 없음) | 업로드·토큰 발급 API를 호출할 수 있는 프로젝트별 키. `이름:키` 쌍을 콤마로 나열 (예: `maintenance-management:abc123,other-project:def456`). **운영 환경에서는 반드시 설정하세요** — 미설정 시 이 두 API는 누구나 호출할 수 있습니다. |
+| `DOCVIEW_ALLOWED_ORIGINS` | (미설정 시 제한 없음) | 이 화면(뷰어/편집기)을 iframe으로 띄울 수 있는 출처 목록, 콤마로 나열 (예: `https://maintenance.example.com`). **운영 환경에서는 반드시 설정하세요** — 미설정 시 아무 사이트에서나 이 화면을 임베드할 수 있습니다. |
 
 예시(Windows, Git Bash):
 
@@ -79,13 +81,16 @@ node scripts/formula-check.mjs            # xlsx 수식 엔진(VLOOKUP/MATCH/SUM
 
 ## 다른 프로젝트에서 연동하기 (예: maintenance-management)
 
-이 서비스는 인증 없이 호출 가능한 공개 API 3개만으로 연동한다(현재 업로드/토큰 발급 API에 별도
-관리자 인증이 없는 것은 알려진 갭 — 내부망/신뢰된 서버에서만 접근 가능하게 두는 것을 권장):
+이 서비스는 4개의 API로 연동한다. 이 중 업로드·토큰 발급 API는 `DOCVIEW_API_KEYS`에 등록된
+프로젝트별 키가 있어야 호출 가능하다 — 연동하는 쪽(반드시 서버 사이드, 브라우저 아님)에서
+`Authorization: Bearer <발급받은 키>` 헤더를 붙여서 호출한다(`DOCVIEW_API_KEYS` 미설정 시에는
+개발 편의상 이 검사를 건너뛴다):
 
-1. `POST /api/documents` (multipart, 필드명 `file`) — 문서 업로드, `{data.id}` 반환.
+1. `POST /api/documents` (multipart, 필드명 `file`, **API 키 필요**) — 문서 업로드, `{data.id}` 반환.
 2. `GET /api/documents/:id` — 변환 상태 폴링, `status: 'ready'`가 될 때까지.
-3. `POST /api/documents/:id/tokens` `{viewer, canEdit, canDownload, canPrint, canCopy}` — 토큰
-   발급, `{data.token, data.editorUrl 또는 data.viewerUrl}` 반환. `editorUrl`/`viewerUrl`은 이
+3. `POST /api/documents/:id/tokens` `{viewer, canEdit, canDownload, canPrint, canCopy}`
+   (**API 키 필요**) — 토큰 발급, `{data.token, data.editorUrl 또는 data.viewerUrl}` 반환.
+   `editorUrl`/`viewerUrl`은 이
    서비스의 상대경로이므로, 호출하는 쪽에서 이 서비스의 접속 주소를 앞에 붙여 `<iframe>`으로
    그대로 띄우면 된다(브라우저가 이 서비스에 직접 WebSocket 연결을 맺어야 하므로 iframe은 반드시
    이 서비스 자체의 URL로 로드해야 한다).
