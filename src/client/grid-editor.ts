@@ -2348,8 +2348,14 @@ async function main(): Promise<void> {
     if (searchCurrent >= 0) jumpToMatch(searchCurrent);
     else clearHighlight();
   }
-  function openSearch(): void {
+  function openSearch(withReplace = false): void {
     searchBar.hidden = false;
+    if (withReplace) {
+      const replaceRow = document.getElementById('search-replace-row') as HTMLElement | null;
+      const toggleBtn = document.getElementById('search-toggle-replace');
+      if (replaceRow) replaceRow.hidden = false;
+      toggleBtn?.setAttribute('aria-expanded', 'true');
+    }
     searchInput.focus();
     searchInput.select();
   }
@@ -2366,6 +2372,11 @@ async function main(): Promise<void> {
   }
   document.getElementById('search-btn')?.addEventListener('click', () => {
     if (searchBar.hidden) openSearch();
+    else closeSearch();
+  });
+  document.getElementById('btn-find-replace')?.addEventListener('click', () => {
+    if (!canEdit) return;
+    if (searchBar.hidden) openSearch(true);
     else closeSearch();
   });
   document.getElementById('search-close')?.addEventListener('click', closeSearch);
@@ -2434,6 +2445,12 @@ async function main(): Promise<void> {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
       event.preventDefault();
       openSearch();
+      return;
+    }
+    // 엑셀과 동일하게 Ctrl+H는 "찾기 및 바꾸기"를 바꾸기 탭이 펼쳐진 채로 연다.
+    if (canEdit && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') {
+      event.preventDefault();
+      openSearch(true);
       return;
     }
     // Ctrl/Cmd+Z(실행 취소), Ctrl/Cmd+Y(다시 실행) — 셀 편집 중(입력창에 포커스)이 아닐 때만
