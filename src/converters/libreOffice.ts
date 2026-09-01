@@ -258,7 +258,7 @@ export async function warmUpProfiles(): Promise<void> {
 
 export const officeConverter: Converter = {
   name: 'libreoffice',
-  extensions: ['doc', 'docx', 'ppt', 'pptx', 'odt', 'odp', 'rtf', 'txt'],
+  extensions: ['doc', 'docx', 'ppt', 'pptx', 'odt', 'odp', 'rtf', 'txt', 'hwp', 'hwpx'],
   async convert(sourcePath, targetPdfPath, sourceName) {
     await convertWithSoffice(sourcePath, targetPdfPath, ['--convert-to', 'pdf'], sourceName);
   },
