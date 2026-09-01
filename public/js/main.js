@@ -75,11 +75,11 @@ function showProgress(label, ratio) {
   progressLabel.textContent = label;
   if (ratio === null) {
     progressFill.classList.add('indeterminate');
-    progressFill.style.width = '';
+    progressFill.style.transform = '';
     progressPercent.textContent = '';
   } else {
     progressFill.classList.remove('indeterminate');
-    progressFill.style.width = `${Math.round(ratio * 100)}%`;
+    progressFill.style.transform = `scaleX(${ratio})`;
     progressPercent.textContent = `${Math.round(ratio * 100)}%`;
   }
 }
@@ -87,7 +87,7 @@ function showProgress(label, ratio) {
 function hideProgress() {
   progressBox.hidden = true;
   progressFill.classList.remove('indeterminate');
-  progressFill.style.width = '0%';
+  progressFill.style.transform = 'scaleX(0)';
 }
 
 /** XHR로 업로드해 전송 진행률(%)을 노출한다. fetch는 업로드 진행 이벤트를 지원하지 않는다. */
@@ -245,7 +245,7 @@ function renderDocItem(doc) {
       gauge.className = 'progress-track doc-gauge';
       const fill = document.createElement('div');
       fill.className = 'progress-fill';
-      fill.style.width = `${doc.progress ?? 0}%`;
+      fill.style.transform = `scaleX(${(doc.progress ?? 0) / 100})`;
       gauge.append(fill);
       li.append(gauge);
     }
