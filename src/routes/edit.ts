@@ -63,6 +63,16 @@ export async function editRoutes(app: FastifyInstance): Promise<void> {
         return;
       }
 
+      // 동시편집은 docx/xlsx만 지원한다. canEdit이 markup 등 다른 목적(예: PDF 뷰어의 리뷰 코멘트)
+      // 으로 true인 토큰이 이 방에 잘못 들어오면 collab/room.ts가 문서를 docx로 오인해 원본을
+      // 깨뜨릴 수 있어(seedRoom/flushToStore가 ext를 보지 않고 xlsx가 아니면 전부 docx로 취급) canEdit
+      // 값과 무관하게 여기서 먼저 확실히 거부한다.
+      if (meta.ext !== 'docx' && meta.ext !== 'xlsx') {
+        socket.off('message', queueEarly);
+        socket.close(4400, '이 문서 형식은 동시편집을 지원하지 않습니다.');
+        return;
+      }
+
       // canEdit:false여도 방에는 들어온다(과거 연도 접속현황처럼 "편집기와 똑같은 화면으로,
       // 다만 조작은 못 하게" 보여줘야 하는 읽기 전용 뷰가 필요해졌다) — 실제 쓰기 차단은
       // joinEditSession/handleMessage가 이 연결을 읽기 전용으로 표시해 서버 쪽에서 직접 막는다

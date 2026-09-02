@@ -234,9 +234,14 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(404).send({ success: false, error: '문서를 찾을 수 없습니다.' });
       }
       const { viewer, canPrint, canDownload, canCopy, canEdit } = request.body;
-      // docx/xlsx가 아니거나(스코프 밖) 해당 확장자용 변환기가 아예 없으면 canEdit을
-      // 요청해도 조용히 꺼서 발급한다 — 편집 UI는 있는데 저장이 막히는 상황을 막는다.
-      const effectiveCanEdit = canEdit && EDITABLE_EXTS.has(meta.ext) && findConverter(meta.ext) !== null;
+      const isEditableExt = EDITABLE_EXTS.has(meta.ext);
+      // canEdit은 두 가지 용도로 쓰인다: (1) docx/xlsx 실시간 동시편집 참여 허용 — 이 경우 해당
+      // 확장자용 변환기가 실제로 있어야 한다(편집 UI는 있는데 저장이 막히는 상황을 막기 위함).
+      // (2) PDF 등 pages 뷰 문서의 마크업(리뷰 코멘트) 추가/삭제 허용 — 동시편집 WebSocket과 무관한
+      // 뷰어 전용 권한이라 변환기 유무와 상관없이 요청한 대로 발급한다. 어느 쪽이든 동시편집
+      // WebSocket(src/routes/edit.ts)은 docx/xlsx가 아니면 canEdit 값과 무관하게 접속 자체를 거부해
+      // canEdit이 마크업 용도로 켜진 문서가 잘못 동시편집 룸에 들어가 원본을 덮어쓰는 일을 막는다.
+      const effectiveCanEdit = canEdit && (!isEditableExt || findConverter(meta.ext) !== null);
       const token = issueViewToken(
         {
           docId: meta.id,
@@ -255,13 +260,15 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
       // 그 연결의 실제 쓰기를 서버에서 막는다) — 과거 연도 접속현황처럼 "현재 연도와 같은 화면인데
       // 손은 못 대는" 문서가 이 편집기를 그대로 재사용할 수 있게, xlsx는 편집 권한과 무관하게 항상
       // editorUrl을 내려준다. docx는 editor.ts가 아직 읽기 전용을 지원하지 않아 기존대로 둔다.
+      // (isEditableExt로 한 번 더 감싸는 이유: effectiveCanEdit이 이제 pdf 등에서도 true일 수 있는데,
+      // 그런 문서는 editor.html/editor-grid.html이 아니라 markup 기능이 있는 viewer.html로만 열려야 한다.)
       const isGrid = meta.ext === 'xlsx';
       return {
         success: true,
         data: {
           token,
           viewerUrl: `/viewer.html?token=${encodeURIComponent(token)}`,
-          editorUrl: effectiveCanEdit || isGrid
+          editorUrl: isEditableExt && (effectiveCanEdit || isGrid)
             ? `${editorPathFor(meta.ext)}?token=${encodeURIComponent(token)}`
             : undefined,
           expiresInSeconds: config.tokenTtlSeconds,
