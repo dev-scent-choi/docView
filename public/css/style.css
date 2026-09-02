@@ -357,13 +357,24 @@ h2 {
   padding: 0.4rem 0.85rem;
 }
 .toolbar-row-title { justify-content: space-between; padding-bottom: 0.25rem; }
-.toolbar-row-tools { padding-top: 0.25rem; border-top: 1px solid var(--v-glass-line); flex-wrap: wrap; row-gap: 0.3rem; }
+.toolbar-row-tools { padding-top: 0.25rem; border-top: 1px solid var(--v-glass-line); }
 
 .toolbar-group { display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex-wrap: wrap; row-gap: 0.4rem; }
 /* 같은 종류의 버그(클래스의 display:flex가 [hidden]을 이겨버림) — 읽기 전용일 때 도구 그룹만
    숨기므로 여기서도 명시적으로 꺼줘야 한다. */
 .toolbar-group[hidden] { display: none; }
 .toolbar-left { flex: 1; min-width: 0; }
+
+/* 참고 이미지처럼 도구줄을 3분할한다 — 왼쪽은 편집 도구, 가운데는 확대/페이지, 오른쪽은
+   검색·인쇄·저장. 셋 다 flex:1이라 가운데 그룹이 내용 폭과 무관하게 항상 정가운데에 온다. */
+.toolbar-tools { flex: 1 1 0; min-width: 0; flex-wrap: nowrap; }
+.toolbar-tools-left { justify-content: flex-start; }
+.toolbar-tools-center { justify-content: center; }
+.toolbar-tools-right { justify-content: flex-end; }
+
+/* 참고 이미지의 하이라이트·그리기 아이콘 옆에 붙은 작은 드롭다운 화살표 */
+.icon-btn-caret { width: auto; min-width: 34px; gap: 1px; padding: 0 4px 0 6px; }
+.icon-btn-caret .icon-btn-caret-glyph { width: 9px; height: 9px; flex: none; opacity: 0.65; }
 
 .doc-title {
   font-weight: 600;
