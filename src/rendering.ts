@@ -202,14 +202,17 @@ export async function burnMarkupIntoPdf(
   const pages = doc.getPages();
 
   // text 항목이 있을 때만 커스텀 폰트를 내장한다(코멘트만 있는 문서에서 불필요한 비용을 피함).
+  // subset:true는 쓰지 않는다 — @pdf-lib/fontkit의 서브셋터가 이 폰트의 일부 한글 글리프를
+  // 통째로 빠뜨리거나 잘못된 위치에 그리는 버그가 있음을 실제 렌더링 결과로 확인했다(예:
+  // "이름:"이 "름"만 남고 "이"가 사라짐). 전체 폰트를 그대로 내장하면(용량은 커지지만) 정확하다.
   let textFontRegular: Awaited<ReturnType<typeof doc.embedFont>> | null = null;
   let textFontBold: Awaited<ReturnType<typeof doc.embedFont>> | null = null;
   if (items.some((item) => item.kind === 'text')) {
     doc.registerFontkit(fontkit);
     const { regular, bold } = await loadPretendardBytes();
     [textFontRegular, textFontBold] = await Promise.all([
-      doc.embedFont(regular, { subset: true }),
-      doc.embedFont(bold, { subset: true }),
+      doc.embedFont(regular, { subset: false }),
+      doc.embedFont(bold, { subset: false }),
     ]);
   }
 

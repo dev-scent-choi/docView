@@ -30,7 +30,7 @@
     "orderedmap": "^2.1.1",
     "pdf-lib": "^1.17.1",
     "pdf-to-img": "^4.5.0",
-    "pdfjs-dist": "^4.2.67",
+    "pdfjs-dist": "4.2.67",
     "prosemirror-commands": "^1.6.2",
     "prosemirror-keymap": "^1.2.2",
     "prosemirror-model": "^1.24.1",
@@ -55,10 +55,5 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
-  },
-  "overrides": {
-    "pdf-to-img": {
-      "pdfjs-dist": "4.10.38"
-    }
   }
 }
