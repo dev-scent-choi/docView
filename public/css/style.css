@@ -1667,30 +1667,6 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   padding: 0.5rem 1.1rem;
 }
 
-/* 실제 오피스 리본의 탭 줄(홈/삽입/...) — 이 앱은 기능이 "홈"뿐이라 탭 하나만 항상 활성 상태로
-   둔다(누르면 뭔가 열릴 것처럼 보이는 가짜 탭을 여러 개 만들지 않는다). */
-.ribbon-tabs {
-  display: flex;
-  gap: 0.15rem;
-  padding: 0 1.1rem;
-  border-top: 1px solid var(--v-glass-line);
-}
-.ribbon-tab {
-  border: none;
-  background: transparent;
-  padding: 0.4rem 1rem 0.35rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--v-text-dim);
-  cursor: default;
-  border-radius: 6px 6px 0 0;
-}
-.ribbon-tab.active {
-  color: var(--v-accent);
-  background: var(--color-surface);
-  box-shadow: inset 0 2px 0 var(--v-accent);
-}
-
 .toolbar-format {
   flex: 1;
   align-items: stretch;
