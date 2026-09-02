@@ -74,7 +74,15 @@ function renderList(node: PMNode, ordered: boolean): string {
   return xml;
 }
 
+/** 셀에 colwidth(px)가 없을 때(예: 편집기에서 새로 만든 표)의 기본 셀 너비 */
 const CELL_WIDTH_DXA = 2000;
+/** CSS px 기준 dxa(=twip, 1/20pt) 환산 — 96px = 1440dxa(1인치). src/docx/import.ts와 대칭. */
+const DXA_PER_PX = 15;
+
+function pxToDxa(px: number): number {
+  return Math.round(px * DXA_PER_PX);
+}
+
 const BORDER = '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
@@ -82,10 +90,11 @@ const BORDER = '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>';
 
-/** 세로 병합 중(pending) 열의 상태 — 몇 행 더 w:vMerge 이어짐 칸을 채워야 하는지, 그 칸의 가로폭(colspan) */
+/** 세로 병합 중(pending) 열의 상태 — 몇 행 더 w:vMerge 이어짐 칸을 채워야 하는지, 그 칸의 가로폭(colspan)·너비(dxa) */
 interface PendingVMerge {
   remaining: number;
   readonly colspan: number;
+  readonly widthDxa: number;
 }
 
 /**
@@ -96,7 +105,11 @@ interface PendingVMerge {
  * pendingVMerge 칸은 열 위치가 절대 겹치지 않으므로(겹치면 애초에 이 행에 그 열의 실제 셀이
  * 없었을 것이다) 열 번호를 따로 계산할 필요 없이 앞에서부터 순서대로 배치하면 된다.
  */
-function renderTableRow(row: PMNode, pendingVMerge: Map<number, PendingVMerge>): string {
+function renderTableRow(
+  row: PMNode,
+  pendingVMerge: Map<number, PendingVMerge>,
+  columnWidthsDxa: Map<number, number>,
+): string {
   const cells: PMNode[] = [];
   row.forEach((cell) => cells.push(cell));
 
@@ -109,7 +122,7 @@ function renderTableRow(row: PMNode, pendingVMerge: Map<number, PendingVMerge>):
     if (pending) {
       const gridSpanXml = pending.colspan > 1 ? `<w:gridSpan w:val="${pending.colspan}"/>` : '';
       cellsXml +=
-        `<w:tc><w:tcPr><w:tcW w:w="${CELL_WIDTH_DXA * pending.colspan}" w:type="dxa"/>` +
+        `<w:tc><w:tcPr><w:tcW w:w="${pending.widthDxa}" w:type="dxa"/>` +
         `${gridSpanXml}<w:vMerge/></w:tcPr><w:p/></w:tc>`;
       pending.remaining -= 1;
       if (pending.remaining === 0) pendingVMerge.delete(col);
@@ -121,16 +134,29 @@ function renderTableRow(row: PMNode, pendingVMerge: Map<number, PendingVMerge>):
     cellIndex += 1;
     const colspan = Number(cell.attrs.colspan) || 1;
     const rowspan = Number(cell.attrs.rowspan) || 1;
+    const colwidthPx = Array.isArray(cell.attrs.colwidth) ? (cell.attrs.colwidth as number[]) : null;
+    // 열별 너비(colwidth)가 있으면 그대로 쓰고(열마다 tblGrid에 반영), 없으면(예: 편집기에서
+    // 새로 만든 셀) 기본 너비를 colspan칸에 균등 배분한다.
+    const perColumnDxa = colwidthPx
+      ? colwidthPx.map(pxToDxa)
+      : Array.from({ length: colspan }, () => CELL_WIDTH_DXA);
+    const totalWidthDxa = perColumnDxa.reduce((sum, w) => sum + w, 0);
+    perColumnDxa.forEach((w, i) => columnWidthsDxa.set(col + i, w));
+
     let cellBody = '';
     cell.forEach((block) => {
       cellBody += renderBlock(block);
     });
     const gridSpanXml = colspan > 1 ? `<w:gridSpan w:val="${colspan}"/>` : '';
     const vMergeXml = rowspan > 1 ? '<w:vMerge w:val="restart"/>' : '';
+    const background = typeof cell.attrs.background === 'string' ? (cell.attrs.background as string) : null;
+    const shdXml = background
+      ? `<w:shd w:val="clear" w:color="auto" w:fill="${background.replace('#', '').toUpperCase()}"/>`
+      : '';
     cellsXml +=
-      `<w:tc><w:tcPr><w:tcW w:w="${CELL_WIDTH_DXA * colspan}" w:type="dxa"/>` +
-      `${gridSpanXml}${vMergeXml}</w:tcPr>${cellBody}</w:tc>`;
-    if (rowspan > 1) pendingVMerge.set(col, { remaining: rowspan - 1, colspan });
+      `<w:tc><w:tcPr><w:tcW w:w="${totalWidthDxa}" w:type="dxa"/>` +
+      `${gridSpanXml}${vMergeXml}${shdXml}</w:tcPr>${cellBody}</w:tc>`;
+    if (rowspan > 1) pendingVMerge.set(col, { remaining: rowspan - 1, colspan, widthDxa: totalWidthDxa });
     col += colspan;
   }
 
@@ -147,13 +173,18 @@ function renderTable(node: PMNode): string {
     });
     colCount = Math.max(colCount, width);
   });
-  const gridCols = Array.from({ length: colCount }, () => `<w:gridCol w:w="${CELL_WIDTH_DXA}"/>`).join('');
 
-  let rowsXml = '';
   const pendingVMerge = new Map<number, PendingVMerge>();
+  const columnWidthsDxa = new Map<number, number>();
+  let rowsXml = '';
   node.forEach((row) => {
-    rowsXml += renderTableRow(row, pendingVMerge);
+    rowsXml += renderTableRow(row, pendingVMerge, columnWidthsDxa);
   });
+
+  const gridCols = Array.from(
+    { length: colCount },
+    (_, i) => `<w:gridCol w:w="${columnWidthsDxa.get(i) ?? CELL_WIDTH_DXA}"/>`,
+  ).join('');
 
   return (
     `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>${BORDER}</w:tblBorders></w:tblPr>` +

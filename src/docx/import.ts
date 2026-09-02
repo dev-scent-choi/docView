@@ -146,11 +146,35 @@ function paragraphFrom(pNode: XmlNode): { node: PMNode; isListItem: boolean } {
   return { node, isListItem };
 }
 
-function tableCellFrom(tcNode: XmlNode, colspan: number, rowspan: number): PMNode {
+/** CSS px 기준 dxa(=twip, 1/20pt) 환산 — 96px = 1440dxa(1인치) */
+const DXA_PER_PX = 15;
+
+function dxaToPx(dxa: number): number {
+  return Math.round(dxa / DXA_PER_PX);
+}
+
+/** w:tcPr/w:shd@w:fill — 셀 음영 색. "auto"나 6자리 hex가 아니면(무늬 채움 등) 음영 없음으로 취급한다. */
+function backgroundOf(tcPrChildren: readonly XmlNode[]): string | null {
+  const shd = findFirst(tcPrChildren, 'w:shd');
+  if (!shd) return null;
+  const fill = attrsOf(shd)['@_w:fill'];
+  return fill && /^[0-9A-Fa-f]{6}$/.test(fill) ? `#${fill.toLowerCase()}` : null;
+}
+
+function tableCellFrom(
+  tcNode: XmlNode,
+  colspan: number,
+  rowspan: number,
+  colwidth: readonly number[] | null,
+): PMNode {
   const tcChildren = childrenOf(tcNode);
   const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p).node);
   const content = paragraphs.length > 0 ? paragraphs : [docxSchema.nodes.paragraph.create()];
-  return docxSchema.nodes.table_cell.create({ colspan, rowspan }, content);
+  const background = backgroundOf(tcPrChildrenOf(tcNode));
+  return docxSchema.nodes.table_cell.create(
+    { colspan, rowspan, colwidth: colwidth ? [...colwidth] : null, background },
+    content,
+  );
 }
 
 function tcPrChildrenOf(tcNode: XmlNode): XmlNode[] {
@@ -177,8 +201,16 @@ function vMergeOf(tcPrChildren: readonly XmlNode[]): 'restart' | 'continue' | nu
   return attrsOf(vMerge)['@_w:val'] === 'restart' ? 'restart' : 'continue';
 }
 
+/** w:tblGrid/w:gridCol@w:w 목록(dxa) — 표 전체의 열별 너비. 없으면 빈 배열. */
+function gridColWidthsOf(tblChildren: readonly XmlNode[]): number[] {
+  const tblGrid = findFirst(tblChildren, 'w:tblGrid');
+  if (!tblGrid) return [];
+  return findAll(childrenOf(tblGrid), 'w:gridCol').map((col) => Number(attrsOf(col)['@_w:w']) || 0);
+}
+
 interface CellPlacement {
   readonly tc: XmlNode;
+  readonly col: number;
   readonly colspan: number;
   rowspan: number;
 }
@@ -192,6 +224,7 @@ interface CellPlacement {
 function tableFrom(tblNode: XmlNode): PMNode {
   const tblChildren = childrenOf(tblNode);
   const trNodes = findAll(tblChildren, 'w:tr');
+  const gridColWidths = gridColWidthsOf(tblChildren);
 
   const rowPlacements: CellPlacement[][] = [];
   const originByCol = new Map<number, CellPlacement>();
@@ -209,7 +242,7 @@ function tableFrom(tblNode: XmlNode): PMNode {
         col += gridSpan;
         continue;
       }
-      const placement: CellPlacement = { tc, colspan: gridSpan, rowspan: 1 };
+      const placement: CellPlacement = { tc, col, colspan: gridSpan, rowspan: 1 };
       placements.push(placement);
       originByCol.set(col, placement);
       col += gridSpan;
@@ -220,7 +253,11 @@ function tableFrom(tblNode: XmlNode): PMNode {
   const rows = rowPlacements.map((placements) =>
     docxSchema.nodes.table_row.create(
       null,
-      placements.map((p) => tableCellFrom(p.tc, p.colspan, p.rowspan)),
+      placements.map((p) => {
+        const widths = gridColWidths.slice(p.col, p.col + p.colspan);
+        const colwidth = widths.length === p.colspan ? widths.map(dxaToPx) : null;
+        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth);
+      }),
     ),
   );
   return docxSchema.nodes.table.create(null, rows);

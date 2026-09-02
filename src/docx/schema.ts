@@ -87,7 +87,20 @@ const marks: Record<string, MarkSpec> = {
 
 const withLists = addListNodes(OrderedMap.from(baseNodes), 'paragraph block*', 'block');
 const withTables = withLists.append(
-  tableNodes({ tableGroup: 'block', cellContent: 'block+', cellAttributes: {} }),
+  tableNodes({
+    tableGroup: 'block',
+    cellContent: 'block+',
+    cellAttributes: {
+      /** 셀 음영(docx의 w:tcPr/w:shd) — "#rrggbb" 또는 없음(null) */
+      background: {
+        default: null,
+        getFromDOM: (dom) => (dom as HTMLElement).style.backgroundColor || null,
+        setDOMAttr: (value, attrs) => {
+          if (value) attrs.style = `${(attrs.style as string | undefined) ?? ''}background-color: ${value as string};`;
+        },
+      },
+    },
+  }),
 );
 
 export const docxSchema = new Schema({ nodes: withTables, marks });

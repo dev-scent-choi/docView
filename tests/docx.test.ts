@@ -80,6 +80,59 @@ describe('docx import: table merges', () => {
   });
 });
 
+describe('docx import: table cell width and shading', () => {
+  function docxWithTableXml(tableXml: string): Buffer {
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${tableXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  test('reads column width from w:tblGrid as colwidth (dxa -> px, 1440dxa = 96px)', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    const row = doc.child(0).child(0);
+    expect(row.child(0).attrs.colwidth).toEqual([96]);
+    expect(row.child(1).attrs.colwidth).toEqual([192]);
+  });
+
+  test('gives a colspan-2 cell one width per spanned column, taken from w:tblGrid', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Merged</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    const cell = doc.child(0).child(0).child(0);
+    expect(cell.attrs.colwidth).toEqual([96, 192]);
+  });
+
+  test('reads w:shd fill as the cell background color', () => {
+    const tableXml =
+      '<w:tbl><w:tr>' +
+      '<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FFD43B"/></w:tcPr><w:p><w:r><w:t>Shaded</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p><w:r><w:t>Plain</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    const row = doc.child(0).child(0);
+    expect(row.child(0).attrs.background).toBe('#ffd43b');
+    expect(row.child(1).attrs.background).toBeNull();
+  });
+
+  test('treats w:shd fill="auto" (no real fill) as no background', () => {
+    const tableXml =
+      '<w:tbl><w:tr>' +
+      '<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="auto"/></w:tcPr><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    expect(doc.child(0).child(0).child(0).attrs.background).toBeNull();
+  });
+});
+
 describe('docx export', () => {
   test('round-trips formatted paragraphs, headings and tables through a full docx cycle', () => {
     const original = makeSampleDocx(['placeholder']);
@@ -158,6 +211,31 @@ describe('docx export', () => {
     // 세로 병합이 이어지는 3행에는 원래 셀(B3)만 남고, 병합된 1열 자리는 별개 셀로 다시 생기지 않는다
     expect(reimportedRow3.childCount).toBe(1);
     expect(reimportedRow3.child(0).textContent).toBe('B3');
+  });
+
+  test('round-trips cell column width and background shading through a full docx cycle', () => {
+    const original = makeSampleDocx(['placeholder']);
+    const cell = (text: string, attrs: { colwidth?: number[]; background?: string | null } = {}) =>
+      docxSchema.nodes.table_cell.create(
+        { colspan: 1, rowspan: 1, colwidth: attrs.colwidth ?? null, background: attrs.background ?? null },
+        docxSchema.nodes.paragraph.create(null, docxSchema.text(text)),
+      );
+    const row = docxSchema.nodes.table_row.create(null, [
+      cell('Narrow', { colwidth: [96] }),
+      cell('Shaded', { background: '#ffd43b' }),
+    ]);
+    const table = docxSchema.nodes.table.create(null, [row]);
+    const doc = docxSchema.nodes.doc.create(null, [table]);
+
+    const xml = renderDocumentXml(doc);
+    expect(xml).toContain('<w:gridCol w:w="1440"/>'); // 96px -> 1440dxa
+    expect(xml).toContain('<w:shd w:val="clear" w:color="auto" w:fill="FFD43B"/>');
+
+    const exported = exportDocx(original, doc);
+    const reimported = importDocx(exported);
+    const reimportedRow = reimported.doc.child(0).child(0);
+    expect(reimportedRow.child(0).attrs.colwidth).toEqual([96]);
+    expect(reimportedRow.child(1).attrs.background).toBe('#ffd43b');
   });
 
   test('round-trips font color, font size and paragraph alignment', () => {

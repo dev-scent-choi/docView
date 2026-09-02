@@ -6,6 +6,7 @@ import { liftListItem, sinkListItem, splitListItem, wrapInList } from 'prosemirr
 import {
   addColumnAfter,
   addRowAfter,
+  columnResizing,
   deleteColumn,
   deleteRow,
   deleteTable,
@@ -307,6 +308,7 @@ async function main(): Promise<void> {
       yCursorPlugin(provider.awareness),
       yUndoPlugin(),
       keymap(buildKeymap()),
+      columnResizing(),
       tableEditing(),
       buildSearchPlugin(),
     ],
