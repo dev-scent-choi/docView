@@ -15,8 +15,9 @@ import {
 } from '../rendering.js';
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { extractPdfText, searchPdfText, type PageText } from '../search.js';
+import { detectNearbyTextStyle } from '../textStyle.js';
 import { docxHasUnsupportedContent } from '../docx/import.js';
-import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup } from '../markup.js';
+import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup, updateMarkup } from '../markup.js';
 import { flushNow, getCurrentBytes } from '../collab/room.js';
 import type { GridCell, GridHeader } from '../spreadsheet.js';
 import { store } from '../storage.js';
@@ -245,25 +246,49 @@ interface TokenWithMarkupQuery extends TokenQuery {
 
 const addMarkupBodySchema = {
   type: 'object',
-  required: ['page', 'x', 'y', 'w', 'h', 'text'],
+  required: ['page', 'x', 'y', 'text'],
   additionalProperties: false,
   properties: {
+    kind: { type: 'string', enum: ['comment', 'text'] },
     page: { type: 'integer', minimum: 1 },
     x: { type: 'number', minimum: 0, maximum: 1 },
     y: { type: 'number', minimum: 0, maximum: 1 },
     w: { type: 'number', minimum: 0, maximum: 1 },
     h: { type: 'number', minimum: 0, maximum: 1 },
+    fontSizePt: { type: 'number', minimum: 1, maximum: 400 },
+    bold: { type: 'boolean' },
     text: { type: 'string', minLength: 1, maxLength: 2000 },
   },
+  if: { properties: { kind: { const: 'text' } }, required: ['kind'] },
+  then: { required: ['fontSizePt'] },
+  else: { required: ['w', 'h'] },
 } as const;
 
 interface AddMarkupBody {
+  readonly kind?: 'comment' | 'text';
   readonly page: number;
   readonly x: number;
   readonly y: number;
-  readonly w: number;
-  readonly h: number;
+  readonly w?: number;
+  readonly h?: number;
+  readonly fontSizePt?: number;
+  readonly bold?: boolean;
   readonly text: string;
+}
+
+const updateMarkupBodySchema = {
+  type: 'object',
+  required: ['x', 'y'],
+  additionalProperties: false,
+  properties: {
+    x: { type: 'number', minimum: 0, maximum: 1 },
+    y: { type: 'number', minimum: 0, maximum: 1 },
+  },
+} as const;
+
+interface UpdateMarkupBody {
+  readonly x: number;
+  readonly y: number;
 }
 
 const markupParamsSchema = {
@@ -271,6 +296,28 @@ const markupParamsSchema = {
   required: ['markupId'],
   properties: { markupId: { type: 'string' } },
 } as const;
+
+const textStyleSchema = {
+  params: {
+    type: 'object',
+    required: ['page'],
+    properties: { page: { type: 'integer', minimum: 1 } },
+  },
+  querystring: {
+    type: 'object',
+    required: ['x', 'y'],
+    properties: {
+      token: { type: 'string' },
+      x: { type: 'number', minimum: 0, maximum: 1 },
+      y: { type: 'number', minimum: 0, maximum: 1 },
+    },
+  },
+} as const;
+
+interface TextStyleQuery extends TokenQuery {
+  readonly x: number;
+  readonly y: number;
+}
 
 interface PageQuery extends TokenQuery {
   readonly scale: number;
@@ -466,10 +513,32 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ success: false, error: '이 문서 형식은 마크업을 지원하지 않습니다.' });
       }
       try {
-        const item = await addMarkup(view.meta.id, view.meta, {
-          ...request.body,
-          author: view.claims.viewer,
-        });
+        const body = request.body;
+        const item = await addMarkup(
+          view.meta.id,
+          view.meta,
+          body.kind === 'text'
+            ? {
+                kind: 'text',
+                page: body.page,
+                x: body.x,
+                y: body.y,
+                fontSizePt: body.fontSizePt ?? 12,
+                bold: body.bold ?? false,
+                text: body.text,
+                author: view.claims.viewer,
+              }
+            : {
+                kind: 'comment',
+                page: body.page,
+                x: body.x,
+                y: body.y,
+                w: body.w ?? 0,
+                h: body.h ?? 0,
+                text: body.text,
+                author: view.claims.viewer,
+              },
+        );
         await recordAudit({ type: 'markup_added', docId: view.meta.id, viewer: view.claims.viewer, detail: item.id });
         return await reply.code(201).send({ success: true, data: item });
       } catch (error) {
@@ -478,6 +547,66 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
         }
         request.log.error(error, 'markup add failed');
         return reply.code(500).send({ success: false, error: '마크업 추가에 실패했습니다.' });
+      }
+    },
+  );
+
+  app.patch<{ Querystring: TokenQuery; Params: { markupId: string }; Body: UpdateMarkupBody }>(
+    '/api/view/markup/:markupId',
+    { schema: { querystring: tokenQuerySchema, params: markupParamsSchema, body: updateMarkupBodySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if (!view.claims.perms.canEdit) {
+        await recordAudit({ type: 'markup_move_denied', docId: view.meta.id, viewer: view.claims.viewer });
+        return reply.code(403).send({ success: false, error: '마크업 이동 권한이 없습니다.' });
+      }
+      try {
+        const updated = await updateMarkup(view.meta.id, request.params.markupId, request.body);
+        if (!updated) {
+          return reply.code(404).send({ success: false, error: '마크업을 찾을 수 없습니다.' });
+        }
+        await recordAudit({
+          type: 'markup_moved',
+          docId: view.meta.id,
+          viewer: view.claims.viewer,
+          detail: updated.id,
+        });
+        return { success: true, data: updated };
+      } catch (error) {
+        if (error instanceof MarkupValidationError) {
+          return reply.code(400).send({ success: false, error: error.message });
+        }
+        request.log.error(error, 'markup move failed');
+        return reply.code(500).send({ success: false, error: '마크업 이동에 실패했습니다.' });
+      }
+    },
+  );
+
+  /**
+   * 클릭 지점 근처의 기존 텍스트에서 글자 크기·굵기·베이스라인을 추정한다 — "텍스트 추가" 도구가
+   * 새 텍스트를 주변 폰트와 어울리게 자동으로 놓기 위해 쓴다(src/textStyle.ts).
+   */
+  app.get<{ Params: { page: number }; Querystring: TextStyleQuery }>(
+    '/api/view/pages/:page/text-style',
+    { schema: textStyleSchema },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if ((view.meta.viewKind ?? 'pages') !== 'pages') {
+        return reply.code(400).send({ success: false, error: '이 문서 형식은 지원하지 않습니다.' });
+      }
+      try {
+        const pages = await loadPdfText(view.meta.id);
+        const pageText = pages[request.params.page - 1];
+        if (!pageText) {
+          return reply.code(404).send({ success: false, error: '페이지를 찾을 수 없습니다.' });
+        }
+        const style = detectNearbyTextStyle(pageText, request.query.x, request.query.y);
+        return { success: true, data: style };
+      } catch (error) {
+        request.log.error(error, 'text style detection failed');
+        return reply.code(500).send({ success: false, error: '폰트 스타일 감지에 실패했습니다.' });
       }
     },
   );
