@@ -6,10 +6,21 @@ const DEFAULT_ZOOM_INDEX = 3;
 const token = new URLSearchParams(location.search).get('token');
 const pagesContainer = document.getElementById('pages');
 const docTitle = document.getElementById('doc-title');
-const pageIndicator = document.getElementById('page-indicator');
+const pageJumpInput = document.getElementById('page-jump-input');
+const pageJumpTotal = document.getElementById('page-jump-total');
 const zoomLevelLabel = document.getElementById('zoom-level');
 const printBtn = document.getElementById('print-btn');
 const downloadBtn = document.getElementById('download-btn');
+const downloadAsBtn = document.getElementById('download-as-btn');
+
+/** 페이지/그리드 공용 상단 위치 표시. pages 뷰에서는 편집 가능(페이지 이동), grid 뷰에서는
+ * 읽기 전용(현재 보이는 행 범위 표시)으로 쓴다. */
+function setPageIndicator(current, total, { editable = true, suffix = '' } = {}) {
+  if (!pageJumpInput || !pageJumpTotal) return;
+  pageJumpInput.value = String(current);
+  pageJumpInput.readOnly = !editable;
+  pageJumpTotal.textContent = `의 ${total}${suffix}`;
+}
 
 let zoomIndex = DEFAULT_ZOOM_INDEX;
 let pageCount = 0;
@@ -45,19 +56,23 @@ function formatProgress(received, total) {
 
 /** 버튼을 진행률 표시기로 전환했다가 끝나면 복원한다. */
 async function runButtonTask(button, progressPrefix, task) {
-  const label = button.querySelector('.btn-label') ?? button;
-  const originalText = label.textContent;
+  // .btn-label이 있는(텍스트 포함) 버튼은 그 안에 진행률을 쓰고, 아이콘만 있는 버튼은 title
+  // 툴팁에 써서 아이콘 자체가 진행률 텍스트로 덮여 사라지지 않게 한다.
+  const labelEl = button.querySelector('.btn-label');
+  const original = labelEl ? labelEl.textContent : button.title;
+  const setStatus = (text) => {
+    if (labelEl) labelEl.textContent = text;
+    else button.title = text;
+  };
   button.disabled = true;
   try {
     await task((received, total) => {
-      label.textContent = `${progressPrefix} ${formatProgress(received, total)}`;
+      setStatus(`${progressPrefix} ${formatProgress(received, total)}`);
     });
-    label.textContent = originalText;
+    setStatus(original);
   } catch (error) {
-    label.textContent = '실패';
-    setTimeout(() => {
-      label.textContent = originalText;
-    }, 2500);
+    setStatus('실패');
+    setTimeout(() => setStatus(original), 2500);
     throw error;
   } finally {
     button.disabled = false;
@@ -302,7 +317,7 @@ function trackCurrentPage() {
     const visible = entries.find((entry) => entry.isIntersecting);
     if (visible) {
       const page = visible.target.querySelector('canvas').dataset.page;
-      pageIndicator.textContent = `${page} / ${pageCount}`;
+      if (document.activeElement !== pageJumpInput) setPageIndicator(page, pageCount);
     }
   }, { threshold: 0.4 });
   for (const frame of pagesContainer.children) {
@@ -399,6 +414,93 @@ function setupToolbar() {
       }).catch(() => {});
     });
   }
+
+  if (downloadAsBtn) {
+    downloadAsBtn.disabled = !permissions.canDownload;
+    downloadAsBtn.title = permissions.canDownload ? '다른 이름으로 저장' : '저장 권한이 없습니다';
+    if (permissions.canDownload) {
+      downloadAsBtn.addEventListener('click', () => {
+        const suggested = docName;
+        const customName = window.prompt('저장할 파일 이름을 입력하세요', suggested);
+        if (!customName) return;
+        const includeMarkup = document.getElementById('markup-include-checkbox')?.checked ? '&includeMarkup=1' : '';
+        runButtonTask(downloadAsBtn, '저장', async (onProgress) => {
+          const chunks = await fetchWithProgress(`/api/view/download?${tokenQuery}${includeMarkup}`, onProgress);
+          const blob = new Blob(chunks);
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = customName;
+          anchor.click();
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        }).catch(() => {});
+      });
+    }
+  }
+}
+
+/** 페이지 번호 칸에 직접 입력해서 해당 페이지로 이동한다(Edge PDF 뷰어와 동일한 동작). */
+function setupPageJump() {
+  if (!pageJumpInput) return;
+  const jumpToTyped = () => {
+    const target = Math.min(Math.max(Math.round(Number(pageJumpInput.value)), 1), pageCount || 1);
+    if (!Number.isFinite(target)) {
+      setPageIndicator(1, pageCount);
+      return;
+    }
+    const frame = pagesContainer.children[target - 1];
+    frame?.scrollIntoView({ block: 'start' });
+    setPageIndicator(target, pageCount);
+    pageJumpInput.blur();
+  };
+  pageJumpInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      jumpToTyped();
+    } else if (event.key === 'Escape') {
+      pageJumpInput.blur();
+    }
+  });
+  pageJumpInput.addEventListener('blur', jumpToTyped);
+  pageJumpInput.addEventListener('focus', () => pageJumpInput.select());
+}
+
+/** "폭에 맞추기" — 페이지 실제 폭이 뷰포트 폭에 딱 맞도록 배율을 계산해 적용한다. */
+function setupZoomFit() {
+  const btn = document.getElementById('zoom-fit-btn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const containerWidth = pagesContainer.clientWidth - 32; // 좌우 여백 감안
+    const pageWidthPt = (pageDimensions && pageDimensions[0]?.w) || 612;
+    const percent = Math.round((containerWidth / pageWidthPt) * 100);
+    const clamped = Math.min(Math.max(percent, ZOOM_STEPS[0]), ZOOM_STEPS[ZOOM_STEPS.length - 1]);
+    // 가장 가까운 줌 단계로 스냅한다 — applyZoom()이 ZOOM_STEPS[zoomIndex] 기준으로 동작하므로.
+    let nearestIndex = 0;
+    let nearestDiff = Infinity;
+    ZOOM_STEPS.forEach((step, i) => {
+      const diff = Math.abs(step - clamped);
+      if (diff < nearestDiff) {
+        nearestDiff = diff;
+        nearestIndex = i;
+      }
+    });
+    zoomIndex = nearestIndex;
+    applyZoom();
+    btn.setAttribute('aria-pressed', 'true');
+    setTimeout(() => btn.setAttribute('aria-pressed', 'false'), 400);
+  });
+}
+
+/** 화면에서만 페이지를 90도씩 돌려 본다(저장되지 않는 보기 전용 회전). */
+let rotateDeg = 0;
+function setupRotate() {
+  const btn = document.getElementById('rotate-btn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    rotateDeg = (rotateDeg + 90) % 360;
+    pagesContainer.style.setProperty('--page-rotate', `${rotateDeg}deg`);
+    pagesContainer.classList.toggle('pages-rotated', rotateDeg !== 0);
+  });
 }
 
 /* 우클릭/단축키 차단은 억지력일 뿐이며 실제 권한 강제는 서버에서 이루어진다. */
@@ -783,7 +885,10 @@ function renderGridViewport() {
   table.innerHTML = cols + rowsHtml.join('');
   table.style.transform = `translateY(${(firstVisible - 1) * GRID_ROW_H}px)`;
 
-  pageIndicator.textContent = `${Math.min(sheet.rowCount, Math.floor(scroll.scrollTop / GRID_ROW_H) + 1).toLocaleString()} / ${sheet.rowCount.toLocaleString()}행`;
+  if (pageJumpTotal) {
+    const currentRow = Math.min(sheet.rowCount, Math.floor(scroll.scrollTop / GRID_ROW_H) + 1);
+    pageJumpTotal.textContent = `${currentRow.toLocaleString()} / ${sheet.rowCount.toLocaleString()}행`;
+  }
 }
 
 function renderGridHead() {
@@ -821,12 +926,17 @@ async function initGridView() {
   document.getElementById('zoom-out').hidden = true;
   document.getElementById('zoom-in').hidden = true;
   document.getElementById('zoom-level').hidden = true;
+  document.getElementById('zoom-fit-btn').hidden = true;
+  document.getElementById('rotate-btn').hidden = true;
+  document.getElementById('page-view-btn').hidden = true;
+  document.getElementById('page-jump-input').hidden = true;
   document.getElementById('invert-btn').hidden = true;
   document.getElementById('measure-btn').hidden = true;
   document.getElementById('markup-toggle-btn').hidden = true;
   document.getElementById('markup-add-btn').hidden = true;
   document.getElementById('text-tool-btn').hidden = true;
   document.getElementById('markup-include-wrap').hidden = true;
+  document.getElementById('download-as-btn').hidden = true;
 
   const meta = await fetchJsonView(`/api/view/grid/meta?${tokenQuery}`);
   gridState.sheets = meta.sheets;
@@ -1654,10 +1764,13 @@ async function init() {
     return;
   }
 
-  pageIndicator.textContent = `1 / ${pageCount}`;
+  setPageIndicator(1, pageCount);
   applyZoom();
   buildPages();
   trackCurrentPage();
+  setupPageJump();
+  setupZoomFit();
+  setupRotate();
   setupDrawingTools();
   setupMarkupTool();
   setupTextTool();

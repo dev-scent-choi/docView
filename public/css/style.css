@@ -332,6 +332,7 @@ h2 {
   --v-accent-ink: #ffffff;
 }
 
+/* 엑셀처럼 위 줄엔 파일명+접속자, 아래 줄엔 도구 — 두 줄 구성 */
 .viewer-toolbar {
   position: fixed;
   top: 0;
@@ -340,10 +341,8 @@ h2 {
   z-index: 10;
   width: 100%;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem 0.85rem;
+  flex-direction: column;
+  padding: 0;
   border-radius: 0;
   background: var(--v-glass);
   border: none;
@@ -351,8 +350,17 @@ h2 {
   box-shadow: 0 1px 2px rgba(27, 27, 27, 0.06);
 }
 
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0.85rem;
+}
+.toolbar-row-title { justify-content: space-between; padding-bottom: 0.25rem; }
+.toolbar-row-tools { padding-top: 0.25rem; border-top: 1px solid var(--v-glass-line); flex-wrap: wrap; row-gap: 0.3rem; }
+
 .toolbar-group { display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex-wrap: wrap; row-gap: 0.4rem; }
-/* 같은 종류의 버그(클래스의 display:flex가 [hidden]을 이겨버림) — 읽기 전용일 때 .toolbar-format만
+/* 같은 종류의 버그(클래스의 display:flex가 [hidden]을 이겨버림) — 읽기 전용일 때 도구 그룹만
    숨기므로 여기서도 명시적으로 꺼줘야 한다. */
 .toolbar-group[hidden] { display: none; }
 .toolbar-left { flex: 1; min-width: 0; }
@@ -421,6 +429,33 @@ h2 {
 .zoom-group .icon-btn { width: 28px; height: 28px; border-radius: 0; }
 .zoom-group .icon-btn svg { width: 14px; height: 14px; }
 
+/* 엑셀/Edge PDF 뷰어처럼 — 현재 페이지 번호를 직접 입력해서 이동할 수 있는 칸 + "의 N" 총 페이지 수 */
+.page-jump-group {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0 0.3rem;
+}
+.page-jump-input {
+  width: 2.4em;
+  padding: 0.2rem 0.3rem;
+  border: 1px solid var(--v-glass-line);
+  border-radius: 4px;
+  background: var(--v-hover);
+  color: var(--v-text);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.page-jump-total {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--v-text-dim);
+  white-space: nowrap;
+}
+
 .page-indicator, .zoom-level {
   font-family: var(--font-mono);
   font-size: 0.78rem;
@@ -470,7 +505,7 @@ h2 {
   --page-width: 100%;
   max-width: 1120px;
   margin: 0 auto;
-  padding: 3.8rem 1rem 5rem;
+  padding: 6.2rem 1rem 5rem;
   /* 100% 초과 확대 시 페이지가 컨테이너를 넘치므로 가로 스크롤을 허용한다 */
   overflow-x: auto;
 }
@@ -496,6 +531,9 @@ h2 {
 }
 
 .page-frame.page-ready canvas { opacity: 1; }
+
+/* 보기 전용 회전(저장되지 않음) — transform-origin을 중앙에 두고 컨테이너와 함께 자연스럽게 돈다 */
+.pages-rotated .page-frame { transform: rotate(var(--page-rotate, 0deg)); transition: transform 200ms ease; }
 
 /* 도면 모드: AutoCAD 모델 공간처럼 어두운 배경에 밝은 선으로 반전 */
 .pages-invert .page-frame { background: #101114; }
@@ -557,7 +595,7 @@ h2 {
 
 .search-bar {
   position: fixed;
-  top: 3.4rem;
+  top: 5.8rem;
   right: 1.2rem;
   z-index: 20;
   display: flex;
@@ -665,7 +703,7 @@ h2 {
 
 .measure-bar {
   position: fixed;
-  top: 3.4rem;
+  top: 5.8rem;
   left: 50%;
   transform: translateX(-50%);
   z-index: 20;
@@ -1931,6 +1969,8 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   color: var(--v-text);
   background: var(--v-glass);
   border-bottom: 1px solid var(--v-glass-line);
+  cursor: move;
+  user-select: none;
 }
 .editor-body .search-row,
 .editor-body .search-actions {
