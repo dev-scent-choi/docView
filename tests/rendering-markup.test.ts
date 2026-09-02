@@ -1,7 +1,7 @@
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, test } from 'vitest';
 import { burnMarkupIntoPdf } from '../src/rendering.js';
-import type { MarkupItem } from '../src/markup.js';
+import type { CommentMarkupItem, TextMarkupItem } from '../src/markup.js';
 
 async function makeTwoPagePdf(): Promise<Buffer> {
   const doc = await PDFDocument.create();
@@ -10,9 +10,10 @@ async function makeTwoPagePdf(): Promise<Buffer> {
   return Buffer.from(await doc.save());
 }
 
-function makeItem(overrides: Partial<MarkupItem> = {}): MarkupItem {
+function makeItem(overrides: Partial<CommentMarkupItem> = {}): CommentMarkupItem {
   return {
     id: 'm1',
+    kind: 'comment',
     page: 1,
     x: 0.1,
     y: 0.1,
@@ -20,6 +21,22 @@ function makeItem(overrides: Partial<MarkupItem> = {}): MarkupItem {
     h: 0.1,
     text: '이 부분을 수정해주세요',
     author: '검토자A',
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function makeTextItem(overrides: Partial<TextMarkupItem> = {}): TextMarkupItem {
+  return {
+    id: 't1',
+    kind: 'text',
+    page: 1,
+    x: 0.1,
+    y: 0.1,
+    fontSizePt: 14,
+    bold: false,
+    text: '삽입 텍스트',
+    author: '업로더',
     createdAt: new Date().toISOString(),
     ...overrides,
   };
@@ -58,5 +75,37 @@ describe('burnMarkupIntoPdf', () => {
     await expect(burnMarkupIntoPdf(original, [makeItem({ page: 99 })])).resolves.toBeInstanceOf(
       Uint8Array,
     );
+  });
+
+  test('burns a kind:text item with Korean text without throwing, growing the file', async () => {
+    const original = await makeTwoPagePdf();
+    const result = await burnMarkupIntoPdf(original, [makeTextItem({ text: '한글 텍스트 삽입 테스트' })]);
+    const reopened = await PDFDocument.load(result);
+    expect(reopened.getPageCount()).toBe(2);
+    expect(result.length).toBeGreaterThan(original.length);
+  });
+
+  test('renders bold and regular text items using different embedded fonts without error', async () => {
+    const original = await makeTwoPagePdf();
+    const items = [
+      makeTextItem({ id: 't1', bold: false, text: '일반체' }),
+      makeTextItem({ id: 't2', bold: true, text: '굵은체', y: 0.3 }),
+    ];
+    await expect(burnMarkupIntoPdf(original, items)).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  test('handles a mix of comment and text items on the same page', async () => {
+    const original = await makeTwoPagePdf();
+    const items = [makeItem({ id: 'c1' }), makeTextItem({ id: 't1' })];
+    const result = await burnMarkupIntoPdf(original, items);
+    const reopened = await PDFDocument.load(result);
+    expect(reopened.getPageCount()).toBe(2);
+  });
+
+  test('an out-of-range text item is skipped without throwing', async () => {
+    const original = await makeTwoPagePdf();
+    await expect(
+      burnMarkupIntoPdf(original, [makeTextItem({ page: 99 })]),
+    ).resolves.toBeInstanceOf(Uint8Array);
   });
 });

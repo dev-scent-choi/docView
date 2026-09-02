@@ -1,8 +1,33 @@
+import fontkit from '@pdf-lib/fontkit';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
 import { pdf } from 'pdf-to-img';
 import { SizedLruCache } from './cache.js';
 import { config } from './config.js';
 import type { MarkupItem } from './markup.js';
+
+/** 프로젝트 루트 assets/fonts — src/rendering.ts 위치 기준 상대경로라 실행 cwd와 무관하다. */
+const FONTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'fonts');
+
+let pretendardBytes: { regular: Buffer; bold: Buffer } | null = null;
+
+/**
+ * pdf-lib 기본 14 폰트는 WinAnsi만 지원해 한글을 전혀 그리지 못한다. 사용자가 PDF에 직접
+ * 삽입하는 텍스트(kind:'text')는 한글일 가능성이 높으므로, 한글 글리프를 포함한 Pretendard를
+ * fontkit으로 내장해 그린다(라이선스: SIL OFL, assets/fonts/LICENSE-Pretendard.txt 참고).
+ */
+async function loadPretendardBytes(): Promise<{ regular: Buffer; bold: Buffer }> {
+  if (!pretendardBytes) {
+    const [regular, bold] = await Promise.all([
+      fs.readFile(path.join(FONTS_DIR, 'Pretendard-Regular.ttf')),
+      fs.readFile(path.join(FONTS_DIR, 'Pretendard-Bold.ttf')),
+    ]);
+    pretendardBytes = { regular, bold };
+  }
+  return pretendardBytes;
+}
 
 type PdfImageDocument = Awaited<ReturnType<typeof pdf>>;
 export type BytesProvider = () => Promise<Buffer>;
@@ -176,6 +201,18 @@ export async function burnMarkupIntoPdf(
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const pages = doc.getPages();
 
+  // text 항목이 있을 때만 커스텀 폰트를 내장한다(코멘트만 있는 문서에서 불필요한 비용을 피함).
+  let textFontRegular: Awaited<ReturnType<typeof doc.embedFont>> | null = null;
+  let textFontBold: Awaited<ReturnType<typeof doc.embedFont>> | null = null;
+  if (items.some((item) => item.kind === 'text')) {
+    doc.registerFontkit(fontkit);
+    const { regular, bold } = await loadPretendardBytes();
+    [textFontRegular, textFontBold] = await Promise.all([
+      doc.embedFont(regular, { subset: true }),
+      doc.embedFont(bold, { subset: true }),
+    ]);
+  }
+
   const byPage = new Map<number, MarkupItem[]>();
   for (const item of items) {
     const list = byPage.get(item.page) ?? [];
@@ -194,6 +231,21 @@ export async function burnMarkupIntoPdf(
     const { width, height } = page.getSize();
 
     for (const item of pageItems) {
+      if (item.kind === 'text') {
+        // x,y는 텍스트 베이스라인 좌측 시작점의 비율 좌표(위에서부터) — pdf-lib은 아래가
+        // 원점이라 세로만 뒤집는다. 가로는 뒤집을 필요 없이 그대로 곱한다.
+        const chosenFont = item.bold ? textFontBold : textFontRegular;
+        if (!chosenFont) continue;
+        page.drawText(item.text, {
+          x: item.x * width,
+          y: height - item.y * height,
+          size: item.fontSizePt,
+          font: chosenFont,
+          color: rgb(0, 0, 0),
+        });
+        continue;
+      }
+
       const boxX = item.x * width;
       const boxW = item.w * width;
       const boxH = item.h * height;
