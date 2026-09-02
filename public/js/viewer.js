@@ -359,6 +359,8 @@ function setupDeterrents() {
     }
     if (key === 'escape') {
       if (measure.mode) setMeasureMode(false);
+      else if (textTool.pending) cancelTextInsert();
+      else if (textTool.active) setTextToolActive(false);
       else if (markup.drawMode) setMarkupDrawMode(false);
       else closeSearchBar();
     }
@@ -758,6 +760,7 @@ async function initGridView() {
   document.getElementById('measure-btn').hidden = true;
   document.getElementById('markup-toggle-btn').hidden = true;
   document.getElementById('markup-add-btn').hidden = true;
+  document.getElementById('text-tool-btn').hidden = true;
   document.getElementById('markup-include-wrap').hidden = true;
 
   const meta = await fetchJsonView(`/api/view/grid/meta?${tokenQuery}`);
@@ -951,10 +954,91 @@ async function deleteMarkupItem(item, rectEl) {
   }
 }
 
+function pageHeightPtFor(pageIdx) {
+  const dims = pageDimensions && pageDimensions[pageIdx];
+  return dims ? dims.h : 792;
+}
+
+let textDragState = null;
+
+function startTextDrag(event, item, el, frame) {
+  if (event.target.closest('.text-overlay-delete')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  textDragState = { item, el, frame, moved: false, x: item.x, y: item.y };
+  el.classList.add('dragging');
+}
+
+document.addEventListener('mousemove', (event) => {
+  if (!textDragState) return;
+  textDragState.moved = true;
+  const { frame, el } = textDragState;
+  const rect = frame.getBoundingClientRect();
+  const x = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
+  const y = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 1);
+  el.style.left = `${x * 100}%`;
+  el.style.top = `${y * 100}%`;
+  textDragState.x = x;
+  textDragState.y = y;
+});
+
+document.addEventListener('mouseup', async () => {
+  if (!textDragState) return;
+  const { item, el, moved, x, y } = textDragState;
+  textDragState = null;
+  el.classList.remove('dragging');
+  if (!moved) return;
+  try {
+    const updated = await fetchJsonView(`/api/view/markup/${item.id}?${tokenQuery}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ x, y }),
+    });
+    item.x = updated.x;
+    item.y = updated.y;
+  } catch (error) {
+    // 실패하면 원래 위치로 되돌린다
+    el.style.left = `${item.x * 100}%`;
+    el.style.top = `${item.y * 100}%`;
+    alert(error.message || '위치 이동에 실패했습니다.');
+  }
+});
+
+function renderTextOverlayItem(frame, layer, item) {
+  const el = document.createElement('div');
+  el.className = 'text-overlay-item';
+  el.textContent = item.text;
+  el.dataset.markupId = item.id;
+  el.style.left = `${item.x * 100}%`;
+  el.style.top = `${item.y * 100}%`;
+  el.style.fontSize = `${item.fontSizePt * (frame.clientHeight / pageHeightPtFor(item.page - 1))}px`;
+  el.style.fontWeight = item.bold ? '700' : '400';
+
+  if (permissions.canEdit) {
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'text-overlay-delete';
+    del.textContent = '×';
+    del.title = '삭제';
+    del.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteMarkupItem(item, el);
+    });
+    el.append(del);
+    el.addEventListener('mousedown', (event) => startTextDrag(event, item, el, frame));
+  }
+
+  layer.append(el);
+}
+
 function renderMarkupItem(item) {
   const frame = pagesContainer.children[item.page - 1];
   if (!frame) return;
   const layer = markupLayer(frame);
+  if (item.kind === 'text') {
+    renderTextOverlayItem(frame, layer, item);
+    return;
+  }
   const rectEl = document.createElement('div');
   rectEl.className = 'markup-rect';
   rectEl.style.left = `${item.x * 100}%`;
@@ -1037,6 +1121,7 @@ function setMarkupDrawMode(on) {
   markup.drawMode = on;
   document.getElementById('markup-add-btn').setAttribute('aria-pressed', String(on));
   pagesContainer.classList.toggle('markup-drawing', on);
+  if (on) setTextToolActive(false);
   if (!on) cancelMarkupDraft();
 }
 
@@ -1152,6 +1237,114 @@ function setupMarkupTool() {
     }
     markup.draftRect = rectEl;
     openMarkupPopover(frame, page, box);
+  });
+}
+
+/* ==================== 텍스트 추가(주변 폰트에 맞춰 삽입) ==================== */
+
+const textTool = { active: false, pending: null };
+
+function setTextToolActive(on) {
+  textTool.active = on;
+  document.getElementById('text-tool-btn').setAttribute('aria-pressed', String(on));
+  pagesContainer.classList.toggle('text-tool-active', on);
+  if (on) setMarkupDrawMode(false);
+  if (!on) cancelTextInsert();
+}
+
+function cancelTextInsert() {
+  if (textTool.pending) {
+    textTool.pending.box.remove();
+    textTool.pending = null;
+  }
+}
+
+async function commitTextInsert() {
+  const pending = textTool.pending;
+  if (!pending) return;
+  textTool.pending = null;
+  const text = pending.box.value.trim();
+  pending.box.remove();
+  if (!text) return;
+  try {
+    const item = await fetchJsonView(`/api/view/markup?${tokenQuery}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        kind: 'text',
+        page: pending.page,
+        x: pending.xRatio,
+        y: pending.style.baselineY,
+        fontSizePt: pending.style.fontSizePt,
+        bold: pending.style.bold,
+        text,
+      }),
+    });
+    markup.items.push(item);
+    renderAllMarkup();
+    updateMarkupIncludeVisibility();
+  } catch (error) {
+    alert(error.message || '텍스트 추가에 실패했습니다.');
+  }
+}
+
+function openTextInsertBox(frame, page, xRatio, style) {
+  cancelTextInsert();
+  const box = document.createElement('textarea');
+  box.className = 'text-insert-input';
+  box.rows = 1;
+  box.maxLength = 2000;
+  box.style.left = `${xRatio * 100}%`;
+  box.style.top = `${style.baselineY * 100}%`;
+  box.style.fontSize = `${style.fontSizePt * (frame.clientHeight / pageHeightPtFor(page - 1))}px`;
+  box.style.fontWeight = style.bold ? '700' : '400';
+  box.style.width = '2ch';
+  frame.append(box);
+  box.focus();
+
+  box.addEventListener('input', () => {
+    box.style.width = `${Math.max(2, box.value.length + 1)}ch`;
+  });
+  box.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      commitTextInsert();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelTextInsert();
+    }
+  });
+  box.addEventListener('blur', () => commitTextInsert());
+
+  textTool.pending = { box, frame, page, xRatio, style };
+}
+
+function setupTextTool() {
+  const btn = document.getElementById('text-tool-btn');
+  if (!permissions.canEdit) return; // 버튼은 hidden 상태를 유지한다
+  btn.hidden = false;
+  btn.addEventListener('click', () => setTextToolActive(!textTool.active));
+
+  pagesContainer.addEventListener('click', async (event) => {
+    if (!textTool.active) return;
+    if (event.target.closest('.text-overlay-item') || event.target.closest('.text-insert-input')) return;
+    const frame = event.target.closest('.page-frame');
+    if (!frame) return;
+    if (textTool.pending) {
+      commitTextInsert();
+      return;
+    }
+    const page = [...pagesContainer.children].indexOf(frame) + 1;
+    const rect = frame.getBoundingClientRect();
+    const xRatio = (event.clientX - rect.left) / rect.width;
+    const yRatio = (event.clientY - rect.top) / rect.height;
+    let style;
+    try {
+      style = await fetchJsonView(`/api/view/pages/${page}/text-style?${tokenQuery}&x=${xRatio}&y=${yRatio}`);
+    } catch {
+      style = { fontSizePt: 12, bold: false, baselineY: yRatio, matched: false };
+    }
+    openTextInsertBox(frame, page, xRatio, style);
   });
 }
 
@@ -1278,6 +1471,7 @@ async function init() {
   trackCurrentPage();
   setupDrawingTools();
   setupMarkupTool();
+  setupTextTool();
   loadMarkup();
 }
 

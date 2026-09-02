@@ -844,6 +844,66 @@ h2 {
 }
 .markup-include-toggle[hidden] { display: none; }
 
+/* ---------- 텍스트 추가(주변 폰트에 맞춰 삽입) ---------- */
+
+.pages-container.text-tool-active,
+.pages-container.text-tool-active .page-frame { cursor: text; }
+
+.text-overlay-item {
+  position: absolute;
+  transform: translateY(-100%);
+  white-space: pre;
+  font-family: "Pretendard Variable", "Pretendard", var(--font-sans);
+  color: #000;
+  line-height: 1.15;
+  pointer-events: auto;
+  cursor: grab;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.text-overlay-item:hover,
+.text-overlay-item.dragging {
+  outline: 1.5px dashed #e8590c;
+  outline-offset: 2px;
+}
+
+.text-overlay-item.dragging { cursor: grabbing; }
+
+.text-overlay-delete {
+  display: none;
+  position: absolute;
+  top: -22px;
+  right: -8px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: #e8590c;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.text-overlay-item:hover .text-overlay-delete { display: block; }
+
+.text-insert-input {
+  position: absolute;
+  transform: translateY(-100%);
+  min-width: 60px;
+  resize: none;
+  overflow: hidden;
+  border: 1.5px dashed #e8590c;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.85);
+  color: #000;
+  font-family: "Pretendard Variable", "Pretendard", var(--font-sans);
+  line-height: 1.15;
+  padding: 0 2px;
+  outline: none;
+}
+
 /* ---------- 그리드 뷰 (스프레드시트) ---------- */
 
 .grid-container {
