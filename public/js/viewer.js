@@ -294,10 +294,11 @@ function setupToolbar() {
   printBtn.title = permissions.canPrint ? '워터마크가 포함된 출력용 PDF' : '출력 권한이 없습니다';
   if (permissions.canPrint) {
     printBtn.addEventListener('click', () => {
+      const includeMarkup = document.getElementById('markup-include-checkbox')?.checked ? '&includeMarkup=1' : '';
       // 팝업 차단을 피하려면 사용자 클릭 스택 안에서 창을 먼저 열어둬야 한다
       const printWindow = window.open('', '_blank');
       runButtonTask(printBtn, '생성', async (onProgress) => {
-        const chunks = await fetchWithProgress(`/api/view/print?${tokenQuery}`, onProgress);
+        const chunks = await fetchWithProgress(`/api/view/print?${tokenQuery}${includeMarkup}`, onProgress);
         const blob = new Blob(chunks, { type: 'application/pdf' });
         const url = URL.createObjectURL(blob);
         if (printWindow && !printWindow.closed) {
@@ -320,8 +321,9 @@ function setupToolbar() {
   downloadBtn.title = permissions.canDownload ? '원본 파일 다운로드' : '저장 권한이 없습니다';
   if (permissions.canDownload) {
     downloadBtn.addEventListener('click', () => {
+      const includeMarkup = document.getElementById('markup-include-checkbox')?.checked ? '&includeMarkup=1' : '';
       runButtonTask(downloadBtn, '저장', async (onProgress) => {
-        const chunks = await fetchWithProgress(`/api/view/download?${tokenQuery}`, onProgress);
+        const chunks = await fetchWithProgress(`/api/view/download?${tokenQuery}${includeMarkup}`, onProgress);
         const blob = new Blob(chunks);
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
@@ -357,6 +359,7 @@ function setupDeterrents() {
     }
     if (key === 'escape') {
       if (measure.mode) setMeasureMode(false);
+      else if (markup.drawMode) setMarkupDrawMode(false);
       else closeSearchBar();
     }
   });
@@ -628,8 +631,8 @@ async function fetchChunk(sheetIdx, chunkIdx) {
   }
 }
 
-async function fetchJsonView(url) {
-  const res = await fetch(url, { signal: viewAbort.signal });
+async function fetchJsonView(url, options = {}) {
+  const res = await fetch(url, { signal: viewAbort.signal, ...options });
   const json = await res.json();
   if (!res.ok || !json.success) throw new Error(json.error || `요청 실패 (HTTP ${res.status})`);
   return json.data;
@@ -753,6 +756,9 @@ async function initGridView() {
   document.getElementById('zoom-level').hidden = true;
   document.getElementById('invert-btn').hidden = true;
   document.getElementById('measure-btn').hidden = true;
+  document.getElementById('markup-toggle-btn').hidden = true;
+  document.getElementById('markup-add-btn').hidden = true;
+  document.getElementById('markup-include-wrap').hidden = true;
 
   const meta = await fetchJsonView(`/api/view/grid/meta?${tokenQuery}`);
   gridState.sheets = meta.sheets;
@@ -906,6 +912,249 @@ function setMeasureMode(on) {
   else document.getElementById('measure-hint').textContent = '두 점을 클릭해 거리를 측정하세요';
 }
 
+/* ==================== 마크업(리뷰 코멘트) ==================== */
+
+const markup = {
+  visible: true,
+  drawMode: false,
+  items: [],
+  dragging: null, // {frame, page, fx, fy, rectEl, box}
+  draftRect: null, // 팝오버가 열려 있는 동안 유지되는 사각형 엘리먼트
+};
+
+function markupLayer(frame) {
+  let layer = frame.querySelector('.markup-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'markup-layer';
+    frame.append(layer);
+  }
+  return layer;
+}
+
+function clearMarkupOverlays() {
+  for (const frame of pagesContainer.children) {
+    const layer = frame.querySelector('.markup-layer');
+    if (layer) layer.replaceChildren();
+  }
+}
+
+async function deleteMarkupItem(item, rectEl) {
+  if (!confirm('이 마크업을 삭제할까요?')) return;
+  try {
+    await fetchJsonView(`/api/view/markup/${item.id}?${tokenQuery}`, { method: 'DELETE' });
+    markup.items = markup.items.filter((it) => it.id !== item.id);
+    rectEl.remove();
+    updateMarkupIncludeVisibility();
+  } catch (error) {
+    alert(error.message || '삭제에 실패했습니다.');
+  }
+}
+
+function renderMarkupItem(item) {
+  const frame = pagesContainer.children[item.page - 1];
+  if (!frame) return;
+  const layer = markupLayer(frame);
+  const rectEl = document.createElement('div');
+  rectEl.className = 'markup-rect';
+  rectEl.style.left = `${item.x * 100}%`;
+  rectEl.style.top = `${item.y * 100}%`;
+  rectEl.style.width = `${item.w * 100}%`;
+  rectEl.style.height = `${item.h * 100}%`;
+  rectEl.tabIndex = 0;
+  rectEl.dataset.markupId = item.id;
+
+  const tooltip = document.createElement('div');
+  tooltip.className = 'markup-tooltip';
+  const metaLine = document.createElement('div');
+  metaLine.className = 'markup-tooltip-meta';
+  metaLine.textContent = `${item.author} · ${new Date(item.createdAt).toLocaleString('ko-KR')}`;
+  const body = document.createElement('div');
+  body.className = 'markup-tooltip-text';
+  body.textContent = item.text;
+  tooltip.append(metaLine, body);
+
+  if (permissions.canEdit) {
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'markup-tooltip-delete';
+    del.textContent = '삭제';
+    del.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteMarkupItem(item, rectEl);
+    });
+    tooltip.append(del);
+  }
+
+  rectEl.append(tooltip);
+  layer.append(rectEl);
+}
+
+function renderAllMarkup() {
+  clearMarkupOverlays();
+  if (!markup.visible) return;
+  for (const item of markup.items) renderMarkupItem(item);
+}
+
+function updateMarkupIncludeVisibility() {
+  document.getElementById('markup-include-wrap').hidden = markup.items.length === 0;
+}
+
+async function loadMarkup() {
+  try {
+    markup.items = await fetchJsonView(`/api/view/markup?${tokenQuery}`);
+    renderAllMarkup();
+    updateMarkupIncludeVisibility();
+  } catch {
+    /* 마크업 로딩 실패는 열람 자체를 막지 않는다 */
+  }
+}
+
+function setMarkupVisible(visible) {
+  markup.visible = visible;
+  document.getElementById('markup-toggle-btn').setAttribute('aria-pressed', String(visible));
+  renderAllMarkup();
+}
+
+function closeMarkupPopover() {
+  const existing = document.querySelector('.markup-popover');
+  if (existing) existing.remove();
+}
+
+function cancelMarkupDraft() {
+  if (markup.dragging) {
+    markup.dragging.rectEl.remove();
+    markup.dragging = null;
+  }
+  if (markup.draftRect) {
+    markup.draftRect.remove();
+    markup.draftRect = null;
+  }
+  closeMarkupPopover();
+}
+
+function setMarkupDrawMode(on) {
+  markup.drawMode = on;
+  document.getElementById('markup-add-btn').setAttribute('aria-pressed', String(on));
+  pagesContainer.classList.toggle('markup-drawing', on);
+  if (!on) cancelMarkupDraft();
+}
+
+function openMarkupPopover(frame, page, box) {
+  closeMarkupPopover();
+  const popover = document.createElement('div');
+  popover.className = 'markup-popover';
+  popover.style.left = `${Math.min(box.x + box.w, 0.7) * 100}%`;
+  popover.style.top = `${box.y * 100}%`;
+
+  const textarea = document.createElement('textarea');
+  textarea.placeholder = '코멘트를 입력하세요';
+  textarea.maxLength = 2000;
+
+  const actions = document.createElement('div');
+  actions.className = 'markup-popover-actions';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'btn-pill';
+  cancelBtn.textContent = '취소';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'btn-pill btn-pill-primary';
+  saveBtn.textContent = '저장';
+  actions.append(cancelBtn, saveBtn);
+  popover.append(textarea, actions);
+  frame.append(popover);
+  textarea.focus();
+
+  cancelBtn.addEventListener('click', () => cancelMarkupDraft());
+
+  saveBtn.addEventListener('click', async () => {
+    const text = textarea.value.trim();
+    if (!text) {
+      textarea.focus();
+      return;
+    }
+    saveBtn.disabled = true;
+    try {
+      const item = await fetchJsonView(`/api/view/markup?${tokenQuery}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ page, x: box.x, y: box.y, w: box.w, h: box.h, text }),
+      });
+      markup.items.push(item);
+      cancelMarkupDraft();
+      renderAllMarkup();
+      updateMarkupIncludeVisibility();
+    } catch (error) {
+      alert(error.message || '마크업 저장에 실패했습니다.');
+      saveBtn.disabled = false;
+    }
+  });
+}
+
+function setupMarkupTool() {
+  document.getElementById('markup-toggle-btn').addEventListener('click', () => {
+    setMarkupVisible(!markup.visible);
+  });
+
+  const addBtn = document.getElementById('markup-add-btn');
+  if (permissions.canEdit) {
+    addBtn.hidden = false;
+    addBtn.addEventListener('click', () => setMarkupDrawMode(!markup.drawMode));
+  }
+
+  pagesContainer.addEventListener('mousedown', (event) => {
+    if (!markup.drawMode) return;
+    const frame = event.target.closest('.page-frame');
+    if (!frame) return;
+    event.preventDefault();
+    const rect = frame.getBoundingClientRect();
+    const fx = (event.clientX - rect.left) / rect.width;
+    const fy = (event.clientY - rect.top) / rect.height;
+    const rectEl = document.createElement('div');
+    rectEl.className = 'markup-rect markup-rect-draft';
+    markupLayer(frame).append(rectEl);
+    markup.dragging = {
+      frame,
+      page: [...pagesContainer.children].indexOf(frame) + 1,
+      fx,
+      fy,
+      rectEl,
+      box: null,
+    };
+  });
+
+  document.addEventListener('mousemove', (event) => {
+    if (!markup.dragging) return;
+    const { frame, fx: startFx, fy: startFy, rectEl } = markup.dragging;
+    const rect = frame.getBoundingClientRect();
+    const curFx = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
+    const curFy = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 1);
+    const x = Math.min(startFx, curFx);
+    const y = Math.min(startFy, curFy);
+    const w = Math.abs(curFx - startFx);
+    const h = Math.abs(curFy - startFy);
+    rectEl.style.left = `${x * 100}%`;
+    rectEl.style.top = `${y * 100}%`;
+    rectEl.style.width = `${w * 100}%`;
+    rectEl.style.height = `${h * 100}%`;
+    markup.dragging.box = { x, y, w, h };
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!markup.dragging) return;
+    const { frame, page, rectEl, box } = markup.dragging;
+    markup.dragging = null;
+    const MIN_SIZE = 0.01;
+    if (!box || box.w < MIN_SIZE || box.h < MIN_SIZE) {
+      rectEl.remove();
+      return;
+    }
+    markup.draftRect = rectEl;
+    openMarkupPopover(frame, page, box);
+  });
+}
+
 function setupDrawingTools() {
   // Ctrl+휠: 커서 기준 확대/축소
   pagesContainer.addEventListener(
@@ -1028,6 +1277,8 @@ async function init() {
   buildPages();
   trackCurrentPage();
   setupDrawingTools();
+  setupMarkupTool();
+  loadMarkup();
 }
 
 init();
