@@ -2,6 +2,7 @@ import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
 import { pdf } from 'pdf-to-img';
 import { SizedLruCache } from './cache.js';
 import { config } from './config.js';
+import type { MarkupItem } from './markup.js';
 
 type PdfImageDocument = Awaited<ReturnType<typeof pdf>>;
 export type BytesProvider = () => Promise<Buffer>;
@@ -159,5 +160,90 @@ export async function buildPrintPdf(pdfBytes: Buffer, watermarkText: string): Pr
       rotate: degrees(35),
     });
   }
+  return doc.save();
+}
+
+/**
+ * 마크업(사각형+코멘트)을 PDF에 그려 넣는다. 원본 파일은 건드리지 않고, 출력/다운로드용으로
+ * 새로 만드는 PDF 바이트에만 적용한다(호출부: src/routes/viewer.ts).
+ * 좌표는 페이지 크기와 무관한 0~1 비율(src/markup.ts)이라 이 함수가 실제 pt 단위로 환산한다.
+ */
+export async function burnMarkupIntoPdf(
+  pdfBytes: Buffer,
+  items: readonly MarkupItem[],
+): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(toOwnedBytes(pdfBytes), { ignoreEncryption: true });
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const pages = doc.getPages();
+
+  const byPage = new Map<number, MarkupItem[]>();
+  for (const item of items) {
+    const list = byPage.get(item.page) ?? [];
+    list.push(item);
+    byPage.set(item.page, list);
+  }
+
+  const fontSize = 8;
+  const lineHeight = fontSize * 1.3;
+  const boxPad = 3;
+  const maxCharsPerLine = 42;
+
+  for (const [pageNumber, pageItems] of byPage) {
+    const page = pages[pageNumber - 1];
+    if (!page) continue; // 범위를 벗어난 페이지 번호는 조용히 건너뛴다
+    const { width, height } = page.getSize();
+
+    for (const item of pageItems) {
+      const boxX = item.x * width;
+      const boxW = item.w * width;
+      const boxH = item.h * height;
+      // pdf-lib 좌표계는 좌하단이 원점이라, 위에서부터 재는 비율 y를 뒤집는다.
+      const boxY = height - (item.y + item.h) * height;
+
+      page.drawRectangle({
+        x: boxX,
+        y: boxY,
+        width: boxW,
+        height: boxH,
+        borderColor: rgb(0.91, 0.42, 0.02),
+        borderWidth: 1.5,
+        color: rgb(0.91, 0.42, 0.02),
+        opacity: 0.08,
+        borderOpacity: 0.9,
+      });
+
+      const text = toWinAnsiSafe(item.text);
+      const lines: string[] = [];
+      for (let i = 0; i < text.length; i += maxCharsPerLine) {
+        lines.push(text.slice(i, i + maxCharsPerLine));
+      }
+      const textBlockHeight = lines.length * lineHeight + boxPad * 2;
+      const textY = Math.max(0, boxY - textBlockHeight);
+      const textWidthPx =
+        Math.max(boxW, ...lines.map((line) => font.widthOfTextAtSize(line, fontSize))) + boxPad * 2;
+
+      page.drawRectangle({
+        x: boxX,
+        y: textY,
+        width: textWidthPx,
+        height: textBlockHeight,
+        color: rgb(1, 0.97, 0.88),
+        borderColor: rgb(0.91, 0.42, 0.02),
+        borderWidth: 1,
+        opacity: 0.95,
+      });
+
+      lines.forEach((line, i) => {
+        page.drawText(line, {
+          x: boxX + boxPad,
+          y: textY + textBlockHeight - boxPad - (i + 1) * lineHeight + (lineHeight - fontSize) / 2,
+          size: fontSize,
+          font,
+          color: rgb(0.2, 0.15, 0.02),
+        });
+      });
+    }
+  }
+
   return doc.save();
 }
