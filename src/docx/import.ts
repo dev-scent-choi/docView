@@ -146,19 +146,83 @@ function paragraphFrom(pNode: XmlNode): { node: PMNode; isListItem: boolean } {
   return { node, isListItem };
 }
 
-function tableCellFrom(tcNode: XmlNode): PMNode {
+function tableCellFrom(tcNode: XmlNode, colspan: number, rowspan: number): PMNode {
   const tcChildren = childrenOf(tcNode);
   const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p).node);
   const content = paragraphs.length > 0 ? paragraphs : [docxSchema.nodes.paragraph.create()];
-  return docxSchema.nodes.table_cell.create(null, content);
+  return docxSchema.nodes.table_cell.create({ colspan, rowspan }, content);
 }
 
+function tcPrChildrenOf(tcNode: XmlNode): XmlNode[] {
+  const tcPr = findFirst(childrenOf(tcNode), 'w:tcPr');
+  return tcPr ? childrenOf(tcPr) : [];
+}
+
+/** w:tcPr/w:gridSpan@w:val — 가로 병합 칸 수. 없으면 1(병합 없음). */
+function gridSpanOf(tcPrChildren: readonly XmlNode[]): number {
+  const gridSpan = findFirst(tcPrChildren, 'w:gridSpan');
+  if (!gridSpan) return 1;
+  const val = Number(attrsOf(gridSpan)['@_w:val']);
+  return Number.isFinite(val) && val > 0 ? val : 1;
+}
+
+/**
+ * w:tcPr/w:vMerge — 세로 병합 상태. 'restart'면 이 칸이 병합의 시작(눈에 보이는 셀),
+ * @_w:val이 없거나 "continue"면 위 칸에 이어지는 자리(빈 자리표시자, 실제 셀로 만들지 않는다).
+ * 태그 자체가 없으면 세로 병합과 무관한 일반 칸이다.
+ */
+function vMergeOf(tcPrChildren: readonly XmlNode[]): 'restart' | 'continue' | null {
+  const vMerge = findFirst(tcPrChildren, 'w:vMerge');
+  if (!vMerge) return null;
+  return attrsOf(vMerge)['@_w:val'] === 'restart' ? 'restart' : 'continue';
+}
+
+interface CellPlacement {
+  readonly tc: XmlNode;
+  readonly colspan: number;
+  rowspan: number;
+}
+
+/**
+ * OOXML의 표 병합(w:gridSpan=가로, w:vMerge=세로)을 ProseMirror의 colspan/rowspan 모델로
+ * 옮긴다. ProseMirror(prosemirror-tables)는 세로 병합을 "이어지는 칸"을 아예 만들지 않고
+ * 시작 칸의 rowspan만 늘리는 방식으로 표현하므로, w:vMerge가 "continue"인 <w:tc>는 새 셀을
+ * 만들지 않고 같은 열의 시작 칸(originByCol) rowspan만 1 늘린 뒤 건너뛴다.
+ */
 function tableFrom(tblNode: XmlNode): PMNode {
   const tblChildren = childrenOf(tblNode);
-  const rows = findAll(tblChildren, 'w:tr').map((tr) => {
-    const cells = findAll(childrenOf(tr), 'w:tc').map(tableCellFrom);
-    return docxSchema.nodes.table_row.create(null, cells);
-  });
+  const trNodes = findAll(tblChildren, 'w:tr');
+
+  const rowPlacements: CellPlacement[][] = [];
+  const originByCol = new Map<number, CellPlacement>();
+
+  for (const tr of trNodes) {
+    const placements: CellPlacement[] = [];
+    let col = 0;
+    for (const tc of findAll(childrenOf(tr), 'w:tc')) {
+      const tcPrChildren = tcPrChildrenOf(tc);
+      const gridSpan = gridSpanOf(tcPrChildren);
+      const vMerge = vMergeOf(tcPrChildren);
+      if (vMerge === 'continue') {
+        const origin = originByCol.get(col);
+        if (origin) origin.rowspan += 1;
+        col += gridSpan;
+        continue;
+      }
+      const placement: CellPlacement = { tc, colspan: gridSpan, rowspan: 1 };
+      placements.push(placement);
+      originByCol.set(col, placement);
+      col += gridSpan;
+    }
+    rowPlacements.push(placements);
+  }
+
+  const rows = rowPlacements.map((placements) =>
+    docxSchema.nodes.table_row.create(
+      null,
+      placements.map((p) => tableCellFrom(p.tc, p.colspan, p.rowspan)),
+    ),
+  );
   return docxSchema.nodes.table.create(null, rows);
 }
 

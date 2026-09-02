@@ -30,6 +30,56 @@ describe('docx import', () => {
   });
 });
 
+describe('docx import: table merges', () => {
+  function docxWithTableXml(tableXml: string): Buffer {
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${tableXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  test('reads w:gridSpan as colspan on the merged cell', () => {
+    const tableXml =
+      '<w:tbl><w:tr>' +
+      '<w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Merged</w:t></w:r></w:p></w:tc>' +
+      '</w:tr><w:tr>' +
+      '<w:tc><w:p><w:r><w:t>A2</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    const table = doc.child(0);
+    expect(table.type.name).toBe('table');
+    const row1 = table.child(0);
+    expect(row1.childCount).toBe(1); // 병합된 칸은 하나의 셀로만 존재해야 한다
+    expect(row1.child(0).attrs.colspan).toBe(2);
+    expect(row1.child(0).textContent).toBe('Merged');
+    const row2 = table.child(1);
+    expect(row2.childCount).toBe(2);
+  });
+
+  test('reads w:vMerge restart/continue as rowspan and drops the continuation cell', () => {
+    const tableXml =
+      '<w:tbl><w:tr>' +
+      '<w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Tall</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc>' +
+      '</w:tr><w:tr>' +
+      '<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>' +
+      '<w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    const table = doc.child(0);
+    const row1 = table.child(0);
+    const row2 = table.child(1);
+    expect(row1.childCount).toBe(2);
+    expect(row1.child(0).attrs.rowspan).toBe(2);
+    expect(row1.child(0).textContent).toBe('Tall');
+    // 세로 병합의 "이어지는 칸"은 별개 셀로 남지 않아야 한다 — row2엔 B2 하나뿐
+    expect(row2.childCount).toBe(1);
+    expect(row2.child(0).textContent).toBe('B2');
+  });
+});
+
 describe('docx export', () => {
   test('round-trips formatted paragraphs, headings and tables through a full docx cycle', () => {
     const original = makeSampleDocx(['placeholder']);
@@ -67,6 +117,47 @@ describe('docx export', () => {
     expect(marks).toContain('strong');
     expect(marks).toContain('em');
     expect(reimported.doc.child(2).type.name).toBe('table');
+  });
+
+  test('round-trips a horizontally and vertically merged table through a full docx cycle', () => {
+    const original = makeSampleDocx(['placeholder']);
+    const cell = (text: string, attrs: { colspan?: number; rowspan?: number } = {}) =>
+      docxSchema.nodes.table_cell.create(
+        { colspan: attrs.colspan ?? 1, rowspan: attrs.rowspan ?? 1 },
+        docxSchema.nodes.paragraph.create(null, docxSchema.text(text)),
+      );
+    // 1행: 가로로 2칸 병합된 셀 하나
+    const row1 = docxSchema.nodes.table_row.create(null, [cell('Merged', { colspan: 2 })]);
+    // 2행~3행: 1열이 세로로 2칸 병합, 2열은 각 행마다 별개 셀
+    const row2 = docxSchema.nodes.table_row.create(null, [cell('Tall', { rowspan: 2 }), cell('B2')]);
+    const row3 = docxSchema.nodes.table_row.create(null, [cell('B3')]);
+    const table = docxSchema.nodes.table.create(null, [row1, row2, row3]);
+    const doc = docxSchema.nodes.doc.create(null, [table]);
+
+    const xml = renderDocumentXml(doc);
+    expect(xml).toContain('<w:gridSpan w:val="2"/>');
+    expect(xml).toContain('<w:vMerge w:val="restart"/>');
+    expect(xml).toContain('<w:vMerge/>');
+
+    const exported = exportDocx(original, doc);
+    const reimported = importDocx(exported);
+    const reimportedTable = reimported.doc.child(0);
+    const reimportedRow1 = reimportedTable.child(0);
+    const reimportedRow2 = reimportedTable.child(1);
+    const reimportedRow3 = reimportedTable.child(2);
+
+    expect(reimportedRow1.childCount).toBe(1);
+    expect(reimportedRow1.child(0).attrs.colspan).toBe(2);
+    expect(reimportedRow1.child(0).textContent).toBe('Merged');
+
+    expect(reimportedRow2.childCount).toBe(2);
+    expect(reimportedRow2.child(0).attrs.rowspan).toBe(2);
+    expect(reimportedRow2.child(0).textContent).toBe('Tall');
+    expect(reimportedRow2.child(1).textContent).toBe('B2');
+
+    // 세로 병합이 이어지는 3행에는 원래 셀(B3)만 남고, 병합된 1열 자리는 별개 셀로 다시 생기지 않는다
+    expect(reimportedRow3.childCount).toBe(1);
+    expect(reimportedRow3.child(0).textContent).toBe('B3');
   });
 
   test('round-trips font color, font size and paragraph alignment', () => {

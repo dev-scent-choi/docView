@@ -82,21 +82,77 @@ const BORDER = '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>';
 
+/** 세로 병합 중(pending) 열의 상태 — 몇 행 더 w:vMerge 이어짐 칸을 채워야 하는지, 그 칸의 가로폭(colspan) */
+interface PendingVMerge {
+  remaining: number;
+  readonly colspan: number;
+}
+
+/**
+ * ProseMirror 표 한 행을 docx 행으로 직렬화한다. prosemirror-tables는 세로 병합을 "이어지는
+ * 칸은 그 행의 셀 목록에 아예 없다"는 방식으로 표현하므로(src/docx/import.ts의 tableFrom과
+ * 동일한 모델), 이 행의 실제 셀들 사이사이에 이전 행에서 시작된 세로 병합(pendingVMerge)이
+ * 남아 있는 열이 있으면 그 자리에 w:vMerge 이어짐 칸을 끼워 넣어 열 정렬을 맞춘다. 실제 셀과
+ * pendingVMerge 칸은 열 위치가 절대 겹치지 않으므로(겹치면 애초에 이 행에 그 열의 실제 셀이
+ * 없었을 것이다) 열 번호를 따로 계산할 필요 없이 앞에서부터 순서대로 배치하면 된다.
+ */
+function renderTableRow(row: PMNode, pendingVMerge: Map<number, PendingVMerge>): string {
+  const cells: PMNode[] = [];
+  row.forEach((cell) => cells.push(cell));
+
+  let cellsXml = '';
+  let col = 0;
+  let cellIndex = 0;
+
+  while (cellIndex < cells.length || pendingVMerge.has(col)) {
+    const pending = pendingVMerge.get(col);
+    if (pending) {
+      const gridSpanXml = pending.colspan > 1 ? `<w:gridSpan w:val="${pending.colspan}"/>` : '';
+      cellsXml +=
+        `<w:tc><w:tcPr><w:tcW w:w="${CELL_WIDTH_DXA * pending.colspan}" w:type="dxa"/>` +
+        `${gridSpanXml}<w:vMerge/></w:tcPr><w:p/></w:tc>`;
+      pending.remaining -= 1;
+      if (pending.remaining === 0) pendingVMerge.delete(col);
+      col += pending.colspan;
+      continue;
+    }
+
+    const cell = cells[cellIndex];
+    cellIndex += 1;
+    const colspan = Number(cell.attrs.colspan) || 1;
+    const rowspan = Number(cell.attrs.rowspan) || 1;
+    let cellBody = '';
+    cell.forEach((block) => {
+      cellBody += renderBlock(block);
+    });
+    const gridSpanXml = colspan > 1 ? `<w:gridSpan w:val="${colspan}"/>` : '';
+    const vMergeXml = rowspan > 1 ? '<w:vMerge w:val="restart"/>' : '';
+    cellsXml +=
+      `<w:tc><w:tcPr><w:tcW w:w="${CELL_WIDTH_DXA * colspan}" w:type="dxa"/>` +
+      `${gridSpanXml}${vMergeXml}</w:tcPr>${cellBody}</w:tc>`;
+    if (rowspan > 1) pendingVMerge.set(col, { remaining: rowspan - 1, colspan });
+    col += colspan;
+  }
+
+  return `<w:tr>${cellsXml}</w:tr>`;
+}
+
 function renderTable(node: PMNode): string {
-  const colCount = node.firstChild ? node.firstChild.childCount : 0;
+  // 표 전체 열 개수 — 세로 병합으로 뒤 행은 실제 셀이 더 적을 수 있어 모든 행 중 최댓값을 쓴다.
+  let colCount = 0;
+  node.forEach((row) => {
+    let width = 0;
+    row.forEach((cell) => {
+      width += Number(cell.attrs.colspan) || 1;
+    });
+    colCount = Math.max(colCount, width);
+  });
   const gridCols = Array.from({ length: colCount }, () => `<w:gridCol w:w="${CELL_WIDTH_DXA}"/>`).join('');
 
   let rowsXml = '';
+  const pendingVMerge = new Map<number, PendingVMerge>();
   node.forEach((row) => {
-    let cellsXml = '';
-    row.forEach((cell) => {
-      let cellBody = '';
-      cell.forEach((block) => {
-        cellBody += renderBlock(block);
-      });
-      cellsXml += `<w:tc><w:tcPr><w:tcW w:w="${CELL_WIDTH_DXA}" w:type="dxa"/></w:tcPr>${cellBody}</w:tc>`;
-    });
-    rowsXml += `<w:tr>${cellsXml}</w:tr>`;
+    rowsXml += renderTableRow(row, pendingVMerge);
   });
 
   return (
