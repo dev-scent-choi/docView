@@ -110,23 +110,32 @@ function textNodeWithMarks(text: string, marks: RunMarks): PMNode | null {
 }
 
 /**
- * w:r의 자식들 중 w:t 요소(들)의 텍스트를 이어붙인다.
- * findAll이 반환하는 것은 w:t "래퍼" 노드(예: { 'w:t': [...], ':@': {...} })이므로,
- * 텍스트는 그 안의 childrenOf(wt)를 다시 한 번 textOf로 펼쳐야 나온다.
+ * w:r 하나의 자식들을 등장 순서대로 훑어 텍스트(w:t)와 줄바꿈(w:br)을 PM 노드로 만든다.
+ * w:br을 무시하고 w:t만 이어붙이면 "첫 줄"과 "둘째 줄"이 구분 없이 "첫 줄둘째 줄"처럼
+ * 뭉쳐버리므로, 각 w:t는 자기 위치 그대로 별개 text 노드로, w:br은 hard_break 노드로 만든다.
+ * findAll이 반환하는 w:t는 "래퍼" 노드(예: { 'w:t': [...], ':@': {...} })라 텍스트는 그 안의
+ * childrenOf(wt)를 다시 한 번 textOf로 펼쳐야 나온다.
  */
-function runTextOf(runChildren: readonly XmlNode[]): string {
-  return findAll(runChildren, 'w:t')
-    .map((wt) => textOf(childrenOf(wt)))
-    .join('');
+function runInlineNodesOf(runChildren: readonly XmlNode[], marks: RunMarks): PMNode[] {
+  const nodes: PMNode[] = [];
+  for (const child of runChildren) {
+    const tag = tagOf(child);
+    if (tag === 'w:t') {
+      const node = textNodeWithMarks(textOf(childrenOf(child)), marks);
+      if (node) nodes.push(node);
+    } else if (tag === 'w:br') {
+      nodes.push(docxSchema.nodes.hard_break.create());
+    }
+  }
+  return nodes;
 }
 
-/** w:p의 자식을 순회하며 인라인(텍스트) 콘텐츠를 뽑아낸다. 이미지(w:drawing)는 건너뛴다(v1 미지원). */
+/** w:p의 자식을 순회하며 인라인(텍스트·줄바꿈) 콘텐츠를 뽑아낸다. 이미지(w:drawing)는 건너뛴다(v1 미지원). */
 function inlineContentOf(pChildren: readonly XmlNode[]): PMNode[] {
   const nodes: PMNode[] = [];
   for (const run of findAll(pChildren, 'w:r')) {
     const runChildren = childrenOf(run);
-    const node = textNodeWithMarks(runTextOf(runChildren), runMarksOf(runChildren));
-    if (node) nodes.push(node);
+    nodes.push(...runInlineNodesOf(runChildren, runMarksOf(runChildren)));
   }
   return nodes;
 }

@@ -43,6 +43,15 @@ const baseNodes: Record<string, NodeSpec> = {
   },
 
   text: { group: 'inline' },
+
+  /** docx의 w:br(문단 안 줄바꿈) — 새 문단이 아니라 같은 문단 안에서 줄만 바꾸는 것. */
+  hard_break: {
+    inline: true,
+    group: 'inline',
+    selectable: false,
+    parseDOM: [{ tag: 'br' }],
+    toDOM: () => ['br'],
+  },
 };
 
 const marks: Record<string, MarkSpec> = {

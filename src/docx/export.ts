@@ -39,6 +39,8 @@ function renderInline(node: PMNode): string {
   node.forEach((child) => {
     if (child.isText) {
       xml += renderRun(child.text ?? '', child.marks);
+    } else if (child.type.name === 'hard_break') {
+      xml += '<w:r><w:br/></w:r>';
     }
   });
   return xml;

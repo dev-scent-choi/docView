@@ -133,6 +133,34 @@ describe('docx import: table cell width and shading', () => {
   });
 });
 
+describe('docx import: manual line breaks (w:br)', () => {
+  function docxWithBodyXml(bodyXml: string): Buffer {
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${bodyXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  test('keeps text on either side of a w:br as separate lines instead of joining them', () => {
+    const bodyXml =
+      '<w:p><w:r><w:t xml:space="preserve">first line</w:t></w:r>' +
+      '<w:r><w:br/></w:r>' +
+      '<w:r><w:t xml:space="preserve">second line</w:t></w:r></w:p>';
+    const { doc } = importDocx(docxWithBodyXml(bodyXml));
+    const paragraph = doc.child(0);
+    expect(paragraph.childCount).toBe(3);
+    expect(paragraph.child(0).text).toBe('first line');
+    expect(paragraph.child(1).type.name).toBe('hard_break');
+    expect(paragraph.child(2).text).toBe('second line');
+    // textContent는 hard_break 같은 텍스트 아닌 리프 노드를 그냥 건너뛰므로(구분자 없음)
+    // 여기선 leafText로 줄바꿈을 대신 넣어주는 textBetween으로 실제 줄 구분을 확인한다
+    expect(paragraph.textBetween(0, paragraph.content.size, undefined, '\n')).toBe(
+      'first line\nsecond line',
+    );
+  });
+});
+
 describe('docx export', () => {
   test('round-trips formatted paragraphs, headings and tables through a full docx cycle', () => {
     const original = makeSampleDocx(['placeholder']);
@@ -236,6 +264,28 @@ describe('docx export', () => {
     const reimportedRow = reimported.doc.child(0).child(0);
     expect(reimportedRow.child(0).attrs.colwidth).toEqual([96]);
     expect(reimportedRow.child(1).attrs.background).toBe('#ffd43b');
+  });
+
+  test('round-trips a manual line break (hard_break) inside a paragraph', () => {
+    const original = makeSampleDocx(['placeholder']);
+    const paragraph = docxSchema.nodes.paragraph.create(null, [
+      docxSchema.text('first line'),
+      docxSchema.nodes.hard_break.create(),
+      docxSchema.text('second line'),
+    ]);
+    const doc = docxSchema.nodes.doc.create(null, [paragraph]);
+
+    const xml = renderDocumentXml(doc);
+    expect(xml).toContain('<w:br/>');
+
+    const exported = exportDocx(original, doc);
+    const reimported = importDocx(exported);
+    const reimportedParagraph = reimported.doc.child(0);
+    expect(reimportedParagraph.childCount).toBe(3);
+    expect(reimportedParagraph.child(1).type.name).toBe('hard_break');
+    expect(
+      reimportedParagraph.textBetween(0, reimportedParagraph.content.size, undefined, '\n'),
+    ).toBe('first line\nsecond line');
   });
 
   test('round-trips font color, font size and paragraph alignment', () => {
