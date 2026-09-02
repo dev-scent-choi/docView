@@ -1750,6 +1750,13 @@ async function init() {
   pageDimensions = json.data.pages || null;
   permissions = json.data.permissions;
 
+  // 측정/도면 모드는 도면·PDF 도구다 — word 등 다른 문서 종류를 pages 뷰로 볼 때는 의미가 없으므로
+  // 실제 pdf 문서일 때만 보여준다 (grid 뷰는 initGridView가 이미 별도로 항상 숨긴다).
+  if (json.data.ext !== 'pdf') {
+    document.getElementById('measure-btn').hidden = true;
+    document.getElementById('invert-btn').hidden = true;
+  }
+
   setupToolbar();
   setupDeterrents();
   setupSearchBar();

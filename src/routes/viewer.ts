@@ -392,6 +392,7 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
           // 범위가 고정돼 있으므로 docId 자체를 별도로 노출해도 새로운 권한 노출은 없다.
           docId: view.meta.id,
           name: view.meta.name,
+          ext: view.meta.ext,
           pageCount: view.meta.pageCount,
           viewKind,
           pages,

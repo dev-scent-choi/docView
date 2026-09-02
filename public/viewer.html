@@ -20,6 +20,9 @@
         <span id="doc-title" class="doc-title">문서 불러오는 중…</span>
       </div>
       <div id="presence-list" class="presence-list" aria-label="현재 이 문서를 보고 있는 사람"></div>
+      <button id="search-btn" class="icon-btn" title="문서 내 검색 (Ctrl+F)" aria-label="문서 내 검색">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      </button>
     </div>
 
     <div class="toolbar-row toolbar-row-tools">
@@ -30,6 +33,7 @@
         <button id="undo-btn" class="icon-btn" title="실행 취소 (준비 중)" aria-label="실행 취소" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></svg>
         </button>
+        <div class="toolbar-sep" aria-hidden="true"></div>
         <button id="markup-add-btn" class="icon-btn icon-btn-caret" title="강조 표시 (영역을 드래그)" aria-label="강조 표시" aria-pressed="false" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.12 2.12 0 0 0-3-3L5 17v3Z"/><path d="m13 6.5 4 4"/></svg>
           <svg class="icon-btn-caret-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -41,9 +45,11 @@
         <button id="erase-btn" class="icon-btn" title="지우기 (준비 중)" aria-label="지우기" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 21-4.3-4.3c-.94-.94-.94-2.46 0-3.4l9.6-9.6c.94-.94 2.46-.94 3.4 0l5.3 5.3c.94.94.94 2.46 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>
         </button>
+        <div class="toolbar-sep" aria-hidden="true"></div>
         <button id="text-tool-btn" class="icon-btn" title="텍스트 추가 (빈 곳을 클릭)" aria-label="텍스트 추가" aria-pressed="false" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h14"/><path d="M12 6v14"/><path d="M9 20h6"/></svg>
         </button>
+        <div class="toolbar-sep" aria-hidden="true"></div>
         <button id="translate-btn" class="icon-btn" title="번역 (준비 중)" aria-label="번역" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a15.3 15.3 0 0 1 4 9 15.3 15.3 0 0 1-4 9 15.3 15.3 0 0 1-4-9 15.3 15.3 0 0 1 4-9Z"/></svg>
         </button>
@@ -86,17 +92,15 @@
       </div>
 
       <div class="toolbar-group toolbar-tools toolbar-tools-right">
-        <button id="search-btn" class="icon-btn" title="문서 내 검색 (Ctrl+F)" aria-label="문서 내 검색">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-        </button>
         <button id="print-btn" class="icon-btn" title="인쇄" aria-label="인쇄" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V4h12v5"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8" rx="1"/></svg>
         </button>
         <button id="download-btn" class="icon-btn" title="저장" aria-label="저장" disabled>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
         </button>
         <button id="download-as-btn" class="icon-btn" title="다른 이름으로 저장" aria-label="다른 이름으로 저장" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+          <svg class="icon-btn-badge" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20.7 6.3a1 1 0 0 1 0 1.4l-8.3 8.3-3.5 1 1-3.5 8.3-8.3a1 1 0 0 1 1.4 0l1.1 1.1Z"/></svg>
         </button>
       </div>
     </div>
