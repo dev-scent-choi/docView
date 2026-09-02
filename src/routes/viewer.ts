@@ -18,6 +18,7 @@ import { extractPdfText, searchPdfText, type PageText } from '../search.js';
 import { detectNearbyTextStyle } from '../textStyle.js';
 import { docxHasUnsupportedContent } from '../docx/import.js';
 import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup, updateMarkup } from '../markup.js';
+import { touchPresence } from '../presence.js';
 import { flushNow, getCurrentBytes } from '../collab/room.js';
 import type { GridCell, GridHeader } from '../spreadsheet.js';
 import { store } from '../storage.js';
@@ -206,6 +207,17 @@ const tokenQuerySchema = {
   properties: { token: { type: 'string' } },
 } as const;
 
+const presenceBodySchema = {
+  type: 'object',
+  required: ['sessionId'],
+  additionalProperties: false,
+  properties: { sessionId: { type: 'string', minLength: 1, maxLength: 100 } },
+} as const;
+
+interface PresenceBody {
+  readonly sessionId: string;
+}
+
 const pageRequestSchema = {
   params: {
     type: 'object',
@@ -388,6 +400,22 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
           editHasUnsupportedContent,
         },
       };
+    },
+  );
+
+  /**
+   * "지금 이 문서를 보고 있는 사람" 표시용 하트비트 — pages/grid 등 viewKind와 무관하게 viewer.html을
+   * 여는 모든 문서에 동일하게 적용된다(src/presence.ts). 클라이언트가 주기적으로 호출하며, 응답에
+   * 갱신된 현재 접속자 목록을 실어 보내 별도 조회 요청이 필요 없게 한다.
+   */
+  app.post<{ Querystring: TokenQuery; Body: PresenceBody }>(
+    '/api/view/presence',
+    { schema: { querystring: tokenQuerySchema, body: presenceBodySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      const viewers = touchPresence(view.meta.id, request.body.sessionId, view.claims.viewer);
+      return { success: true, data: { viewers } };
     },
   );
 

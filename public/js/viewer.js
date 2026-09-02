@@ -82,6 +82,71 @@ function applyZoom() {
 
 const tokenQuery = `token=${encodeURIComponent(token)}`;
 
+/* ==================== 접속자 표시("지금 이 문서를 보고 있는 사람") ====================
+ * docx/xlsx 동시편집(Yjs awareness)과 색·이니셜 로직을 맞추려고 src/client/presence.ts와 값을
+ * 동일하게 맞춘 순수 로직만 복제했다 — viewer.js는 번들 대상이 아닌 순수 JS라 import할 수 없다. */
+
+const PRESENCE_COLORS = ['#f76707', '#2f9e44', '#1971c2', '#ae3ec9', '#e8590c', '#0c8599'];
+const PRESENCE_HEARTBEAT_MS = 8000;
+const CJK_FIRST_CHAR = /[ㄱ-힝一-鿿]/;
+
+function presenceHashString(value) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function pickPresenceColorForName(name) {
+  return PRESENCE_COLORS[presenceHashString(name) % PRESENCE_COLORS.length];
+}
+
+function initialsOf(name) {
+  const trimmed = name.trim();
+  if (!trimmed) return '?';
+  if (CJK_FIRST_CHAR.test(trimmed[0])) return trimmed[0];
+  const parts = trimmed.split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return trimmed.slice(0, 2).toUpperCase();
+}
+
+const presenceSessionId =
+  (window.crypto && crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
+
+function renderPresenceList(viewers) {
+  const container = document.getElementById('presence-list');
+  if (!container) return;
+  container.replaceChildren(
+    ...viewers.map((name) => {
+      const avatar = document.createElement('span');
+      avatar.className = 'presence-badge';
+      avatar.style.setProperty('--presence-color', pickPresenceColorForName(name));
+      avatar.textContent = initialsOf(name);
+      avatar.title = name;
+      return avatar;
+    }),
+  );
+}
+
+async function sendPresenceHeartbeat() {
+  try {
+    const data = await fetchJsonView(`/api/view/presence?${tokenQuery}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: presenceSessionId }),
+    });
+    renderPresenceList(data.viewers);
+  } catch {
+    /* 접속자 표시 실패는 열람 자체를 막지 않는다 */
+  }
+}
+
+function setupPresence() {
+  sendPresenceHeartbeat();
+  setInterval(sendPresenceHeartbeat, PRESENCE_HEARTBEAT_MS);
+}
+
 /* 진행 중인 페이지·그리드 로딩을 뒤로가기 시 즉시 취소해 네비게이션 지연을 없앤다 */
 let viewAbort = new AbortController();
 
@@ -1578,6 +1643,7 @@ async function init() {
   setupToolbar();
   setupDeterrents();
   setupSearchBar();
+  setupPresence();
 
   if (json.data.viewKind === 'grid') {
     try {
