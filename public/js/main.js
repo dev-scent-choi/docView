@@ -45,14 +45,17 @@ async function deleteDocument(docId) {
   return fetchJson(`/api/documents/${docId}`, { method: 'DELETE' });
 }
 
-/** 업로더 본인 열람용 — 전체 권한(수정 제외) 토큰을 발급해 이동한다.
+/** 업로더 본인 열람용 — 전체 권한 토큰을 발급해 이동한다.
  * xlsx는 서버가 canEdit 여부와 무관하게 항상 editorUrl을 내려주므로(collab/room.ts가 쓰기만
  * 서버 쪽에서 막는다), "바로 보기"도 편집 화면과 완전히 같은 그리드 UI로 열되 수정만 못 하게
  * 한다 — 읽기 전용이라고 다른 화면(viewer.html)을 따로 보여줄 이유가 없다. docx는 editor.ts가
  * 아직 읽기 전용 모드를 지원하지 않아(server가 canEdit:false면 editorUrl 자체를 안 줌) 기존대로
- * viewer.html을 쓴다. */
+ * viewer.html을 쓴다(canEdit는 요청하지 않는다 — 동시편집은 "동시편집 열기" 버튼의 몫이다).
+ * docx/xlsx가 아닌 문서(PDF 등 pages 뷰)는 동시편집 대상이 아니므로 canEdit이 곧 마크업(리뷰
+ * 코멘트) 추가/삭제 권한이 된다 — 업로더 본인이 보는 화면이니 기본으로 켜서 발급한다. */
 async function openViewer(docId, viewer, ext) {
-  const issued = await issueToken(docId, viewer, true, true, true, false);
+  const canEdit = ext !== 'docx' && ext !== 'xlsx';
+  const issued = await issueToken(docId, viewer, true, true, true, canEdit);
   location.href = ext === 'xlsx' && issued.editorUrl ? issued.editorUrl : issued.viewerUrl;
 }
 
@@ -161,7 +164,7 @@ fileInput.addEventListener('change', async () => {
     if (canOpenEditor) {
       await openEditor(ready.id, '업로더');
     } else {
-      await openViewer(ready.id, '업로더');
+      await openViewer(ready.id, '업로더', ready.ext);
     }
   } catch (error) {
     hideProgress();
@@ -196,6 +199,11 @@ async function refreshList() {
 /** docx/xlsx가 동시편집을 지원한다 (src/routes/documents.ts의 EDITABLE_EXTS와 일치) */
 function supportsEdit(doc) {
   return doc.ext === 'docx' || doc.ext === 'xlsx';
+}
+
+/** 동시편집 대상이 아닌 pages 뷰 문서(PDF 등)는 canEdit이 마크업(리뷰 코멘트) 추가/삭제 권한이 된다. */
+function supportsMarkup(doc) {
+  return !supportsEdit(doc) && (doc.viewKind ?? 'pages') === 'pages';
 }
 
 function renderDocItem(doc) {
@@ -296,6 +304,7 @@ function renderDocItem(doc) {
     <label><input type="checkbox" name="canDownload" /> 저장</label>
     <label><input type="checkbox" name="canCopy" /> 복사</label>
     ${supportsEdit(doc) ? '<label><input type="checkbox" name="canEdit" /> 동시편집</label>' : ''}
+    ${supportsMarkup(doc) ? '<label><input type="checkbox" name="canEdit" /> 마크업 편집(코멘트 추가/삭제)</label>' : ''}
     <button type="submit" class="btn btn-primary">열람 링크 발급</button>
   `;
   const result = document.createElement('p');
