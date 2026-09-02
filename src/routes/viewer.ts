@@ -285,12 +285,14 @@ const updateMarkupBodySchema = {
   properties: {
     x: { type: 'number', minimum: 0, maximum: 1 },
     y: { type: 'number', minimum: 0, maximum: 1 },
+    fontSizePt: { type: 'number', minimum: 1, maximum: 400 },
   },
 } as const;
 
 interface UpdateMarkupBody {
   readonly x: number;
   readonly y: number;
+  readonly fontSizePt?: number;
 }
 
 const markupParamsSchema = {

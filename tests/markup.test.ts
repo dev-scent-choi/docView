@@ -330,4 +330,60 @@ describe('markup', () => {
     });
     await expect(updateMarkup(meta.id, item.id, { x: 0.9, y: 0.1 })).rejects.toThrow(MarkupValidationError);
   });
+
+  test('updateMarkup changes fontSizePt on a text item and keeps its other fields', async () => {
+    const { addMarkup, updateMarkup } = await freshMarkupModule();
+    const meta = makeMeta();
+    const item = await addMarkup(meta.id, meta, {
+      kind: 'text',
+      page: 1,
+      x: 0.1,
+      y: 0.1,
+      fontSizePt: 12,
+      bold: true,
+      fontFamily: 'serif',
+      text: 'x',
+      author: 'a',
+    });
+    const updated = await updateMarkup(meta.id, item.id, { x: 0.1, y: 0.1, fontSizePt: 18 });
+    if (updated?.kind !== 'text') throw new Error('expected a text markup item');
+    expect(updated.fontSizePt).toBe(18);
+    expect(updated.bold).toBe(true);
+    expect(updated.fontFamily).toBe('serif');
+  });
+
+  test('updateMarkup rejects an out-of-range fontSizePt', async () => {
+    const { addMarkup, updateMarkup, MarkupValidationError } = await freshMarkupModule();
+    const meta = makeMeta();
+    const item = await addMarkup(meta.id, meta, {
+      kind: 'text',
+      page: 1,
+      x: 0.1,
+      y: 0.1,
+      fontSizePt: 12,
+      bold: false,
+      text: 'x',
+      author: 'a',
+    });
+    await expect(updateMarkup(meta.id, item.id, { x: 0.1, y: 0.1, fontSizePt: 0 })).rejects.toThrow(
+      MarkupValidationError,
+    );
+  });
+
+  test('updateMarkup rejects fontSizePt on a comment item', async () => {
+    const { addMarkup, updateMarkup, MarkupValidationError } = await freshMarkupModule();
+    const meta = makeMeta();
+    const item = await addMarkup(meta.id, meta, {
+      page: 1,
+      x: 0.1,
+      y: 0.1,
+      w: 0.2,
+      h: 0.1,
+      text: 'x',
+      author: 'a',
+    });
+    await expect(updateMarkup(meta.id, item.id, { x: 0.1, y: 0.1, fontSizePt: 18 })).rejects.toThrow(
+      MarkupValidationError,
+    );
+  });
 });

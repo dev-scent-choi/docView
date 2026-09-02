@@ -62,6 +62,8 @@ export type AddMarkupInput = AddCommentInput | AddTextInput;
 export interface UpdateMarkupInput {
   readonly x: number;
   readonly y: number;
+  /** text 항목에만 적용 — 크기 조절 버튼/Ctrl+휠로 바뀐다. comment 항목에 주면 거부한다. */
+  readonly fontSizePt?: number;
 }
 
 export class MarkupValidationError extends Error {}
@@ -93,22 +95,26 @@ function assertValidText(text: string): void {
   }
 }
 
+function assertValidFontSize(fontSizePt: number): void {
+  if (
+    typeof fontSizePt !== 'number' ||
+    !Number.isFinite(fontSizePt) ||
+    fontSizePt < MIN_FONT_SIZE_PT ||
+    fontSizePt > MAX_FONT_SIZE_PT
+  ) {
+    throw new MarkupValidationError(
+      `잘못된 글자 크기입니다: ${fontSizePt} (${MIN_FONT_SIZE_PT}~${MAX_FONT_SIZE_PT}pt)`,
+    );
+  }
+}
+
 function assertValidInput(input: AddMarkupInput, pageCount: number): void {
   assertValidPage(input.page, pageCount);
   assertValidCoordinate('x', input.x);
   assertValidCoordinate('y', input.y);
 
   if (input.kind === 'text') {
-    if (
-      typeof input.fontSizePt !== 'number' ||
-      !Number.isFinite(input.fontSizePt) ||
-      input.fontSizePt < MIN_FONT_SIZE_PT ||
-      input.fontSizePt > MAX_FONT_SIZE_PT
-    ) {
-      throw new MarkupValidationError(
-        `잘못된 글자 크기입니다: ${input.fontSizePt} (${MIN_FONT_SIZE_PT}~${MAX_FONT_SIZE_PT}pt)`,
-      );
-    }
+    assertValidFontSize(input.fontSizePt);
     if (input.fontFamily !== undefined && !FONT_FAMILIES.includes(input.fontFamily)) {
       throw new MarkupValidationError(`잘못된 글꼴 계열입니다: ${input.fontFamily}`);
     }
@@ -217,7 +223,7 @@ export async function addMarkup(
   });
 }
 
-/** 드래그로 위치만 옮긴다 — 크기/글자/폰트 등 다른 속성은 바뀌지 않는다. */
+/** 드래그로 위치를 옮기거나(모든 kind), text 항목이면 글자 크기도 함께 바꾼다. */
 export async function updateMarkup(
   docId: string,
   markupId: string,
@@ -225,6 +231,9 @@ export async function updateMarkup(
 ): Promise<MarkupItem | null> {
   assertValidCoordinate('x', patch.x);
   assertValidCoordinate('y', patch.y);
+  if (patch.fontSizePt !== undefined) {
+    assertValidFontSize(patch.fontSizePt);
+  }
   return withDocLock(docId, async () => {
     const items = await readAll(docId);
     const idx = items.findIndex((item) => item.id === markupId);
@@ -235,7 +244,13 @@ export async function updateMarkup(
     if (patch.x + w > 1 + BOUNDS_EPSILON || patch.y + h > 1 + BOUNDS_EPSILON) {
       throw new MarkupValidationError('마크업 영역이 페이지를 벗어납니다.');
     }
-    const updated: MarkupItem = { ...existing, x: patch.x, y: patch.y };
+    if (patch.fontSizePt !== undefined && existing.kind !== 'text') {
+      throw new MarkupValidationError('이 마크업은 글자 크기를 지원하지 않습니다.');
+    }
+    const updated: MarkupItem =
+      existing.kind === 'text' && patch.fontSizePt !== undefined
+        ? { ...existing, x: patch.x, y: patch.y, fontSizePt: patch.fontSizePt }
+        : { ...existing, x: patch.x, y: patch.y };
     const next = [...items];
     next[idx] = updated;
     await writeAll(docId, next);

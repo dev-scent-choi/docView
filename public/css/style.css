@@ -744,6 +744,11 @@ h2 {
   position: absolute;
   inset: 0;
   z-index: 6;
+  /* 레이어 자체는 마우스 이벤트를 그냥 통과시킨다 — 이게 없으면 마크업이 하나라도 있는 페이지에서는
+     페이지 전체(inset:0)가 클릭·휠 이벤트를 가로채, 그 위에 겹치는 다른 요소(텍스트 삽입 입력창 등)가
+     실제 브라우저에서 아예 반응하지 않게 된다(개별 마크업 항목은 자기 pointer-events:auto로 계속
+     클릭 가능). Playwright의 실제 히트테스트로 재현·확인. */
+  pointer-events: none;
 }
 
 .markup-rect {
@@ -867,27 +872,44 @@ h2 {
 
 .text-overlay-item.dragging { cursor: grabbing; }
 
-.text-overlay-delete {
+.text-overlay-controls {
   display: none;
   position: absolute;
-  top: -22px;
-  right: -8px;
+  top: -26px;
+  right: -4px;
+  gap: 3px;
+  padding: 2px;
+  border-radius: 999px;
+  background: #1c1b1a;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.text-overlay-item:hover .text-overlay-controls { display: flex; }
+
+.text-overlay-resize,
+.text-overlay-delete {
   width: 18px;
   height: 18px;
   border: none;
   border-radius: 50%;
-  background: #e8590c;
   color: #fff;
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
   padding: 0;
 }
-.text-overlay-item:hover .text-overlay-delete { display: block; }
 
-.text-insert-input {
+.text-overlay-resize { background: #3a3a3a; }
+.text-overlay-resize:hover { background: #4a4a4a; }
+.text-overlay-delete { background: #e8590c; }
+.text-overlay-delete:hover { background: #d4500b; }
+
+.text-insert-wrapper {
   position: absolute;
   transform: translateY(-100%);
+}
+
+.text-insert-input {
+  display: block;
   min-width: 60px;
   resize: none;
   overflow: hidden;
@@ -899,6 +921,12 @@ h2 {
   line-height: 1.15;
   padding: 0 2px;
   outline: none;
+}
+
+.text-insert-controls {
+  display: flex;
+  top: -26px;
+  right: -4px;
 }
 
 /* ---------- 그리드 뷰 (스프레드시트) ---------- */

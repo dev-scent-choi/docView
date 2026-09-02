@@ -959,6 +959,37 @@ function pageHeightPtFor(pageIdx) {
   return dims ? dims.h : 792;
 }
 
+const FONT_SIZE_MIN_PT = 4;
+const FONT_SIZE_MAX_PT = 200;
+const FONT_SIZE_STEP_PT = 1;
+
+function clampFontSizePt(pt) {
+  return Math.min(FONT_SIZE_MAX_PT, Math.max(FONT_SIZE_MIN_PT, Math.round(pt)));
+}
+
+function applyFontSizeToEl(el, frame, page, fontSizePt) {
+  el.style.fontSize = `${fontSizePt * (frame.clientHeight / pageHeightPtFor(page - 1))}px`;
+}
+
+async function persistFontSize(item, fontSizePt) {
+  try {
+    const updated = await fetchJsonView(`/api/view/markup/${item.id}?${tokenQuery}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ x: item.x, y: item.y, fontSizePt }),
+    });
+    item.fontSizePt = updated.fontSizePt;
+  } catch (error) {
+    alert(error.message || '글자 크기 변경에 실패했습니다.');
+  }
+}
+
+/** 클릭/휠 조작마다 매번 저장 요청을 보내지 않도록 항목별로 살짝 늦춰서 한 번만 저장한다. */
+function scheduleFontSizePersist(el, item, fontSizePt) {
+  clearTimeout(el._resizeTimer);
+  el._resizeTimer = setTimeout(() => persistFontSize(item, fontSizePt), 350);
+}
+
 let textDragState = null;
 
 function startTextDrag(event, item, el, frame) {
@@ -1023,6 +1054,36 @@ function renderTextOverlayItem(frame, layer, item) {
   el.style.fontFamily = cssFontFamilyFor(item.fontFamily);
 
   if (permissions.canEdit) {
+    const controls = document.createElement('div');
+    controls.className = 'text-overlay-controls';
+
+    const resizeBy = (delta) => {
+      const next = clampFontSizePt(item.fontSizePt + delta);
+      item.fontSizePt = next;
+      applyFontSizeToEl(el, frame, item.page, next);
+      scheduleFontSizePersist(el, item, next);
+    };
+
+    const shrink = document.createElement('button');
+    shrink.type = 'button';
+    shrink.className = 'text-overlay-resize';
+    shrink.textContent = '−';
+    shrink.title = '글자 작게';
+    shrink.addEventListener('click', (event) => {
+      event.stopPropagation();
+      resizeBy(-FONT_SIZE_STEP_PT);
+    });
+
+    const grow = document.createElement('button');
+    grow.type = 'button';
+    grow.className = 'text-overlay-resize';
+    grow.textContent = '+';
+    grow.title = '글자 크게';
+    grow.addEventListener('click', (event) => {
+      event.stopPropagation();
+      resizeBy(FONT_SIZE_STEP_PT);
+    });
+
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'text-overlay-delete';
@@ -1032,8 +1093,20 @@ function renderTextOverlayItem(frame, layer, item) {
       event.stopPropagation();
       deleteMarkupItem(item, el);
     });
-    el.append(del);
+
+    controls.append(shrink, grow, del);
+    el.append(controls);
     el.addEventListener('mousedown', (event) => startTextDrag(event, item, el, frame));
+    el.addEventListener(
+      'wheel',
+      (event) => {
+        if (!event.ctrlKey) return;
+        event.preventDefault();
+        event.stopPropagation();
+        resizeBy(event.deltaY < 0 ? FONT_SIZE_STEP_PT : -FONT_SIZE_STEP_PT);
+      },
+      { passive: false },
+    );
   }
 
   layer.append(el);
@@ -1262,9 +1335,17 @@ function setTextToolActive(on) {
 
 function cancelTextInsert() {
   if (textTool.pending) {
-    textTool.pending.box.remove();
+    textTool.pending.wrapper.remove();
     textTool.pending = null;
   }
+}
+
+function adjustPendingFontSize(delta) {
+  const pending = textTool.pending;
+  if (!pending) return;
+  pending.style.fontSizePt = clampFontSizePt(pending.style.fontSizePt + delta);
+  applyFontSizeToEl(pending.box, pending.frame, pending.page, pending.style.fontSizePt);
+  pending.box.focus();
 }
 
 async function commitTextInsert() {
@@ -1272,7 +1353,7 @@ async function commitTextInsert() {
   if (!pending) return;
   textTool.pending = null;
   const text = pending.box.value.trim();
-  pending.box.remove();
+  pending.wrapper.remove();
   if (!text) return;
   try {
     const item = await fetchJsonView(`/api/view/markup?${tokenQuery}`, {
@@ -1299,17 +1380,40 @@ async function commitTextInsert() {
 
 function openTextInsertBox(frame, page, xRatio, style) {
   cancelTextInsert();
+  const wrapper = document.createElement('div');
+  wrapper.className = 'text-insert-wrapper';
+  wrapper.style.left = `${xRatio * 100}%`;
+  wrapper.style.top = `${style.baselineY * 100}%`;
+
   const box = document.createElement('textarea');
   box.className = 'text-insert-input';
   box.rows = 1;
   box.maxLength = 2000;
-  box.style.left = `${xRatio * 100}%`;
-  box.style.top = `${style.baselineY * 100}%`;
-  box.style.fontSize = `${style.fontSizePt * (frame.clientHeight / pageHeightPtFor(page - 1))}px`;
   box.style.fontWeight = style.bold ? '700' : '400';
   box.style.fontFamily = cssFontFamilyFor(style.fontFamily);
   box.style.width = '2ch';
-  frame.append(box);
+  applyFontSizeToEl(box, frame, page, style.fontSizePt);
+
+  const controls = document.createElement('div');
+  controls.className = 'text-overlay-controls text-insert-controls';
+  const shrink = document.createElement('button');
+  shrink.type = 'button';
+  shrink.className = 'text-overlay-resize';
+  shrink.textContent = '−';
+  shrink.title = '글자 작게';
+  shrink.addEventListener('mousedown', (event) => event.preventDefault());
+  shrink.addEventListener('click', () => adjustPendingFontSize(-FONT_SIZE_STEP_PT));
+  const grow = document.createElement('button');
+  grow.type = 'button';
+  grow.className = 'text-overlay-resize';
+  grow.textContent = '+';
+  grow.title = '글자 크게';
+  grow.addEventListener('mousedown', (event) => event.preventDefault());
+  grow.addEventListener('click', () => adjustPendingFontSize(FONT_SIZE_STEP_PT));
+  controls.append(shrink, grow);
+
+  wrapper.append(box, controls);
+  frame.append(wrapper);
   box.focus();
 
   box.addEventListener('input', () => {
@@ -1325,8 +1429,17 @@ function openTextInsertBox(frame, page, xRatio, style) {
     }
   });
   box.addEventListener('blur', () => commitTextInsert());
+  box.addEventListener(
+    'wheel',
+    (event) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      adjustPendingFontSize(event.deltaY < 0 ? FONT_SIZE_STEP_PT : -FONT_SIZE_STEP_PT);
+    },
+    { passive: false },
+  );
 
-  textTool.pending = { box, frame, page, xRatio, style };
+  textTool.pending = { wrapper, box, frame, page, xRatio, style };
 }
 
 function setupTextTool() {
@@ -1337,7 +1450,7 @@ function setupTextTool() {
 
   pagesContainer.addEventListener('click', async (event) => {
     if (!textTool.active) return;
-    if (event.target.closest('.text-overlay-item') || event.target.closest('.text-insert-input')) return;
+    if (event.target.closest('.text-overlay-item') || event.target.closest('.text-insert-wrapper')) return;
     const frame = event.target.closest('.page-frame');
     if (!frame) return;
     if (textTool.pending) {
