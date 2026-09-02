@@ -2391,6 +2391,38 @@ async function main(): Promise<void> {
     });
     jumpToMatch(0);
   }
+  // ---------- 찾기/바꾸기 창 드래그 이동(엑셀처럼 제목줄을 잡고 옮길 수 있게) ----------
+  const searchTitlebar = searchBar.querySelector('.search-titlebar') as HTMLElement | null;
+  if (searchTitlebar) {
+    let dragStart: { pointerX: number; pointerY: number; left: number; top: number } | null = null;
+
+    searchTitlebar.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      const rect = searchBar.getBoundingClientRect();
+      // 중앙 정렬(left:50%+transform)로 열려 있던 상태라면, 드래그 시작 시점의 실제 화면 위치를
+      // 고정된 left/top 픽셀값으로 바꿔둔다 — 그래야 이후 이동량을 그대로 더해도 어긋나지 않는다.
+      searchBar.style.left = `${rect.left}px`;
+      searchBar.style.top = `${rect.top}px`;
+      searchBar.style.transform = 'none';
+      dragStart = { pointerX: event.clientX, pointerY: event.clientY, left: rect.left, top: rect.top };
+    });
+
+    document.addEventListener('mousemove', (event) => {
+      if (!dragStart) return;
+      const rect = searchBar.getBoundingClientRect();
+      const maxLeft = Math.max(window.innerWidth - rect.width, 0);
+      const maxTop = Math.max(window.innerHeight - rect.height, 0);
+      const nextLeft = dragStart.left + (event.clientX - dragStart.pointerX);
+      const nextTop = dragStart.top + (event.clientY - dragStart.pointerY);
+      searchBar.style.left = `${Math.min(Math.max(nextLeft, 0), maxLeft)}px`;
+      searchBar.style.top = `${Math.min(Math.max(nextTop, 0), maxTop)}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+      dragStart = null;
+    });
+  }
+
   function openSearch(withReplace = false): void {
     searchBar.hidden = false;
     const range = rangeBounds();
