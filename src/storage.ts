@@ -7,8 +7,8 @@ import type { DocumentMeta } from './types.js';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const EXT_PATTERN = /^[a-z0-9]{1,10}$/;
 
-/** 변환 산출물 종류: pdf(페이지 뷰·출력용) / grid(스프레드시트 그리드 뷰 JSON) */
-export type DerivedKind = 'pdf' | 'grid';
+/** 변환 산출물 종류: pdf(페이지 뷰·출력용) / grid(스프레드시트 그리드 뷰 JSON) / markup(리뷰 코멘트 JSON) */
+export type DerivedKind = 'pdf' | 'grid' | 'markup';
 
 /**
  * 문서 저장 계층 추상화. disk(기본)와 memory 두 구현을 DOCVIEW_STORAGE로 선택한다.
@@ -58,7 +58,8 @@ export class DiskStore implements DocumentStore {
 
   private derivedPath(id: string, kind: DerivedKind): string {
     assertValidId(id);
-    return path.join(config.convertedDir, kind === 'pdf' ? `${id}.pdf` : `${id}.grid.json`);
+    const suffix = kind === 'pdf' ? 'pdf' : kind === 'grid' ? 'grid.json' : 'markup.json';
+    return path.join(config.convertedDir, `${id}.${suffix}`);
   }
 
   private metaPath(id: string): string {
@@ -128,6 +129,7 @@ export class DiskStore implements DocumentStore {
       fs.rm(this.originalPath(id, meta.ext), { force: true }),
       fs.rm(this.derivedPath(id, 'pdf'), { force: true }),
       fs.rm(this.derivedPath(id, 'grid'), { force: true }),
+      fs.rm(this.derivedPath(id, 'markup'), { force: true }),
       fs.rm(this.metaPath(id), { force: true }),
     ]);
   }
@@ -165,6 +167,7 @@ export class MemoryStore implements DocumentStore {
       this.originals.delete(oldest.id);
       this.derived.delete(`${oldest.id}#pdf`);
       this.derived.delete(`${oldest.id}#grid`);
+      this.derived.delete(`${oldest.id}#markup`);
       this.metas.delete(oldest.id);
       console.warn(`메모리 예산 초과로 오래된 문서를 제거했습니다: ${oldest.name} (${oldest.id})`);
     }
@@ -216,6 +219,7 @@ export class MemoryStore implements DocumentStore {
     this.originals.delete(id);
     this.derived.delete(`${id}#pdf`);
     this.derived.delete(`${id}#grid`);
+    this.derived.delete(`${id}#markup`);
     this.metas.delete(id);
   }
 }
