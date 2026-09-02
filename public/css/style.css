@@ -284,17 +284,18 @@ h2 {
 /* ---------- 뷰어: 브라우저 기본 PDF 뷰어(Edge/Chrome) 톤 — 옅은 회색 캔버스 위에 흰 종이 ---------- */
 
 .viewer-body {
-  --v-text: #202124;
-  --v-text-dim: #5f6368;
+  --v-text: #1b1b1b;
+  --v-text-dim: #5c5c5c;
   --v-glass: #ffffff;
-  --v-glass-line: #dadce0;
-  --v-hover: #f1f3f4;
-  --v-accent: #1f4d47;
+  --v-glass-line: #e0e0e0;
+  --v-hover: #f0f0f0;
+  /* Windows/Fluent 시스템 액센트 블루 */
+  --v-accent: #0078d4;
   --v-accent-ink: #ffffff;
-  --v-accent-shadow: rgba(31, 77, 71, 0.22);
+  --v-accent-shadow: rgba(0, 120, 212, 0.25);
   --v-presence-border: #ffffff;
-  --v-scrollbar-thumb: rgba(32, 33, 36, 0.18);
-  --v-scrollbar-thumb-hover: rgba(32, 33, 36, 0.32);
+  --v-scrollbar-thumb: rgba(27, 27, 27, 0.18);
+  --v-scrollbar-thumb-hover: rgba(27, 27, 27, 0.32);
   min-height: 100vh;
   color: var(--v-text);
   font-family: var(--font-sans);
@@ -333,22 +334,21 @@ h2 {
 
 .viewer-toolbar {
   position: fixed;
-  top: 0.9rem;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 0;
+  left: 0;
+  right: 0;
   z-index: 10;
-  width: min(1160px, calc(100% - 1.5rem));
+  width: 100%;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.5rem 0.65rem;
-  border-radius: 16px;
+  padding: 0.5rem 0.85rem;
+  border-radius: 0;
   background: var(--v-glass);
-  border: 1px solid var(--v-glass-line);
-  backdrop-filter: blur(20px) saturate(1.5);
-  -webkit-backdrop-filter: blur(20px) saturate(1.5);
-  box-shadow: 0 4px 16px rgba(32, 33, 36, 0.16), 0 1px 3px rgba(32, 33, 36, 0.1);
+  border: none;
+  border-bottom: 1px solid var(--v-glass-line);
+  box-shadow: 0 1px 2px rgba(27, 27, 27, 0.06);
 }
 
 .toolbar-group { display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex-wrap: wrap; row-gap: 0.4rem; }
@@ -470,7 +470,7 @@ h2 {
   --page-width: 100%;
   max-width: 1120px;
   margin: 0 auto;
-  padding: 5.2rem 1rem 5rem;
+  padding: 3.8rem 1rem 5rem;
   /* 100% 초과 확대 시 페이지가 컨테이너를 넘치므로 가로 스크롤을 허용한다 */
   overflow-x: auto;
 }
@@ -557,7 +557,7 @@ h2 {
 
 .search-bar {
   position: fixed;
-  top: 4.4rem;
+  top: 3.4rem;
   right: 1.2rem;
   z-index: 20;
   display: flex;
@@ -665,7 +665,7 @@ h2 {
 
 .measure-bar {
   position: fixed;
-  top: 4.4rem;
+  top: 3.4rem;
   left: 50%;
   transform: translateX(-50%);
   z-index: 20;
