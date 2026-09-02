@@ -439,6 +439,142 @@ function setupToolbar() {
   }
 }
 
+/* ==================== 도구모음 반응형 "..." 메뉴 ====================
+   왼쪽 도구 묶음(콘텐츠~마크업 포함)이 창 폭보다 넓어지면, 아이콘 버튼은 전부 flex:none이라
+   flexbox가 줄일 수 있는 유일한 대상이 구분선(.toolbar-sep)뿐이었다 — 그 결과 구분선이 폭 0으로
+   눌려 아예 안 보이고, 그러고도 자리가 모자라면 옆 zone(가운데 확대/축소 등)과 아이콘이 겹쳐
+   보였다. 대신 우선순위가 낮은 도구부터 실제 버튼 엘리먼트를 이 메뉴 안으로 옮긴다(엘리먼트를
+   그대로 옮기므로 이미 걸려 있던 클릭 리스너가 그대로 살아있다 — 복제/재구현 불필요). */
+const TOOLBAR_OVERFLOW_PRIORITY = [
+  'translate-btn',
+  'draw-btn',
+  'erase-btn',
+  'contents-btn',
+  'undo-btn',
+  'invert-btn',
+  'measure-btn',
+  'markup-toggle-btn',
+  'markup-include-wrap',
+  'text-tool-btn',
+  'markup-add-btn',
+];
+
+let toolbarOriginalOrder = null;
+
+/** 구분선은 "양옆에 보이는 도구가 하나라도 있을 때만" 보인다 — 어떤 조합으로 도구가 접혀도
+ * 맨 앞/맨 뒤나 두 구분선이 나란히 남는 경우가 생기지 않는다. */
+function normalizeToolbarDividers(zone, moreWrap) {
+  let sawContent = false;
+  let pendingSep = null;
+  for (const el of zone.children) {
+    if (el.classList.contains('toolbar-sep')) {
+      el.hidden = true;
+      pendingSep = el;
+      continue;
+    }
+    if (el === moreWrap || el.hidden) continue;
+    if (sawContent && pendingSep) pendingSep.hidden = false;
+    pendingSep = null;
+    sawContent = true;
+  }
+}
+
+function rebuildToolbarZone(zone, moreWrap, moreMenu, overflowIds) {
+  for (const el of toolbarOriginalOrder) {
+    if (overflowIds.has(el.id)) {
+      moreMenu.appendChild(el);
+    } else {
+      zone.insertBefore(el, moreWrap);
+    }
+  }
+  normalizeToolbarDividers(zone, moreWrap);
+}
+
+function closeToolbarMoreMenu() {
+  const moreMenu = document.getElementById('toolbar-more-menu');
+  const moreBtn = document.getElementById('toolbar-more-btn');
+  if (!moreMenu || moreMenu.hidden) return;
+  moreMenu.hidden = true;
+  moreBtn.setAttribute('aria-expanded', 'false');
+}
+
+function updateToolbarOverflow() {
+  const zone = document.getElementById('toolbar-tools-left');
+  const moreWrap = document.getElementById('toolbar-more-wrap');
+  const moreBtn = document.getElementById('toolbar-more-btn');
+  const moreMenu = document.getElementById('toolbar-more-menu');
+  if (!zone || !moreWrap) return;
+
+  if (!toolbarOriginalOrder) {
+    toolbarOriginalOrder = Array.from(zone.children).filter((el) => el !== moreWrap);
+  }
+
+  const overflowIds = new Set();
+  rebuildToolbarZone(zone, moreWrap, moreMenu, overflowIds);
+  for (const id of TOOLBAR_OVERFLOW_PRIORITY) {
+    if (zone.scrollWidth <= zone.clientWidth + 1) break;
+    if (!document.getElementById(id)) continue;
+    overflowIds.add(id);
+    rebuildToolbarZone(zone, moreWrap, moreMenu, overflowIds);
+  }
+
+  moreBtn.hidden = overflowIds.size === 0;
+  if (overflowIds.size === 0) closeToolbarMoreMenu();
+}
+
+function setupToolbarOverflow() {
+  const moreBtn = document.getElementById('toolbar-more-btn');
+  const moreMenu = document.getElementById('toolbar-more-menu');
+  if (!moreBtn || !moreMenu) return;
+
+  moreBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const willOpen = moreMenu.hidden;
+    moreMenu.hidden = !willOpen;
+    moreBtn.setAttribute('aria-expanded', String(willOpen));
+  });
+  // 메뉴 안의 도구를 고르면(체크박스 포함) 바로 닫는다 — 고르고 나면 지도 위 클릭 등 다음
+  // 동작으로 이어지는 도구가 많아, 메뉴가 계속 떠 있으면 그 클릭을 가로챈다.
+  moreMenu.addEventListener('click', (event) => {
+    if (event.target.closest('button, label')) setTimeout(closeToolbarMoreMenu, 0);
+  });
+  document.addEventListener('click', (event) => {
+    if (moreMenu.hidden) return;
+    if (event.target === moreBtn || moreBtn.contains(event.target) || moreMenu.contains(event.target)) return;
+    closeToolbarMoreMenu();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeToolbarMoreMenu();
+  });
+
+  // 창 resize뿐 아니라, 왼쪽 zone에 배분되는 폭 자체가 바뀌는 모든 경우를 잡아야 해서 window
+  // resize 이벤트만으로는 부족하다 — ResizeObserver는 이 zone의 실제 렌더 "박스" 폭이 바뀔 때마다
+  // 다시 불러 준다.
+  const zone = document.getElementById('toolbar-tools-left');
+  let pending = false;
+  const scheduleUpdate = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      updateToolbarOverflow();
+    });
+  };
+  if (zone && window.ResizeObserver) {
+    new ResizeObserver(scheduleUpdate).observe(zone);
+  } else {
+    updateToolbarOverflow();
+    window.addEventListener('resize', scheduleUpdate);
+  }
+  // "박스" 자체 폭(clientWidth)은 안 바뀌어도, 그 안의 글자(예: "마크업 포함" 라벨)가 나중에
+  // 실제 웹폰트(Outfit)로 교체되며 폭만 넓어지는 경우가 있다 — ResizeObserver는 zone의 박스
+  // 크기만 보므로 이건 못 잡는다(실제로 이 타이밍차 때문에 도구 하나가 덜 접힌 채로 굳어버리는
+  // 문제가 있었다). 폰트 로딩이 끝나면 한 번 더 확실히 재계산한다.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(scheduleUpdate).catch(() => {});
+  }
+}
+
 /** 페이지 번호 칸에 직접 입력해서 해당 페이지로 이동한다(Edge PDF 뷰어와 동일한 동작). */
 function setupPageJump() {
   if (!pageJumpInput) return;
@@ -1781,6 +1917,7 @@ async function init() {
   setupDrawingTools();
   setupMarkupTool();
   setupTextTool();
+  setupToolbarOverflow();
   loadMarkup();
 }
 

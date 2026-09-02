@@ -26,7 +26,7 @@
     </div>
 
     <div class="toolbar-row toolbar-row-tools">
-      <div class="toolbar-group toolbar-tools toolbar-tools-left">
+      <div id="toolbar-tools-left" class="toolbar-group toolbar-tools toolbar-tools-left">
         <button id="contents-btn" class="icon-btn" title="콘텐츠 (준비 중)" aria-label="콘텐츠" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
         </button>
@@ -66,6 +66,12 @@
         <label id="markup-include-wrap" class="markup-include-toggle" hidden>
           <input type="checkbox" id="markup-include-checkbox" /> 마크업 포함
         </label>
+        <div id="toolbar-more-wrap" class="toolbar-more-wrap">
+          <button id="toolbar-more-btn" class="icon-btn" title="더보기" aria-label="더보기 도구" aria-haspopup="true" aria-expanded="false" hidden>
+            <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+          </button>
+          <div id="toolbar-more-menu" class="toolbar-more-menu" role="menu" hidden></div>
+        </div>
       </div>
 
       <div class="toolbar-group toolbar-tools toolbar-tools-center">
@@ -100,7 +106,10 @@
         </button>
         <button id="download-as-btn" class="icon-btn" title="다른 이름으로 저장" aria-label="다른 이름으로 저장" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-          <svg class="icon-btn-badge" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20.7 6.3a1 1 0 0 1 0 1.4l-8.3 8.3-3.5 1 1-3.5 8.3-8.3a1 1 0 0 1 1.4 0l1.1 1.1Z"/></svg>
+          <svg class="icon-btn-badge" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="8" cy="8" r="7" fill="var(--v-glass)" stroke="var(--v-glass-line)" stroke-width="1"/>
+            <path d="M4.8 11.2 5.2 9l4.4-4.4 1.8 1.8L7 10.8l-2.2.4Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
         </button>
       </div>
     </div>
