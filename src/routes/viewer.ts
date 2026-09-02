@@ -6,10 +6,17 @@ import { recordAudit } from '../audit.js';
 import { SizedLruCache } from '../cache.js';
 import { config } from '../config.js';
 import { findConverter } from '../converters/index.js';
-import { PageOutOfRangeError, buildPrintPdf, getPageDimensions, renderPage } from '../rendering.js';
+import {
+  PageOutOfRangeError,
+  buildPrintPdf,
+  burnMarkupIntoPdf,
+  getPageDimensions,
+  renderPage,
+} from '../rendering.js';
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { extractPdfText, searchPdfText, type PageText } from '../search.js';
 import { docxHasUnsupportedContent } from '../docx/import.js';
+import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup } from '../markup.js';
 import { flushNow, getCurrentBytes } from '../collab/room.js';
 import type { GridCell, GridHeader } from '../spreadsheet.js';
 import { store } from '../storage.js';
@@ -227,6 +234,44 @@ interface TokenQuery {
   readonly token?: string;
 }
 
+const tokenWithMarkupQuerySchema = {
+  type: 'object',
+  properties: { token: { type: 'string' }, includeMarkup: { type: 'string' } },
+} as const;
+
+interface TokenWithMarkupQuery extends TokenQuery {
+  readonly includeMarkup?: string;
+}
+
+const addMarkupBodySchema = {
+  type: 'object',
+  required: ['page', 'x', 'y', 'w', 'h', 'text'],
+  additionalProperties: false,
+  properties: {
+    page: { type: 'integer', minimum: 1 },
+    x: { type: 'number', minimum: 0, maximum: 1 },
+    y: { type: 'number', minimum: 0, maximum: 1 },
+    w: { type: 'number', minimum: 0, maximum: 1 },
+    h: { type: 'number', minimum: 0, maximum: 1 },
+    text: { type: 'string', minLength: 1, maxLength: 2000 },
+  },
+} as const;
+
+interface AddMarkupBody {
+  readonly page: number;
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+  readonly text: string;
+}
+
+const markupParamsSchema = {
+  type: 'object',
+  required: ['markupId'],
+  properties: { markupId: { type: 'string' } },
+} as const;
+
 interface PageQuery extends TokenQuery {
   readonly scale: number;
 }
@@ -397,8 +442,73 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.get<{ Querystring: TokenQuery }>(
-    '/api/view/print',
+    '/api/view/markup',
     { schema: { querystring: tokenQuerySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      const items = await listMarkup(view.meta.id);
+      return { success: true, data: items };
+    },
+  );
+
+  app.post<{ Querystring: TokenQuery; Body: AddMarkupBody }>(
+    '/api/view/markup',
+    { schema: { querystring: tokenQuerySchema, body: addMarkupBodySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if (!view.claims.perms.canEdit) {
+        await recordAudit({ type: 'markup_add_denied', docId: view.meta.id, viewer: view.claims.viewer });
+        return reply.code(403).send({ success: false, error: '마크업 추가 권한이 없습니다.' });
+      }
+      if ((view.meta.viewKind ?? 'pages') !== 'pages') {
+        return reply.code(400).send({ success: false, error: '이 문서 형식은 마크업을 지원하지 않습니다.' });
+      }
+      try {
+        const item = await addMarkup(view.meta.id, view.meta, {
+          ...request.body,
+          author: view.claims.viewer,
+        });
+        await recordAudit({ type: 'markup_added', docId: view.meta.id, viewer: view.claims.viewer, detail: item.id });
+        return await reply.code(201).send({ success: true, data: item });
+      } catch (error) {
+        if (error instanceof MarkupValidationError) {
+          return reply.code(400).send({ success: false, error: error.message });
+        }
+        request.log.error(error, 'markup add failed');
+        return reply.code(500).send({ success: false, error: '마크업 추가에 실패했습니다.' });
+      }
+    },
+  );
+
+  app.delete<{ Querystring: TokenQuery; Params: { markupId: string } }>(
+    '/api/view/markup/:markupId',
+    { schema: { querystring: tokenQuerySchema, params: markupParamsSchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if (!view.claims.perms.canEdit) {
+        await recordAudit({ type: 'markup_delete_denied', docId: view.meta.id, viewer: view.claims.viewer });
+        return reply.code(403).send({ success: false, error: '마크업 삭제 권한이 없습니다.' });
+      }
+      const deleted = await deleteMarkup(view.meta.id, request.params.markupId);
+      if (!deleted) {
+        return reply.code(404).send({ success: false, error: '마크업을 찾을 수 없습니다.' });
+      }
+      await recordAudit({
+        type: 'markup_deleted',
+        docId: view.meta.id,
+        viewer: view.claims.viewer,
+        detail: request.params.markupId,
+      });
+      return { success: true, data: { id: request.params.markupId } };
+    },
+  );
+
+  app.get<{ Querystring: TokenWithMarkupQuery }>(
+    '/api/view/print',
+    { schema: { querystring: tokenWithMarkupQuerySchema } },
     async (request, reply) => {
       const view = await resolveView(request.query.token, reply);
       if (!view) return reply;
@@ -413,19 +523,26 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
         request.log.error(error, 'print pdf generation failed');
         return reply.code(500).send({ success: false, error: '출력용 PDF 생성에 실패했습니다.' });
       }
+      let pdfBytes: Buffer | Uint8Array = pdfSource;
+      if (request.query.includeMarkup === '1') {
+        const items = await listMarkup(view.meta.id);
+        if (items.length > 0) {
+          pdfBytes = await burnMarkupIntoPdf(Buffer.from(pdfBytes), items);
+        }
+      }
       const watermark = `${view.claims.viewer}  ${new Date().toISOString().slice(0, 10)}`;
-      const pdfBytes = await buildPrintPdf(pdfSource, watermark);
+      const finalBytes = await buildPrintPdf(Buffer.from(pdfBytes), watermark);
       await recordAudit({ type: 'printed', docId: view.meta.id, viewer: view.claims.viewer });
       return reply
         .type('application/pdf')
         .header('content-disposition', 'inline; filename="print.pdf"')
-        .send(Buffer.from(pdfBytes));
+        .send(Buffer.from(finalBytes));
     },
   );
 
-  app.get<{ Querystring: TokenQuery }>(
+  app.get<{ Querystring: TokenWithMarkupQuery }>(
     '/api/view/download',
-    { schema: { querystring: tokenQuerySchema } },
+    { schema: { querystring: tokenWithMarkupQuerySchema } },
     async (request, reply) => {
       const view = await resolveView(request.query.token, reply);
       if (!view) return reply;
@@ -433,6 +550,33 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
         await recordAudit({ type: 'download_denied', docId: view.meta.id, viewer: view.claims.viewer });
         return reply.code(403).send({ success: false, error: '저장(다운로드) 권한이 없습니다.' });
       }
+
+      if (request.query.includeMarkup === '1') {
+        const items = await listMarkup(view.meta.id);
+        if (items.length > 0) {
+          let pdfSource: Buffer;
+          try {
+            pdfSource = await ensurePdf(view.meta);
+          } catch (error) {
+            request.log.error(error, 'markup download pdf generation failed');
+            return reply.code(500).send({ success: false, error: '마크업 포함 PDF 생성에 실패했습니다.' });
+          }
+          const merged = await burnMarkupIntoPdf(pdfSource, items);
+          await recordAudit({
+            type: 'downloaded',
+            docId: view.meta.id,
+            viewer: view.claims.viewer,
+            detail: 'with markup',
+          });
+          const baseName = view.meta.name.replace(/\.[^./]+$/, '');
+          const encodedName = encodeURIComponent(`${baseName}-markup.pdf`);
+          return reply
+            .type('application/pdf')
+            .header('content-disposition', `attachment; filename*=UTF-8''${encodedName}`)
+            .send(Buffer.from(merged));
+        }
+      }
+
       // 지금 이 문서를 편집 중인 동시편집 세션이 떠 있으면(=유휴 자동저장 8초 debounce가 아직 안
       // 지났을 수 있음) 디스크의 원본이 최신이 아닐 수 있다 — 그 경우 메모리의 Y.Doc에서 바로 최신
       // 바이트를 만든다. 세션이 없으면(이미 디스크에 반영 완료) 원본을 그대로 쓴다.
