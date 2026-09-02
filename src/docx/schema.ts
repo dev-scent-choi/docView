@@ -94,6 +94,37 @@ const marks: Record<string, MarkSpec> = {
   },
 };
 
+/** 셀 한 변의 테두리 — docx의 w:tcBorders/w:tblBorders 한 변(top/right/bottom/left)에 대응 */
+export interface CellBorderSide {
+  /** CSS border-style 값(solid/dashed/dotted/double) — docx w:val(single/dashed/dotted/double 등)에서 변환 */
+  readonly style: string;
+  readonly widthPx: number;
+  /** "#rrggbb" */
+  readonly color: string;
+}
+
+export interface CellBorders {
+  readonly top: CellBorderSide | null;
+  readonly right: CellBorderSide | null;
+  readonly bottom: CellBorderSide | null;
+  readonly left: CellBorderSide | null;
+}
+
+const BORDER_SIDES = ['top', 'right', 'bottom', 'left'] as const;
+
+function borderSideToCSS(side: CellBorderSide | null): string {
+  return side ? `${side.widthPx}px ${side.style} ${side.color}` : 'none';
+}
+
+/** "1.5px solid rgb(255, 0, 0)" 같은 계산된 CSS 값을 다시 CellBorderSide로 되돌린다(HTML 붙여넣기 등 DOM 기반 입력용). */
+function borderSideFromDOM(cssValue: string): CellBorderSide | null {
+  if (!cssValue || cssValue === 'none') return null;
+  const match = /^([\d.]+)px\s+(\S+)\s+(.+)$/.exec(cssValue.trim());
+  if (!match) return null;
+  const [, widthStr, style] = match;
+  return { style, widthPx: parseFloat(widthStr), color: match[3] };
+}
+
 const withLists = addListNodes(OrderedMap.from(baseNodes), 'paragraph block*', 'block');
 const withTables = withLists.append(
   tableNodes({
@@ -106,6 +137,26 @@ const withTables = withLists.append(
         getFromDOM: (dom) => (dom as HTMLElement).style.backgroundColor || null,
         setDOMAttr: (value, attrs) => {
           if (value) attrs.style = `${(attrs.style as string | undefined) ?? ''}background-color: ${value as string};`;
+        },
+      },
+      /** 셀 4변 테두리(docx의 w:tcBorders/w:tblBorders에서 계산된 최종값) — 없으면 null(에디터 기본 테두리 사용) */
+      borders: {
+        default: null,
+        getFromDOM: (dom) => {
+          const style = (dom as HTMLElement).style;
+          const borders: CellBorders = {
+            top: borderSideFromDOM(style.borderTop),
+            right: borderSideFromDOM(style.borderRight),
+            bottom: borderSideFromDOM(style.borderBottom),
+            left: borderSideFromDOM(style.borderLeft),
+          };
+          return borders.top || borders.right || borders.bottom || borders.left ? borders : null;
+        },
+        setDOMAttr: (value, attrs) => {
+          if (!value) return;
+          const borders = value as CellBorders;
+          const extra = BORDER_SIDES.map((side) => `border-${side}: ${borderSideToCSS(borders[side])};`).join(' ');
+          attrs.style = `${(attrs.style as string | undefined) ?? ''}${extra}`;
         },
       },
     },

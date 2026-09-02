@@ -1,5 +1,6 @@
 import { strToU8, unzipSync, zipSync } from 'fflate';
 import type { Mark, Node as PMNode } from 'prosemirror-model';
+import type { CellBorderSide, CellBorders } from './schema.js';
 
 function escapeXml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -85,12 +86,45 @@ function pxToDxa(px: number): number {
   return Math.round(px * DXA_PER_PX);
 }
 
+/** 편집기에서 새로 만든 표처럼 셀에 borders 속성이 아예 없을 때만 쓰이는 표 기본 테두리 —
+ * import.ts에서 가져온 셀은 항상 자기 borders를 명시적으로 갖고 있어 이 기본값을 안 쓴다. */
 const BORDER = '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>';
+
+const CSS_BORDER_STYLE_TO_OOXML: Record<string, string> = {
+  solid: 'single',
+  double: 'double',
+  dashed: 'dashed',
+  dotted: 'dotted',
+};
+
+/** CellBorderSide 한 변을 w:top/w:left/w:bottom/w:right 중 하나로 직렬화한다. null이면 "테두리 없음"(w:val="nil"). */
+function renderBorderSideXml(tag: string, side: CellBorderSide | null): string {
+  if (!side) return `<w:${tag} w:val="nil"/>`;
+  const val = CSS_BORDER_STYLE_TO_OOXML[side.style] ?? 'single';
+  // widthPx = sz/6 (import.ts와 대칭) → sz = widthPx*6, 최소 2(1/4pt)는 되게 한다.
+  const sz = Math.max(2, Math.round(side.widthPx * 6));
+  const color = side.color.replace('#', '').toUpperCase();
+  return `<w:${tag} w:val="${val}" w:sz="${sz}" w:space="0" w:color="${color}"/>`;
+}
+
+/** 셀의 borders 속성(4변 모두 확정된 값)을 <w:tcBorders>로 직렬화한다. 속성이 없으면 빈 문자열(표 기본 테두리를 그대로 따른다). */
+function renderCellBordersXml(borders: unknown): string {
+  if (!borders || typeof borders !== 'object') return '';
+  const b = borders as CellBorders;
+  return (
+    '<w:tcBorders>' +
+    renderBorderSideXml('top', b.top) +
+    renderBorderSideXml('left', b.left) +
+    renderBorderSideXml('bottom', b.bottom) +
+    renderBorderSideXml('right', b.right) +
+    '</w:tcBorders>'
+  );
+}
 
 /** 세로 병합 중(pending) 열의 상태 — 몇 행 더 w:vMerge 이어짐 칸을 채워야 하는지, 그 칸의 가로폭(colspan)·너비(dxa) */
 interface PendingVMerge {
@@ -155,9 +189,10 @@ function renderTableRow(
     const shdXml = background
       ? `<w:shd w:val="clear" w:color="auto" w:fill="${background.replace('#', '').toUpperCase()}"/>`
       : '';
+    const bordersXml = renderCellBordersXml(cell.attrs.borders);
     cellsXml +=
       `<w:tc><w:tcPr><w:tcW w:w="${totalWidthDxa}" w:type="dxa"/>` +
-      `${gridSpanXml}${vMergeXml}${shdXml}</w:tcPr>${cellBody}</w:tc>`;
+      `${gridSpanXml}${vMergeXml}${bordersXml}${shdXml}</w:tcPr>${cellBody}</w:tc>`;
     if (rowspan > 1) pendingVMerge.set(col, { remaining: rowspan - 1, colspan, widthDxa: totalWidthDxa });
     col += colspan;
   }

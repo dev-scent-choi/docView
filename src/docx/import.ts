@@ -1,7 +1,7 @@
 import { strFromU8, unzipSync } from 'fflate';
 import { XMLParser } from 'fast-xml-parser';
 import { Node as PMNode, type NodeType } from 'prosemirror-model';
-import { docxSchema } from './schema.js';
+import { docxSchema, type CellBorderSide, type CellBorders } from './schema.js';
 
 /**
  * fast-xml-parser를 preserveOrder 모드로 쓴다 — OOXML은 같은 태그(w:p, w:tbl 등)가
@@ -175,13 +175,14 @@ function tableCellFrom(
   colspan: number,
   rowspan: number,
   colwidth: readonly number[] | null,
+  borders: CellBorders,
 ): PMNode {
   const tcChildren = childrenOf(tcNode);
   const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p).node);
   const content = paragraphs.length > 0 ? paragraphs : [docxSchema.nodes.paragraph.create()];
   const background = backgroundOf(tcPrChildrenOf(tcNode));
   return docxSchema.nodes.table_cell.create(
-    { colspan, rowspan, colwidth: colwidth ? [...colwidth] : null, background },
+    { colspan, rowspan, colwidth: colwidth ? [...colwidth] : null, background, borders },
     content,
   );
 }
@@ -217,8 +218,105 @@ function gridColWidthsOf(tblChildren: readonly XmlNode[]): number[] {
   return findAll(childrenOf(tblGrid), 'w:gridCol').map((col) => Number(attrsOf(col)['@_w:w']) || 0);
 }
 
+/** docx 테두리 스타일(w:val) → CSS border-style. 알 수 없는 값은 실선으로 대체한다. */
+const OOXML_BORDER_STYLE_TO_CSS: Record<string, string> = {
+  double: 'double',
+  dashed: 'dashed',
+  dashSmallGap: 'dashed',
+  dotted: 'dotted',
+};
+
+/** 한 변(w:top/w:bottom/w:left/w:right/w:insideH/w:insideV) 하나를 CellBorderSide로 변환한다. */
+/**
+ * undefined(이 변 요소 자체가 XML에 없음 — 상위 기본값을 따라야 한다)와 null(요소는 있지만
+ * "테두리 없음"으로 명시됨 — 상위 기본값을 따르면 안 되고 실제로 안 그려야 한다)을 구분해야
+ * w:tcBorders가 특정 변만 "nil"로 재정의했을 때 표 기본 테두리로 잘못 되돌아가지 않는다.
+ */
+function borderSideOf(el: XmlNode | undefined): CellBorderSide | null | undefined {
+  if (!el) return undefined;
+  const attrs = attrsOf(el);
+  const val = attrs['@_w:val'];
+  if (!val || val === 'none' || val === 'nil') return null;
+  const sz = Number(attrs['@_w:sz']);
+  // w:sz는 1/8pt 단위. px = pt * (96/72) = pt * 4/3, pt = sz/8 → px = sz/6.
+  // 0.5px 단위로 반올림하고 최소 1px은 되게 한다 — Word의 표준 얇은 테두리(sz=4, 0.5pt≈0.67px)가
+  // 그대로면 브라우저 화면에서 거의 안 보일 만큼 얇아지기 때문이다.
+  const widthPx = Number.isFinite(sz) && sz > 0 ? Math.max(1, Math.round((sz / 6) * 2) / 2) : 1;
+  const colorRaw = attrs['@_w:color'];
+  const color = colorRaw && /^[0-9A-Fa-f]{6}$/.test(colorRaw) ? `#${colorRaw.toLowerCase()}` : '#000000';
+  return { style: OOXML_BORDER_STYLE_TO_CSS[val] ?? 'solid', widthPx, color };
+}
+
+interface BorderSet {
+  readonly top: CellBorderSide | null | undefined;
+  readonly right: CellBorderSide | null | undefined;
+  readonly bottom: CellBorderSide | null | undefined;
+  readonly left: CellBorderSide | null | undefined;
+  readonly insideH: CellBorderSide | null | undefined;
+  readonly insideV: CellBorderSide | null | undefined;
+}
+
+const EMPTY_BORDER_SET: BorderSet = { top: null, right: null, bottom: null, left: null, insideH: null, insideV: null };
+
+/** w:tblBorders 또는 w:tcBorders의 자식들에서 6개 변을 모두 읽는다(없는 변은 null). */
+function borderSetOf(borderChildren: readonly XmlNode[]): BorderSet {
+  return {
+    top: borderSideOf(findFirst(borderChildren, 'w:top')),
+    right: borderSideOf(findFirst(borderChildren, 'w:right') ?? findFirst(borderChildren, 'w:end')),
+    bottom: borderSideOf(findFirst(borderChildren, 'w:bottom')),
+    left: borderSideOf(findFirst(borderChildren, 'w:left') ?? findFirst(borderChildren, 'w:start')),
+    insideH: borderSideOf(findFirst(borderChildren, 'w:insideH')),
+    insideV: borderSideOf(findFirst(borderChildren, 'w:insideV')),
+  };
+}
+
+/** w:tblPr/w:tblBorders — 표 전체에 적용되는 기본 테두리(개별 셀이 따로 지정하지 않으면 이걸 쓴다). */
+function tableBorderDefaultsOf(tblChildren: readonly XmlNode[]): BorderSet {
+  const tblPr = findFirst(tblChildren, 'w:tblPr');
+  const tblPrChildren = tblPr ? childrenOf(tblPr) : [];
+  const tblBorders = findFirst(tblPrChildren, 'w:tblBorders');
+  return tblBorders ? borderSetOf(childrenOf(tblBorders)) : EMPTY_BORDER_SET;
+}
+
+/** w:tcPr/w:tcBorders — 이 셀만의 테두리 재정의(있는 변만 표 기본값을 덮어쓴다). */
+function cellBorderOverrideOf(tcPrChildren: readonly XmlNode[]): BorderSet | null {
+  const tcBorders = findFirst(tcPrChildren, 'w:tcBorders');
+  return tcBorders ? borderSetOf(childrenOf(tcBorders)) : null;
+}
+
+/**
+ * 표 기본 테두리(바깥 변 top/right/bottom/left, 안쪽 grid선 insideH/insideV)와 이 셀만의
+ * 재정의를 합쳐, 이 셀이 화면에 그려야 할 4변을 확정한다. 셀이 표의 가장자리에 있으면
+ * 바깥 변(top/right/bottom/left)을, 안쪽에 있으면 insideH/insideV를 기본값으로 쓴다.
+ * (Word의 실제 인접 셀 간 우선순위 비교 알고리즘까지는 재현하지 않는 v1 단순화 — 이 셀
+ * 재정의가 있으면 무조건 그걸 쓴다.)
+ */
+function resolveCellBorders(
+  tableDefault: BorderSet,
+  cellOverride: BorderSet | null,
+  pos: { row: number; col: number; colspan: number; endRow: number; totalRows: number; totalCols: number },
+): CellBorders {
+  const isFirstRow = pos.row === 0;
+  const isLastRow = pos.endRow >= pos.totalRows - 1;
+  const isFirstCol = pos.col === 0;
+  const isLastCol = pos.col + pos.colspan >= pos.totalCols;
+  // override가 undefined(그 변 자체를 안 건드림)일 때만 기본값으로 넘어간다 — null(명시적
+  // "테두리 없음")은 그대로 존중해야 하므로 ?? 를 쓰면 안 된다(null도 "값 없음"으로 취급해버림).
+  const pick = (
+    overrideVal: CellBorderSide | null | undefined,
+    fallback: CellBorderSide | null | undefined,
+  ): CellBorderSide | null => (overrideVal !== undefined ? overrideVal : fallback ?? null);
+  return {
+    top: pick(cellOverride?.top, isFirstRow ? tableDefault.top : tableDefault.insideH),
+    right: pick(cellOverride?.right, isLastCol ? tableDefault.right : tableDefault.insideV),
+    bottom: pick(cellOverride?.bottom, isLastRow ? tableDefault.bottom : tableDefault.insideH),
+    left: pick(cellOverride?.left, isFirstCol ? tableDefault.left : tableDefault.insideV),
+  };
+}
+
 interface CellPlacement {
   readonly tc: XmlNode;
+  readonly row: number;
   readonly col: number;
   readonly colspan: number;
   rowspan: number;
@@ -234,11 +332,12 @@ function tableFrom(tblNode: XmlNode): PMNode {
   const tblChildren = childrenOf(tblNode);
   const trNodes = findAll(tblChildren, 'w:tr');
   const gridColWidths = gridColWidthsOf(tblChildren);
+  const tableBorderDefaults = tableBorderDefaultsOf(tblChildren);
 
   const rowPlacements: CellPlacement[][] = [];
   const originByCol = new Map<number, CellPlacement>();
 
-  for (const tr of trNodes) {
+  trNodes.forEach((tr, row) => {
     const placements: CellPlacement[] = [];
     let col = 0;
     for (const tc of findAll(childrenOf(tr), 'w:tc')) {
@@ -251,13 +350,19 @@ function tableFrom(tblNode: XmlNode): PMNode {
         col += gridSpan;
         continue;
       }
-      const placement: CellPlacement = { tc, col, colspan: gridSpan, rowspan: 1 };
+      const placement: CellPlacement = { tc, row, col, colspan: gridSpan, rowspan: 1 };
       placements.push(placement);
       originByCol.set(col, placement);
       col += gridSpan;
     }
     rowPlacements.push(placements);
-  }
+  });
+
+  const totalRows = rowPlacements.length;
+  const totalCols = Math.max(
+    0,
+    ...rowPlacements.map((placements) => placements.reduce((sum, p) => sum + p.colspan, 0)),
+  );
 
   const rows = rowPlacements.map((placements) =>
     docxSchema.nodes.table_row.create(
@@ -265,7 +370,16 @@ function tableFrom(tblNode: XmlNode): PMNode {
       placements.map((p) => {
         const widths = gridColWidths.slice(p.col, p.col + p.colspan);
         const colwidth = widths.length === p.colspan ? widths.map(dxaToPx) : null;
-        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth);
+        const cellOverride = cellBorderOverrideOf(tcPrChildrenOf(p.tc));
+        const borders = resolveCellBorders(tableBorderDefaults, cellOverride, {
+          row: p.row,
+          col: p.col,
+          colspan: p.colspan,
+          endRow: p.row + p.rowspan - 1,
+          totalRows,
+          totalCols,
+        });
+        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth, borders);
       }),
     ),
   );

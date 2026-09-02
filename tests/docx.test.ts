@@ -133,6 +133,71 @@ describe('docx import: table cell width and shading', () => {
   });
 });
 
+describe('docx import: table borders', () => {
+  function docxWithTableXml(tableXml: string): Buffer {
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${tableXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  const TABLE_BORDERS =
+    '<w:tblBorders>' +
+    '<w:top w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:left w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:bottom w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:right w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:insideH w:val="dashed" w:sz="8" w:color="FF0000"/>' +
+    '<w:insideV w:val="dashed" w:sz="8" w:color="FF0000"/>' +
+    '</w:tblBorders>';
+
+  test('uses the outer border on edge cells and the inside border between cells (2x2)', () => {
+    const tableXml =
+      `<w:tbl><w:tblPr>${TABLE_BORDERS}</w:tblPr><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid>` +
+      '<w:tr><w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc></w:tr>' +
+      '<w:tr><w:tc><w:p><w:r><w:t>A2</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc></w:tr>' +
+      '</w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    const table = doc.child(0);
+    const a1 = table.child(0).child(0).attrs.borders;
+    // A1은 왼쪽·위가 바깥 변(검정 실선), 오른쪽·아래는 안쪽 grid선(빨간 점선)이어야 한다
+    expect(a1.top).toEqual({ style: 'solid', widthPx: 1, color: '#000000' });
+    expect(a1.left).toEqual({ style: 'solid', widthPx: 1, color: '#000000' });
+    expect(a1.right).toEqual({ style: 'dashed', widthPx: 1.5, color: '#ff0000' });
+    expect(a1.bottom).toEqual({ style: 'dashed', widthPx: 1.5, color: '#ff0000' });
+
+    const b2 = table.child(1).child(1).attrs.borders;
+    // B2(오른쪽 아래 끝 칸)는 오른쪽·아래가 바깥 변이어야 한다
+    expect(b2.right).toEqual({ style: 'solid', widthPx: 1, color: '#000000' });
+    expect(b2.bottom).toEqual({ style: 'solid', widthPx: 1, color: '#000000' });
+  });
+
+  test('a cell-level w:tcBorders overrides the table default for that cell only', () => {
+    const tableXml =
+      `<w:tbl><w:tblPr>${TABLE_BORDERS}</w:tblPr><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid>` +
+      '<w:tr>' +
+      '<w:tc><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="24" w:color="00FF00"/></w:tcBorders></w:tcPr><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    const table = doc.child(0);
+    expect(table.child(0).child(0).attrs.borders.top).toEqual({ style: 'solid', widthPx: 4, color: '#00ff00' });
+    // 재정의 없는 B1은 여전히 표 기본값(검정 실선)을 쓴다
+    expect(table.child(0).child(1).attrs.borders.top).toEqual({ style: 'solid', widthPx: 1, color: '#000000' });
+  });
+
+  test('w:val="nil" means no border on that side', () => {
+    const tableXml =
+      '<w:tbl><w:tblPr><w:tblBorders><w:top w:val="nil"/><w:left w:val="nil"/>' +
+      '<w:bottom w:val="nil"/><w:right w:val="nil"/></w:tblBorders></w:tblPr>' +
+      '<w:tr><w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableXml(tableXml));
+    const borders = doc.child(0).child(0).child(0).attrs.borders;
+    expect(borders).toEqual({ top: null, right: null, bottom: null, left: null });
+  });
+});
+
 describe('docx import: manual line breaks (w:br)', () => {
   function docxWithBodyXml(bodyXml: string): Buffer {
     const base = makeSampleDocx([]);
@@ -286,6 +351,96 @@ describe('docx export', () => {
     expect(
       reimportedParagraph.textBetween(0, reimportedParagraph.content.size, undefined, '\n'),
     ).toBe('first line\nsecond line');
+  });
+
+  test('round-trips per-cell borders, including a side with no border (nil)', () => {
+    const original = makeSampleDocx(['placeholder']);
+    const cell = docxSchema.nodes.table_cell.create(
+      {
+        colspan: 1,
+        rowspan: 1,
+        borders: {
+          top: { style: 'solid', widthPx: 1, color: '#000000' },
+          right: { style: 'dashed', widthPx: 2, color: '#ff0000' },
+          bottom: null,
+          left: { style: 'double', widthPx: 1.5, color: '#0000ff' },
+        },
+      },
+      docxSchema.nodes.paragraph.create(null, docxSchema.text('X')),
+    );
+    const table = docxSchema.nodes.table.create(null, [
+      docxSchema.nodes.table_row.create(null, [cell]),
+    ]);
+    const doc = docxSchema.nodes.doc.create(null, [table]);
+
+    const xml = renderDocumentXml(doc);
+    expect(xml).toContain('<w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>');
+    expect(xml).toContain('<w:right w:val="dashed" w:sz="12" w:space="0" w:color="FF0000"/>');
+    expect(xml).toContain('<w:bottom w:val="nil"/>');
+    expect(xml).toContain('<w:left w:val="double" w:sz="9" w:space="0" w:color="0000FF"/>');
+
+    const reimported = importDocx(exportDocx(original, doc));
+    const reimportedBorders = reimported.doc.child(0).child(0).child(0).attrs.borders;
+    expect(reimportedBorders.top).toEqual({ style: 'solid', widthPx: 1, color: '#000000' });
+    expect(reimportedBorders.right).toEqual({ style: 'dashed', widthPx: 2, color: '#ff0000' });
+    expect(reimportedBorders.bottom).toBeNull();
+    expect(reimportedBorders.left).toEqual({ style: 'double', widthPx: 1.5, color: '#0000ff' });
+  });
+
+  test('round-trips a composite table: merges + shading + per-column widths + borders together', () => {
+    const original = makeSampleDocx(['placeholder']);
+    const redBorder = { style: 'solid', widthPx: 1, color: '#ff0000' };
+    const borders = (over: Partial<Record<'top' | 'right' | 'bottom' | 'left', unknown>> = {}) => ({
+      top: redBorder,
+      right: redBorder,
+      bottom: redBorder,
+      left: redBorder,
+      ...over,
+    });
+    const cell = (
+      text: string,
+      attrs: { colspan?: number; rowspan?: number; colwidth?: number[]; background?: string | null } = {},
+    ) =>
+      docxSchema.nodes.table_cell.create(
+        {
+          colspan: attrs.colspan ?? 1,
+          rowspan: attrs.rowspan ?? 1,
+          colwidth: attrs.colwidth ?? null,
+          background: attrs.background ?? null,
+          borders: borders(),
+        },
+        docxSchema.nodes.paragraph.create(null, text === '' ? null : docxSchema.text(text)),
+      );
+    // 1행: 가로 병합 + 음영, 2열 폭 지정
+    const row1 = docxSchema.nodes.table_row.create(null, [
+      cell('제목(병합+음영)', { colspan: 2, colwidth: [96, 192], background: '#ffd43b' }),
+    ]);
+    // 2~3행: 1열이 세로 병합, 2열은 빈 셀 포함
+    const row2 = docxSchema.nodes.table_row.create(null, [
+      cell('세로병합', { rowspan: 2, colwidth: [96] }),
+      cell('', { colwidth: [192] }), // 빈 셀
+    ]);
+    const row3 = docxSchema.nodes.table_row.create(null, [cell('B3', { colwidth: [192] })]);
+    const table = docxSchema.nodes.table.create(null, [row1, row2, row3]);
+    const doc = docxSchema.nodes.doc.create(null, [table]);
+
+    const exported = exportDocx(original, doc);
+    const reimported = importDocx(exported);
+    const t = reimported.doc.child(0);
+
+    const r1c0 = t.child(0).child(0);
+    expect(r1c0.attrs.colspan).toBe(2);
+    expect(r1c0.attrs.background).toBe('#ffd43b');
+    expect(r1c0.attrs.colwidth).toEqual([96, 192]);
+    expect(r1c0.attrs.borders.top).toEqual(redBorder);
+
+    const r2c0 = t.child(1).child(0);
+    expect(r2c0.attrs.rowspan).toBe(2);
+    expect(r2c0.textContent).toBe('세로병합');
+    expect(t.child(1).child(1).textContent).toBe(''); // 빈 셀 그대로 보존
+
+    expect(t.child(2).childCount).toBe(1); // 세로 병합 이어짐 칸은 별개 셀로 안 생긴다
+    expect(t.child(2).child(0).textContent).toBe('B3');
   });
 
   test('round-trips font color, font size and paragraph alignment', () => {
