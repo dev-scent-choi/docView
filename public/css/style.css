@@ -281,27 +281,24 @@ h2 {
 }
 .empty svg { width: 28px; height: 28px; opacity: 0.5; }
 
-/* ---------- 뷰어: 다크 워크스페이스 톤(몰입해서 "읽는" 화면) ---------- */
+/* ---------- 뷰어: 브라우저 기본 PDF 뷰어(Edge/Chrome) 톤 — 옅은 회색 캔버스 위에 흰 종이 ---------- */
 
 .viewer-body {
-  --v-text: #edf1ef;
-  --v-text-dim: #93a19d;
-  --v-glass: rgba(16, 22, 21, 0.74);
-  --v-glass-line: rgba(255, 255, 255, 0.08);
-  --v-hover: rgba(255, 255, 255, 0.07);
-  --v-accent: #4fd6c4;
-  --v-accent-ink: #072522;
-  --v-accent-shadow: rgba(79, 214, 196, 0.3);
-  --v-presence-border: rgba(14, 19, 18, 0.92);
-  --v-scrollbar-thumb: rgba(255, 255, 255, 0.14);
-  --v-scrollbar-thumb-hover: rgba(255, 255, 255, 0.24);
+  --v-text: #202124;
+  --v-text-dim: #5f6368;
+  --v-glass: #ffffff;
+  --v-glass-line: #dadce0;
+  --v-hover: #f1f3f4;
+  --v-accent: #1f4d47;
+  --v-accent-ink: #ffffff;
+  --v-accent-shadow: rgba(31, 77, 71, 0.22);
+  --v-presence-border: #ffffff;
+  --v-scrollbar-thumb: rgba(32, 33, 36, 0.18);
+  --v-scrollbar-thumb-hover: rgba(32, 33, 36, 0.32);
   min-height: 100vh;
   color: var(--v-text);
   font-family: var(--font-sans);
-  background:
-    radial-gradient(1100px 480px at 50% -10%, rgba(79, 214, 196, 0.1), transparent 62%),
-    linear-gradient(180deg, #171d1c 0%, #101413 100%);
-  background-attachment: fixed;
+  background: #e9eaed;
 }
 
 /* ---------- 동시편집기: 밝은 오피스 리본 톤("쓰는" 생산성 도구 — 관리 페이지와 같은 계열) ---------- */
@@ -351,7 +348,7 @@ h2 {
   border: 1px solid var(--v-glass-line);
   backdrop-filter: blur(20px) saturate(1.5);
   -webkit-backdrop-filter: blur(20px) saturate(1.5);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  box-shadow: 0 4px 16px rgba(32, 33, 36, 0.16), 0 1px 3px rgba(32, 33, 36, 0.1);
 }
 
 .toolbar-group { display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex-wrap: wrap; row-gap: 0.4rem; }
@@ -441,7 +438,7 @@ h2 {
   padding: 0.45rem 0.95rem;
   border-radius: 12px;
   border: 1px solid var(--v-glass-line);
-  background: rgba(255, 255, 255, 0.04);
+  background: transparent;
   color: var(--v-text);
   font-family: var(--font-sans);
   font-size: 0.85rem;
@@ -467,7 +464,7 @@ h2 {
   box-shadow: 0 4px 18px var(--v-accent-shadow);
 }
 
-.btn-pill-primary:hover:not(:disabled) { background: #6fe3d3; }
+.btn-pill-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--v-accent) 85%, white); }
 
 .pages-container {
   --page-width: 100%;
@@ -601,7 +598,7 @@ h2 {
   width: 15rem;
   border: none;
   outline: none;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--v-hover);
   border-radius: 0;
   padding: 0.4rem 0.7rem;
   color: var(--v-text);
@@ -824,7 +821,7 @@ h2 {
   padding: 0.4rem;
   border-radius: 6px;
   border: 1px solid var(--v-glass-line);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--v-hover);
   color: var(--v-text);
 }
 
