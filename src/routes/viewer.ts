@@ -257,6 +257,7 @@ const addMarkupBodySchema = {
     h: { type: 'number', minimum: 0, maximum: 1 },
     fontSizePt: { type: 'number', minimum: 1, maximum: 400 },
     bold: { type: 'boolean' },
+    fontFamily: { type: 'string', enum: ['sans-serif', 'serif', 'monospace'] },
     text: { type: 'string', minLength: 1, maxLength: 2000 },
   },
   if: { properties: { kind: { const: 'text' } }, required: ['kind'] },
@@ -273,6 +274,7 @@ interface AddMarkupBody {
   readonly h?: number;
   readonly fontSizePt?: number;
   readonly bold?: boolean;
+  readonly fontFamily?: 'sans-serif' | 'serif' | 'monospace';
   readonly text: string;
 }
 
@@ -525,6 +527,7 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
                 y: body.y,
                 fontSizePt: body.fontSizePt ?? 12,
                 bold: body.bold ?? false,
+                fontFamily: body.fontFamily,
                 text: body.text,
                 author: view.claims.viewer,
               }

@@ -9,6 +9,17 @@ const STANDARD_FONT_DATA_URL = pathToFileURL(
   path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'standard_fonts'),
 ).href.concat('/');
 
+/** pdfjs가 알려주는 일반화된 글꼴 계열 — 실제 임베딩된 폰트는 재사용할 수 없어 이 정도로 근사한다 */
+export type PdfFontFamily = 'sans-serif' | 'serif' | 'monospace';
+
+function normalizeFontFamily(raw: string | undefined): PdfFontFamily {
+  if (!raw) return 'sans-serif';
+  if (raw.includes('monospace')) return 'monospace';
+  if (raw.includes('sans')) return 'sans-serif';
+  if (raw.includes('serif')) return 'serif';
+  return 'sans-serif';
+}
+
 /** PDF 페이지에서 추출한 텍스트 조각 (좌표는 pt, y는 페이지 상단 기준) */
 export interface PageTextItem {
   readonly str: string;
@@ -16,6 +27,7 @@ export interface PageTextItem {
   readonly y: number;
   readonly w: number;
   readonly h: number;
+  readonly fontFamily: PdfFontFamily;
 }
 
 export interface PageText {
@@ -86,12 +98,14 @@ export async function extractPdfText(pdfBytes: Buffer): Promise<PageText[]> {
         const ys = corners.map((corner) => corner[1]);
         const minX = Math.min(...xs) - cropX;
         const maxY = Math.max(...ys) - cropY;
+        const style = content.styles[item.fontName];
         items.push({
           str: item.str,
           x: minX,
           y: viewport.height - maxY,
           w: Math.max(...xs) - Math.min(...xs),
           h: maxY - (Math.min(...ys) - cropY),
+          fontFamily: normalizeFontFamily(style?.fontFamily),
         });
       }
       pages.push({ width: viewport.width, height: viewport.height, items });

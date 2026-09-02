@@ -1004,6 +1004,13 @@ document.addEventListener('mouseup', async () => {
   }
 });
 
+/** 서버가 감지한 글꼴 계열을 화면에서도 비슷하게 보이도록 CSS 폰트로 매핑한다
+ * (실제 PDF에 굽는 폰트와 맞춘다 — monospace는 내장 폰트가 없어 sans-serif로 근사). */
+function cssFontFamilyFor(fontFamily) {
+  if (fontFamily === 'serif') return '"Nanum Myeongjo", "Noto Serif KR", serif';
+  return '"Pretendard Variable", "Pretendard", sans-serif';
+}
+
 function renderTextOverlayItem(frame, layer, item) {
   const el = document.createElement('div');
   el.className = 'text-overlay-item';
@@ -1013,6 +1020,7 @@ function renderTextOverlayItem(frame, layer, item) {
   el.style.top = `${item.y * 100}%`;
   el.style.fontSize = `${item.fontSizePt * (frame.clientHeight / pageHeightPtFor(item.page - 1))}px`;
   el.style.fontWeight = item.bold ? '700' : '400';
+  el.style.fontFamily = cssFontFamilyFor(item.fontFamily);
 
   if (permissions.canEdit) {
     const del = document.createElement('button');
@@ -1277,6 +1285,7 @@ async function commitTextInsert() {
         y: pending.style.baselineY,
         fontSizePt: pending.style.fontSizePt,
         bold: pending.style.bold,
+        fontFamily: pending.style.fontFamily,
         text,
       }),
     });
@@ -1298,6 +1307,7 @@ function openTextInsertBox(frame, page, xRatio, style) {
   box.style.top = `${style.baselineY * 100}%`;
   box.style.fontSize = `${style.fontSizePt * (frame.clientHeight / pageHeightPtFor(page - 1))}px`;
   box.style.fontWeight = style.bold ? '700' : '400';
+  box.style.fontFamily = cssFontFamilyFor(style.fontFamily);
   box.style.width = '2ch';
   frame.append(box);
   box.focus();
@@ -1342,7 +1352,7 @@ function setupTextTool() {
     try {
       style = await fetchJsonView(`/api/view/pages/${page}/text-style?${tokenQuery}&x=${xRatio}&y=${yRatio}`);
     } catch {
-      style = { fontSizePt: 12, bold: false, baselineY: yRatio, matched: false };
+      style = { fontSizePt: 12, bold: false, fontFamily: 'sans-serif', baselineY: yRatio, matched: false };
     }
     openTextInsertBox(frame, page, xRatio, style);
   });

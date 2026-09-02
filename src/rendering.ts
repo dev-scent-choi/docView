@@ -11,22 +11,38 @@ import type { MarkupItem } from './markup.js';
 /** 프로젝트 루트 assets/fonts — src/rendering.ts 위치 기준 상대경로라 실행 cwd와 무관하다. */
 const FONTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'fonts');
 
-let pretendardBytes: { regular: Buffer; bold: Buffer } | null = null;
+/** 실제로 내장 가능한 글꼴 계열 — monospace는 마땅한 한글 모노스페이스 폰트가 없어 sans-serif로 근사한다. */
+type EmbeddableFontFamily = 'sans-serif' | 'serif';
+
+const FONT_FILES: Record<EmbeddableFontFamily, { regular: string; bold: string }> = {
+  'sans-serif': { regular: 'Pretendard-Regular.ttf', bold: 'Pretendard-Bold.ttf' },
+  serif: { regular: 'NanumMyeongjo-Regular.ttf', bold: 'NanumMyeongjo-Bold.ttf' },
+};
+
+const fontBytesCache = new Map<EmbeddableFontFamily, { regular: Buffer; bold: Buffer }>();
 
 /**
  * pdf-lib 기본 14 폰트는 WinAnsi만 지원해 한글을 전혀 그리지 못한다. 사용자가 PDF에 직접
- * 삽입하는 텍스트(kind:'text')는 한글일 가능성이 높으므로, 한글 글리프를 포함한 Pretendard를
- * fontkit으로 내장해 그린다(라이선스: SIL OFL, assets/fonts/LICENSE-Pretendard.txt 참고).
+ * 삽입하는 텍스트(kind:'text')는 한글일 가능성이 높으므로, 한글 글리프를 포함한 폰트(sans-serif:
+ * Pretendard, serif: Nanum Myeongjo)를 fontkit으로 내장해 그린다 — 어느 쪽으로 근사할지는
+ * src/textStyle.ts가 클릭 지점 근처 텍스트에서 감지한 fontFamily를 따른다(둘 다 SIL OFL,
+ * assets/fonts/LICENSE-*.txt 참고).
  */
-async function loadPretendardBytes(): Promise<{ regular: Buffer; bold: Buffer }> {
-  if (!pretendardBytes) {
-    const [regular, bold] = await Promise.all([
-      fs.readFile(path.join(FONTS_DIR, 'Pretendard-Regular.ttf')),
-      fs.readFile(path.join(FONTS_DIR, 'Pretendard-Bold.ttf')),
-    ]);
-    pretendardBytes = { regular, bold };
-  }
-  return pretendardBytes;
+async function loadFontBytes(family: EmbeddableFontFamily): Promise<{ regular: Buffer; bold: Buffer }> {
+  const cached = fontBytesCache.get(family);
+  if (cached) return cached;
+  const files = FONT_FILES[family];
+  const [regular, bold] = await Promise.all([
+    fs.readFile(path.join(FONTS_DIR, files.regular)),
+    fs.readFile(path.join(FONTS_DIR, files.bold)),
+  ]);
+  const bytes = { regular, bold };
+  fontBytesCache.set(family, bytes);
+  return bytes;
+}
+
+function embeddableFamilyOf(fontFamily: string): EmbeddableFontFamily {
+  return fontFamily === 'serif' ? 'serif' : 'sans-serif';
 }
 
 type PdfImageDocument = Awaited<ReturnType<typeof pdf>>;
@@ -201,19 +217,29 @@ export async function burnMarkupIntoPdf(
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const pages = doc.getPages();
 
-  // text 항목이 있을 때만 커스텀 폰트를 내장한다(코멘트만 있는 문서에서 불필요한 비용을 피함).
-  // subset:true는 쓰지 않는다 — @pdf-lib/fontkit의 서브셋터가 이 폰트의 일부 한글 글리프를
+  // text 항목이 실제로 쓰는 글꼴 계열만(sans-serif/serif) 내장한다 — 코멘트만 있거나 한쪽
+  // 계열만 쓰는 문서에서 불필요한 폰트를 내장하는 비용을 피한다.
+  // subset:true는 쓰지 않는다 — @pdf-lib/fontkit의 서브셋터가 이 폰트들의 일부 한글 글리프를
   // 통째로 빠뜨리거나 잘못된 위치에 그리는 버그가 있음을 실제 렌더링 결과로 확인했다(예:
   // "이름:"이 "름"만 남고 "이"가 사라짐). 전체 폰트를 그대로 내장하면(용량은 커지지만) 정확하다.
-  let textFontRegular: Awaited<ReturnType<typeof doc.embedFont>> | null = null;
-  let textFontBold: Awaited<ReturnType<typeof doc.embedFont>> | null = null;
-  if (items.some((item) => item.kind === 'text')) {
+  const textFamiliesUsed = new Set<EmbeddableFontFamily>();
+  for (const item of items) {
+    if (item.kind === 'text') textFamiliesUsed.add(embeddableFamilyOf(item.fontFamily));
+  }
+  const textFonts = new Map<
+    EmbeddableFontFamily,
+    { regular: Awaited<ReturnType<typeof doc.embedFont>>; bold: Awaited<ReturnType<typeof doc.embedFont>> }
+  >();
+  if (textFamiliesUsed.size > 0) {
     doc.registerFontkit(fontkit);
-    const { regular, bold } = await loadPretendardBytes();
-    [textFontRegular, textFontBold] = await Promise.all([
-      doc.embedFont(regular, { subset: false }),
-      doc.embedFont(bold, { subset: false }),
-    ]);
+    for (const family of textFamiliesUsed) {
+      const { regular, bold } = await loadFontBytes(family);
+      const [regularFont, boldFont] = await Promise.all([
+        doc.embedFont(regular, { subset: false }),
+        doc.embedFont(bold, { subset: false }),
+      ]);
+      textFonts.set(family, { regular: regularFont, bold: boldFont });
+    }
   }
 
   const byPage = new Map<number, MarkupItem[]>();
@@ -237,8 +263,9 @@ export async function burnMarkupIntoPdf(
       if (item.kind === 'text') {
         // x,y는 텍스트 베이스라인 좌측 시작점의 비율 좌표(위에서부터) — pdf-lib은 아래가
         // 원점이라 세로만 뒤집는다. 가로는 뒤집을 필요 없이 그대로 곱한다.
-        const chosenFont = item.bold ? textFontBold : textFontRegular;
-        if (!chosenFont) continue;
+        const fonts = textFonts.get(embeddableFamilyOf(item.fontFamily));
+        if (!fonts) continue;
+        const chosenFont = item.bold ? fonts.bold : fonts.regular;
         page.drawText(item.text, {
           x: item.x * width,
           y: height - item.y * height,

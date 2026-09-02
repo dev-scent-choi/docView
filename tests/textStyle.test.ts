@@ -3,7 +3,7 @@ import { detectNearbyTextStyle } from '../src/textStyle.js';
 import type { PageText, PageTextItem } from '../src/search.js';
 
 function item(overrides: Partial<PageTextItem> = {}): PageTextItem {
-  return { str: 'regular text', x: 100, y: 100, w: 84, h: 12, ...overrides };
+  return { str: 'regular text', x: 100, y: 100, w: 84, h: 12, fontFamily: 'sans-serif', ...overrides };
 }
 
 function page(items: PageTextItem[], width = 600, height = 800): PageText {
@@ -27,8 +27,21 @@ describe('detectNearbyTextStyle', () => {
     const yRatio = (200 + 5) / p.height;
     const result = detectNearbyTextStyle(p, xRatio, yRatio);
     expect(result.matched).toBe(true);
-    expect(result.fontSizePt).toBeGreaterThan(0);
+    // pdfjs의 텍스트 박스 높이는 실제 pt 크기와 같다(실측 확인) — 보정 없이 그대로 쓴다
+    expect(result.fontSizePt).toBe(14);
     expect(result.baselineY).toBeCloseTo((line.y + line.h) / p.height, 5);
+  });
+
+  test('passes through the detected font family from the matched line', () => {
+    const serifLine = item({ x: 100, y: 200, w: 120, h: 14, fontFamily: 'serif' });
+    const p = page([serifLine]);
+    const result = detectNearbyTextStyle(p, (100 + 20) / p.width, (200 + 5) / p.height);
+    expect(result.fontFamily).toBe('serif');
+  });
+
+  test('defaults to sans-serif font family when nothing matched', () => {
+    const result = detectNearbyTextStyle(page([]), 0.5, 0.5);
+    expect(result.fontFamily).toBe('sans-serif');
   });
 
   test('falls back to the default style when the click is far from any text', () => {

@@ -146,11 +146,72 @@ describe('markup', () => {
     expect(item.fontSizePt).toBe(14);
     expect(item.bold).toBe(true);
     expect(item.text).toBe('삽입된 텍스트');
+    expect(item.fontFamily).toBe('sans-serif');
     expect('w' in item).toBe(false);
 
     const items = await listMarkup(meta.id);
     expect(items).toHaveLength(1);
     expect(items[0]).toEqual(item);
+  });
+
+  test('addMarkup with kind:text stores an explicit fontFamily', async () => {
+    const { addMarkup } = await freshMarkupModule();
+    const meta = makeMeta();
+    const item = await addMarkup(meta.id, meta, {
+      kind: 'text',
+      page: 1,
+      x: 0,
+      y: 0,
+      fontSizePt: 12,
+      bold: false,
+      fontFamily: 'serif',
+      text: 'x',
+      author: 'a',
+    });
+    if (item.kind !== 'text') throw new Error('expected a text markup item');
+    expect(item.fontFamily).toBe('serif');
+  });
+
+  test('addMarkup with kind:text rejects an invalid fontFamily', async () => {
+    const { addMarkup, MarkupValidationError } = await freshMarkupModule();
+    const meta = makeMeta();
+    await expect(
+      addMarkup(meta.id, meta, {
+        kind: 'text',
+        page: 1,
+        x: 0,
+        y: 0,
+        fontSizePt: 12,
+        bold: false,
+        fontFamily: 'comic-sans' as never,
+        text: 'x',
+        author: 'a',
+      }),
+    ).rejects.toThrow(MarkupValidationError);
+  });
+
+  test('listMarkup backfills fontFamily:sans-serif for text items saved before that field existed', async () => {
+    const { listMarkup } = await freshMarkupModule();
+    const { store } = await import('../src/storage.js');
+    const meta = makeMeta();
+    const legacyTextItem = {
+      id: 'legacy-text-1',
+      kind: 'text',
+      page: 1,
+      x: 0.2,
+      y: 0.2,
+      fontSizePt: 12,
+      bold: false,
+      text: '레거시 텍스트',
+      author: 'a',
+      createdAt: new Date().toISOString(),
+    };
+    await store.saveDerived(meta.id, 'markup', Buffer.from(JSON.stringify([legacyTextItem]), 'utf8'));
+    const items = await listMarkup(meta.id);
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('text');
+    if (items[0].kind !== 'text') throw new Error('expected a text markup item');
+    expect(items[0].fontFamily).toBe('sans-serif');
   });
 
   test('addMarkup with kind:text rejects a non-positive font size', async () => {

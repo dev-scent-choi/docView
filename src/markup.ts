@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { store } from './storage.js';
+import type { PdfFontFamily } from './search.js';
 import type { DocumentMeta } from './types.js';
 
 interface MarkupItemBase {
@@ -24,6 +25,7 @@ export interface TextMarkupItem extends MarkupItemBase {
   readonly kind: 'text';
   readonly fontSizePt: number;
   readonly bold: boolean;
+  readonly fontFamily: PdfFontFamily;
 }
 
 export type MarkupKind = MarkupItem['kind'];
@@ -47,9 +49,13 @@ export interface AddTextInput {
   readonly y: number;
   readonly fontSizePt: number;
   readonly bold: boolean;
+  readonly fontFamily?: PdfFontFamily;
   readonly text: string;
   readonly author: string;
 }
+
+const FONT_FAMILIES: readonly PdfFontFamily[] = ['sans-serif', 'serif', 'monospace'];
+const DEFAULT_FONT_FAMILY: PdfFontFamily = 'sans-serif';
 
 export type AddMarkupInput = AddCommentInput | AddTextInput;
 
@@ -103,6 +109,9 @@ function assertValidInput(input: AddMarkupInput, pageCount: number): void {
         `잘못된 글자 크기입니다: ${input.fontSizePt} (${MIN_FONT_SIZE_PT}~${MAX_FONT_SIZE_PT}pt)`,
       );
     }
+    if (input.fontFamily !== undefined && !FONT_FAMILIES.includes(input.fontFamily)) {
+      throw new MarkupValidationError(`잘못된 글꼴 계열입니다: ${input.fontFamily}`);
+    }
     assertValidText(input.text);
     return;
   }
@@ -140,11 +149,16 @@ async function withDocLock<T>(docId: string, task: () => Promise<T>): Promise<T>
   }
 }
 
-/** kind 필드가 생기기 전(2026-09-02 이전)에 저장된 항목 — 전부 comment였다. */
-type StoredMarkupItem = (Omit<CommentMarkupItem, 'kind'> & { kind?: 'comment' }) | TextMarkupItem;
+/**
+ * kind 필드가 생기기 전(2026-09-02 이전)에 저장된 항목 — 전부 comment였다.
+ * fontFamily 필드가 생기기 전의 text 항목도 같은 이유로 옵셔널로 받는다.
+ */
+type StoredMarkupItem =
+  | (Omit<CommentMarkupItem, 'kind'> & { kind?: 'comment' })
+  | (Omit<TextMarkupItem, 'fontFamily'> & { fontFamily?: PdfFontFamily });
 
 function normalize(item: StoredMarkupItem): MarkupItem {
-  if (item.kind === 'text') return item;
+  if (item.kind === 'text') return { ...item, fontFamily: item.fontFamily ?? DEFAULT_FONT_FAMILY };
   return { ...item, kind: 'comment' };
 }
 
@@ -181,6 +195,7 @@ export async function addMarkup(
             y: input.y,
             fontSizePt: input.fontSizePt,
             bold: input.bold,
+            fontFamily: input.fontFamily ?? DEFAULT_FONT_FAMILY,
             text: input.text.trim(),
             author: input.author,
             createdAt: new Date().toISOString(),

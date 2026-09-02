@@ -35,6 +35,7 @@ function makeTextItem(overrides: Partial<TextMarkupItem> = {}): TextMarkupItem {
     y: 0.1,
     fontSizePt: 14,
     bold: false,
+    fontFamily: 'sans-serif',
     text: '삽입 텍스트',
     author: '업로더',
     createdAt: new Date().toISOString(),
@@ -91,6 +92,27 @@ describe('burnMarkupIntoPdf', () => {
       makeTextItem({ id: 't1', bold: false, text: '일반체' }),
       makeTextItem({ id: 't2', bold: true, text: '굵은체', y: 0.3 }),
     ];
+    await expect(burnMarkupIntoPdf(original, items)).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  test('renders a serif text item using the Nanum Myeongjo font without error', async () => {
+    const original = await makeTwoPagePdf();
+    const items = [makeTextItem({ fontFamily: 'serif', text: '명조체 테스트' })];
+    await expect(burnMarkupIntoPdf(original, items)).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  test('renders sans-serif and serif text items together without error', async () => {
+    const original = await makeTwoPagePdf();
+    const items = [
+      makeTextItem({ id: 't1', fontFamily: 'sans-serif', text: '고딕체', y: 0.2 }),
+      makeTextItem({ id: 't2', fontFamily: 'serif', text: '명조체', y: 0.4 }),
+    ];
+    await expect(burnMarkupIntoPdf(original, items)).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  test('falls back to sans-serif for monospace, since no Korean monospace font is bundled', async () => {
+    const original = await makeTwoPagePdf();
+    const items = [makeTextItem({ fontFamily: 'monospace', text: '고정폭 근사' })];
     await expect(burnMarkupIntoPdf(original, items)).resolves.toBeInstanceOf(Uint8Array);
   });
 
