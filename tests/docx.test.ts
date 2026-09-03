@@ -570,6 +570,82 @@ describe('docx import: table cell margins (w:tblCellMar/w:tcMar, cascaded like r
   });
 });
 
+describe('docx import: paragraphs referencing a named custom style (w:pStyle) pick up that style\'s own jc/bold', () => {
+  // 실제로 발견된 패턴: 문단 자신에는 직접 서식이 전혀 없고(런에 w:b 없음, w:pPr에 w:jc 없음)
+  // w:pStyle로 사용자 정의 스타일("테이블 제목" 등)만 참조하는데, 그 스타일 자체가
+  // jc=center + w:b(굵게)를 지정한다 — 이건 "기본(default) 스타일" 하나가 아니라 이름이 있는
+  // 임의의 스타일이라, 지금까지의 defaultParagraphStyleInfoOf(기본 스타일 전용)로는 못 잡는다.
+  function docxWithNamedStyle(styleDefXml: string, bodyXml: string): Buffer {
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      styleDefXml +
+      '</w:styles>';
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    entries['word/styles.xml'] = strToU8(stylesXml);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${bodyXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  const TABLE_TITLE_STYLE =
+    '<w:style w:type="paragraph" w:customStyle="1" w:styleId="ab"><w:name w:val="테이블 제목"/>' +
+    '<w:basedOn w:val="a0"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/></w:rPr></w:style>';
+
+  test('applies the referenced style\'s jc=center and w:b(bold) when the paragraph has no direct formatting of its own', () => {
+    const bodyXml =
+      '<w:p><w:pPr><w:pStyle w:val="ab"/></w:pPr><w:r><w:t xml:space="preserve">인수인계(확인)서</w:t></w:r></w:p>';
+    const { doc } = importDocx(docxWithNamedStyle(TABLE_TITLE_STYLE, bodyXml));
+    const paragraph = doc.child(0);
+    expect(paragraph.attrs.align).toBe('center');
+    const textNode = paragraph.firstChild!;
+    expect(textNode.marks.map((m) => m.type.name)).toContain('strong');
+  });
+
+  test('applies inside table cells too (the real-world case: a table-title cell referencing this style)', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="CCCCCC"/></w:tcPr>' +
+      '<w:p><w:pPr><w:pStyle w:val="ab"/></w:pPr><w:r><w:t xml:space="preserve">인수인계(확인)서</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithNamedStyle(TABLE_TITLE_STYLE, tableXml));
+    const cellParagraph = doc.child(0).child(0).child(0).firstChild!;
+    expect(cellParagraph.attrs.align).toBe('center');
+    expect(cellParagraph.firstChild!.marks.map((m) => m.type.name)).toContain('strong');
+  });
+
+  test('a paragraph\'s own direct w:jc still wins over the referenced style\'s jc', () => {
+    const bodyXml =
+      '<w:p><w:pPr><w:pStyle w:val="ab"/><w:jc w:val="right"/></w:pPr><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p>';
+    const { doc } = importDocx(docxWithNamedStyle(TABLE_TITLE_STYLE, bodyXml));
+    expect(doc.child(0).attrs.align).toBe('right');
+  });
+
+  test('a run\'s own explicit w:b still applies even if the style did not specify bold (no double-negative surprises)', () => {
+    const styleWithoutBold =
+      '<w:style w:type="paragraph" w:customStyle="1" w:styleId="a"><w:name w:val="테이블 내용구분"/>' +
+      '<w:basedOn w:val="a0"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>';
+    const bodyXml =
+      '<w:p><w:pPr><w:pStyle w:val="a"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">x</w:t></w:r></w:p>';
+    const { doc } = importDocx(docxWithNamedStyle(styleWithoutBold, bodyXml));
+    const paragraph = doc.child(0);
+    expect(paragraph.attrs.align).toBeNull();
+    expect(paragraph.firstChild!.marks.map((m) => m.type.name)).toContain('strong');
+  });
+
+  test('a style with no jc/bold of its own (e.g. just numbering) does not force either on the paragraph', () => {
+    const styleWithoutBold =
+      '<w:style w:type="paragraph" w:customStyle="1" w:styleId="a"><w:name w:val="테이블 내용구분"/>' +
+      '<w:basedOn w:val="a0"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>';
+    const bodyXml = '<w:p><w:pPr><w:pStyle w:val="a"/></w:pPr><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p>';
+    const { doc } = importDocx(docxWithNamedStyle(styleWithoutBold, bodyXml));
+    const paragraph = doc.child(0);
+    expect(paragraph.attrs.align).toBeNull();
+    expect(paragraph.firstChild!.marks.map((m) => m.type.name)).not.toContain('strong');
+  });
+});
+
 describe('docx export', () => {
   test('round-trips formatted paragraphs, headings and tables through a full docx cycle', () => {
     const original = makeSampleDocx(['placeholder']);

@@ -74,6 +74,34 @@ function alignOf(pPrChildren: readonly XmlNode[]): string | null {
   return JC_TO_ALIGN[val] ?? null;
 }
 
+interface NamedStyleInfo {
+  readonly align: string | null;
+  readonly bold: boolean;
+}
+
+/**
+ * 문단이 참조하는 특정 이름의 스타일(w:pStyle)이 직접 지정한 정렬(jc)·굵기(rPr/b)를 읽는다.
+ * 그 스타일이 다시 무엇을 기반(w:basedOn)으로 하는지는 따라가지 않는다 — 문서 전체의 "기본"
+ * 스타일 해석은 defaultParagraphStyleInfoOf가 이미 별도로 처리하고, 여기서는 "이 특정
+ * 스타일이 직접 얹은 값"만 본다(실제 사례 — 표 제목/헤더가 참조하는 커스텀 스타일이 직접
+ * jc=center + w:b를 지정하는 경우 — 에서 이 정도로 충분했다). 문단 자신의 직접 서식이
+ * 여전히 이 값보다 우선한다(호출부에서 ?? 로 처리).
+ */
+function namedStyleInfoOf(styleId: string, stylesChildren: readonly XmlNode[]): NamedStyleInfo | null {
+  const style = findAll(stylesChildren, 'w:style').find((s) => {
+    const attrs = attrsOf(s);
+    return attrs['@_w:type'] === 'paragraph' && attrs['@_w:styleId'] === styleId;
+  });
+  if (!style) return null;
+  const styleChildren = childrenOf(style);
+  const pPr = findFirst(styleChildren, 'w:pPr');
+  const rPr = findFirst(styleChildren, 'w:rPr');
+  return {
+    align: alignOf(pPr ? childrenOf(pPr) : []),
+    bold: rPr ? findFirst(childrenOf(rPr), 'w:b') !== undefined : false,
+  };
+}
+
 interface RunMarks {
   readonly strong: boolean;
   readonly em: boolean;
@@ -83,7 +111,7 @@ interface RunMarks {
   readonly fontSizePt: number | null;
 }
 
-function runMarksOf(runChildren: readonly XmlNode[]): RunMarks {
+function runMarksOf(runChildren: readonly XmlNode[], forceBold: boolean): RunMarks {
   const rPr = findFirst(runChildren, 'w:rPr');
   const rPrChildren = rPr ? childrenOf(rPr) : [];
   const has = (tag: string) => findFirst(rPrChildren, tag) !== undefined;
@@ -93,7 +121,7 @@ function runMarksOf(runChildren: readonly XmlNode[]): RunMarks {
   const colorVal = color ? attrsOf(color)['@_w:val'] : undefined;
   const szVal = sz ? attrsOf(sz)['@_w:val'] : undefined;
   return {
-    strong: has('w:b'),
+    strong: has('w:b') || forceBold,
     em: has('w:i'),
     underline: underline !== undefined && attrsOf(underline)['@_w:val'] !== 'none',
     strike: has('w:strike'),
@@ -138,27 +166,36 @@ function runInlineNodesOf(runChildren: readonly XmlNode[], marks: RunMarks): PMN
 }
 
 /** w:p의 자식을 순회하며 인라인(텍스트·줄바꿈) 콘텐츠를 뽑아낸다. 이미지(w:drawing)는 건너뛴다(v1 미지원). */
-function inlineContentOf(pChildren: readonly XmlNode[]): PMNode[] {
+function inlineContentOf(pChildren: readonly XmlNode[], forceBold: boolean): PMNode[] {
   const nodes: PMNode[] = [];
   for (const run of findAll(pChildren, 'w:r')) {
     const runChildren = childrenOf(run);
-    nodes.push(...runInlineNodesOf(runChildren, runMarksOf(runChildren)));
+    nodes.push(...runInlineNodesOf(runChildren, runMarksOf(runChildren, forceBold)));
   }
   return nodes;
 }
 
-function paragraphFrom(pNode: XmlNode, defaultAlign: string | null): { node: PMNode; isListItem: boolean } {
+function paragraphFrom(
+  pNode: XmlNode,
+  defaultAlign: string | null,
+  stylesChildren: readonly XmlNode[],
+): { node: PMNode; isListItem: boolean } {
   const pChildren = childrenOf(pNode);
   const pPr = findFirst(pChildren, 'w:pPr');
   const pPrChildren = pPr ? childrenOf(pPr) : [];
   const level = headingLevel(pPrChildren);
-  const hasPStyle = findFirst(pPrChildren, 'w:pStyle') !== undefined;
-  // 문단 자신의 w:jc가 없고, 다른 스타일도 참조하지 않으면(=암묵적으로 기본 스타일을 쓰면)
-  // 그 기본 스타일 자체의 정렬(예: w:jc="both")을 물려받는다 — 제목(heading)은 별도 스타일
-  // 캐스케이드를 아직 풀지 않으므로 이 폴백에서 제외한다(잘못 끼워맞추지 않기 위해).
-  const align = alignOf(pPrChildren) ?? (level === null && !hasPStyle ? defaultAlign : null);
+  const pStyleEl = findFirst(pPrChildren, 'w:pStyle');
+  const pStyleId = pStyleEl ? attrsOf(pStyleEl)['@_w:val'] : undefined;
+  // 문단이 이름 있는 스타일을 참조하면(예: "테이블 제목") 그 스타일 자체가 직접 지정한
+  // 정렬·굵기를 물려받는다 — 실제 문서에서 표 제목/헤더 셀이 직접 서식 없이 이런 스타일만
+  // 참조하면서 center+bold를 적용받는 경우가 있었다.
+  const namedStyle = pStyleId ? namedStyleInfoOf(pStyleId, stylesChildren) : null;
+  // 문단 자신의 w:jc가 없고, 참조하는 이름 있는 스타일도 정렬을 안 지정하면 — 아무 스타일도
+  // 참조하지 않을 때만(=암묵적으로 "기본" 스타일을 쓸 때만) 문서 기본 정렬을 물려받는다.
+  // 제목(heading)은 별도 스타일 캐스케이드를 아직 풀지 않으므로 이 폴백에서 제외한다.
+  const align = alignOf(pPrChildren) ?? namedStyle?.align ?? (level === null && !pStyleId ? defaultAlign : null);
   const isListItem = findFirst(pPrChildren, 'w:numPr') !== undefined;
-  const inline = inlineContentOf(pChildren);
+  const inline = inlineContentOf(pChildren, namedStyle?.bold ?? false);
   const node =
     level !== null
       ? docxSchema.nodes.heading.create({ level, align }, inline)
@@ -188,10 +225,11 @@ function tableCellFrom(
   colwidth: readonly number[] | null,
   borders: CellBorders,
   defaultAlign: string | null,
+  stylesChildren: readonly XmlNode[],
   cellPadding: CellPadding,
 ): PMNode {
   const tcChildren = childrenOf(tcNode);
-  const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p, defaultAlign).node);
+  const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p, defaultAlign, stylesChildren).node);
   const content = paragraphs.length > 0 ? paragraphs : [docxSchema.nodes.paragraph.create()];
   const tcPrChildren = tcPrChildrenOf(tcNode);
   const background = backgroundOf(tcPrChildren);
@@ -466,6 +504,7 @@ function tableFrom(
   contentWidthPx: number | null,
   defaultAlign: string | null,
   styleTableCellMargin: CellMarginSides | null,
+  stylesChildren: readonly XmlNode[],
 ): PMNode {
   const tblChildren = childrenOf(tblNode);
   const trNodes = findAll(tblChildren, 'w:tr');
@@ -527,7 +566,7 @@ function tableFrom(
           styleTableCellMargin,
           cellMarginOverrideOf(tcPrChildren),
         );
-        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth, borders, defaultAlign, cellPadding);
+        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth, borders, defaultAlign, stylesChildren, cellPadding);
       }),
     ),
   );
@@ -810,10 +849,10 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
   for (const child of bodyChildren) {
     const tag = tagOf(child);
     if (tag === 'w:p') {
-      paragraphRun.push(paragraphFrom(child, defaultAlign));
+      paragraphRun.push(paragraphFrom(child, defaultAlign, stylesChildren));
     } else if (tag === 'w:tbl') {
       flushParagraphRun();
-      blocks.push(tableFrom(child, contentWidthPx, defaultAlign, styleTableCellMargin));
+      blocks.push(tableFrom(child, contentWidthPx, defaultAlign, styleTableCellMargin, stylesChildren));
     }
     // w:sectPr 등 그 외 body 직속 요소는 무시한다 (v1 미지원 영역)
   }
