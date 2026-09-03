@@ -1,7 +1,14 @@
 import { strFromU8, unzipSync } from 'fflate';
 import { XMLParser } from 'fast-xml-parser';
 import { Node as PMNode, type NodeType } from 'prosemirror-model';
-import { docxSchema, type CellBorderSide, type CellBorders, type PageSetup, type RowHeight } from './schema.js';
+import {
+  docxSchema,
+  type CellBorderSide,
+  type CellBorders,
+  type CellPadding,
+  type PageSetup,
+  type RowHeight,
+} from './schema.js';
 
 /**
  * fast-xml-parser를 preserveOrder 모드로 쓴다 — OOXML은 같은 태그(w:p, w:tbl 등)가
@@ -181,6 +188,7 @@ function tableCellFrom(
   colwidth: readonly number[] | null,
   borders: CellBorders,
   defaultAlign: string | null,
+  cellPadding: CellPadding,
 ): PMNode {
   const tcChildren = childrenOf(tcNode);
   const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p, defaultAlign).node);
@@ -189,7 +197,7 @@ function tableCellFrom(
   const background = backgroundOf(tcPrChildren);
   const verticalAlign = verticalAlignOf(tcPrChildren);
   return docxSchema.nodes.table_cell.create(
-    { colspan, rowspan, colwidth: colwidth ? [...colwidth] : null, background, borders, verticalAlign },
+    { colspan, rowspan, colwidth: colwidth ? [...colwidth] : null, background, borders, verticalAlign, cellPadding },
     content,
   );
 }
@@ -197,6 +205,77 @@ function tableCellFrom(
 function tcPrChildrenOf(tcNode: XmlNode): XmlNode[] {
   const tcPr = findFirst(childrenOf(tcNode), 'w:tcPr');
   return tcPr ? childrenOf(tcPr) : [];
+}
+
+interface CellMarginSides {
+  readonly top: number | undefined;
+  readonly right: number | undefined;
+  readonly bottom: number | undefined;
+  readonly left: number | undefined;
+}
+
+/** w:tblCellMar 또는 w:tcMar의 자식들에서 4변을 읽는다(dxa, 없는 변은 undefined). */
+function cellMarginSidesOf(marChildren: readonly XmlNode[]): CellMarginSides {
+  const sideOf = (tag: string): number | undefined => {
+    const el = findFirst(marChildren, tag);
+    if (!el) return undefined;
+    const val = Number(attrsOf(el)['@_w:w']);
+    return Number.isFinite(val) && val >= 0 ? val : undefined;
+  };
+  return { top: sideOf('w:top'), right: sideOf('w:right'), bottom: sideOf('w:bottom'), left: sideOf('w:left') };
+}
+
+/** Word 자체의 표준 기본 셀 여백(관례상의 "Normal Table" 기본값) — 위/아래 0, 좌/우 108dxa(0.075in). */
+const STANDARD_CELL_MARGIN_DXA: CellMarginSides = { top: 0, right: 108, bottom: 0, left: 108 };
+
+/** w:tblPr/w:tblCellMar — 이 표 자체가 지정한 기본 셀 여백. 없으면 null. */
+function tableCellMarginOf(tblChildren: readonly XmlNode[]): CellMarginSides | null {
+  const tblPr = findFirst(tblChildren, 'w:tblPr');
+  const tblPrChildren = tblPr ? childrenOf(tblPr) : [];
+  const tblCellMar = findFirst(tblPrChildren, 'w:tblCellMar');
+  return tblCellMar ? cellMarginSidesOf(childrenOf(tblCellMar)) : null;
+}
+
+/**
+ * "기본" 표 스타일(w:type="table" w:default="1") 자체의 w:tblCellMar — w:tblStyle을 지정하지
+ * 않은 모든 표가 암묵적으로 상속받는다(문단의 "기본" 스타일과 같은 구조). 실제 문서에서
+ * 이 스타일이 좌우 108dxa 같은 표준값을 명시하는 경우가 흔하다.
+ */
+function defaultTableStyleCellMarginOf(stylesChildren: readonly XmlNode[]): CellMarginSides | null {
+  const style = findAll(stylesChildren, 'w:style').find((s) => {
+    const attrs = attrsOf(s);
+    return attrs['@_w:type'] === 'table' && attrs['@_w:default'] === '1';
+  });
+  const tblPr = style && findFirst(childrenOf(style), 'w:tblPr');
+  const tblCellMar = tblPr && findFirst(childrenOf(tblPr), 'w:tblCellMar');
+  return tblCellMar ? cellMarginSidesOf(childrenOf(tblCellMar)) : null;
+}
+
+/** w:tcPr/w:tcMar — 이 셀만의 여백 재정의(있는 변만 표 기본값을 덮어쓴다). */
+function cellMarginOverrideOf(tcPrChildren: readonly XmlNode[]): CellMarginSides | null {
+  const tcMar = findFirst(tcPrChildren, 'w:tcMar');
+  return tcMar ? cellMarginSidesOf(childrenOf(tcMar)) : null;
+}
+
+/**
+ * 표 자체 지정 > 기본 표 스타일 > Word 표준 기본값 순으로 표 여백을 정하고, 그 위에
+ * 이 셀만의 재정의를 얹어 최종 4변 여백(px)을 확정한다. 여백은 테두리와 달리 "0"과
+ * "지정 안 함"을 구분할 필요가 없어(0도 유효한 여백값) ?? 체인으로 충분하다.
+ *
+ * dxaToPx(정수로 반올림)를 쓰지 않고 소수점까지 그대로 둔다 — 이 여백이 딱 맞는 셀 안에서
+ * 텍스트가 원본처럼 한 줄에 들어가느냐 두 줄로 줄바꿈되느냐를 가르는 값이라, 반올림으로
+ * 잃는 0.x px가 곧 줄바꿈 여부를 뒤집을 수 있다(예: 108dxa는 정확히 7.2px, 7px로
+ * 반올림하면 그만큼 텍스트 폭이 넓어져 원본과 다시 어긋난다).
+ */
+function resolveCellMargin(
+  tableDefault: CellMarginSides | null,
+  styleDefault: CellMarginSides | null,
+  cellOverride: CellMarginSides | null,
+): CellPadding {
+  const pick = (side: keyof CellMarginSides): number =>
+    (cellOverride?.[side] ?? tableDefault?.[side] ?? styleDefault?.[side] ?? STANDARD_CELL_MARGIN_DXA[side]!) /
+    DXA_PER_PX;
+  return { topPx: pick('top'), rightPx: pick('right'), bottomPx: pick('bottom'), leftPx: pick('left') };
 }
 
 /** w:tcPr/w:vAlign — 셀 안 내용의 세로 정렬. docx는 top/center/bottom, CSS vertical-align은 top/middle/bottom. */
@@ -382,11 +461,17 @@ function fitGridColWidthsPx(gridColWidthsPx: readonly number[], contentWidthPx: 
   return gridColWidthsPx.map((w) => Math.max(1, Math.round(w * scale)));
 }
 
-function tableFrom(tblNode: XmlNode, contentWidthPx: number | null, defaultAlign: string | null): PMNode {
+function tableFrom(
+  tblNode: XmlNode,
+  contentWidthPx: number | null,
+  defaultAlign: string | null,
+  styleTableCellMargin: CellMarginSides | null,
+): PMNode {
   const tblChildren = childrenOf(tblNode);
   const trNodes = findAll(tblChildren, 'w:tr');
   const gridColWidths = fitGridColWidthsPx(gridColWidthsOf(tblChildren).map(dxaToPx), contentWidthPx);
   const tableBorderDefaults = tableBorderDefaultsOf(tblChildren);
+  const tableCellMarginDefault = tableCellMarginOf(tblChildren);
   const tableAlign = tableAlignOf(tblChildren);
   const rowHeights: Array<RowHeight | null> = [];
 
@@ -427,7 +512,8 @@ function tableFrom(tblNode: XmlNode, contentWidthPx: number | null, defaultAlign
       placements.map((p) => {
         const widths = gridColWidths.slice(p.col, p.col + p.colspan);
         const colwidth = widths.length === p.colspan ? widths : null;
-        const cellOverride = cellBorderOverrideOf(tcPrChildrenOf(p.tc));
+        const tcPrChildren = tcPrChildrenOf(p.tc);
+        const cellOverride = cellBorderOverrideOf(tcPrChildren);
         const borders = resolveCellBorders(tableBorderDefaults, cellOverride, {
           row: p.row,
           col: p.col,
@@ -436,7 +522,12 @@ function tableFrom(tblNode: XmlNode, contentWidthPx: number | null, defaultAlign
           totalRows,
           totalCols,
         });
-        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth, borders, defaultAlign);
+        const cellPadding = resolveCellMargin(
+          tableCellMarginDefault,
+          styleTableCellMargin,
+          cellMarginOverrideOf(tcPrChildren),
+        );
+        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth, borders, defaultAlign, cellPadding);
       }),
     ),
   );
@@ -701,13 +792,14 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
   const bodyChildren = bodyEl ? childrenOf(bodyEl) : [];
   const pageSetup = pageSetupOf(findFirst(bodyChildren, 'w:sectPr'));
   const contentWidthPx = pageSetup ? pageSetup.widthPx - pageSetup.marginLeftPx - pageSetup.marginRightPx : null;
-  // pStyle 없이 암묵적으로 "기본" 문단 스타일을 쓰는 문단(대부분의 실제 문서가 이렇다)이
-  // 실제로 상속받는 정렬 — w:jc가 없다고 곧 left인 게 아니라, 이 기본 스타일이 예컨대
-  // both(justify)를 지정하고 있을 수 있다(paragraphFrom 참고).
+  // pStyle 없이 암묵적으로 "기본" 문단/표 스타일을 쓰는 문단·표(대부분의 실제 문서가 이렇다)가
+  // 실제로 상속받는 정렬·셀 여백 — w:jc가 없다고 곧 left, w:tblCellMar가 없다고 곧 우리 CSS
+  // 기본값(0.4rem 0.6rem)인 게 아니라, "기본" 스타일 자체가 다른 값을 지정하고 있을 수 있다
+  // (paragraphFrom/tableFrom 참고).
   const stylesXmlBytes = entries['word/styles.xml'];
-  const defaultAlign = stylesXmlBytes
-    ? defaultParagraphStyleInfoOf(stylesChildrenOf(strFromU8(stylesXmlBytes))).align
-    : null;
+  const stylesChildren = stylesXmlBytes ? stylesChildrenOf(strFromU8(stylesXmlBytes)) : [];
+  const defaultAlign = stylesXmlBytes ? defaultParagraphStyleInfoOf(stylesChildren).align : null;
+  const styleTableCellMargin = stylesXmlBytes ? defaultTableStyleCellMarginOf(stylesChildren) : null;
 
   const blocks: PMNode[] = [];
   const paragraphRun: Array<{ node: PMNode; isListItem: boolean }> = [];
@@ -721,7 +813,7 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
       paragraphRun.push(paragraphFrom(child, defaultAlign));
     } else if (tag === 'w:tbl') {
       flushParagraphRun();
-      blocks.push(tableFrom(child, contentWidthPx, defaultAlign));
+      blocks.push(tableFrom(child, contentWidthPx, defaultAlign, styleTableCellMargin));
     }
     // w:sectPr 등 그 외 body 직속 요소는 무시한다 (v1 미지원 영역)
   }

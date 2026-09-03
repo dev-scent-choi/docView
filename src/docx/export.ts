@@ -1,7 +1,7 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import type { Mark, Node as PMNode } from 'prosemirror-model';
 import { extractSectPrXml } from './import.js';
-import type { CellBorderSide, CellBorders, RowHeight } from './schema.js';
+import type { CellBorderSide, CellBorders, CellPadding, RowHeight } from './schema.js';
 
 function escapeXml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -127,6 +127,14 @@ function renderCellBordersXml(borders: unknown): string {
   );
 }
 
+/** 셀의 cellPadding 속성(4변 모두 확정된 px 값)을 <w:tcMar>로 직렬화한다. 없으면 빈 문자열(표/스타일 기본 여백을 그대로 따른다). */
+function renderCellMarginXml(padding: unknown): string {
+  if (!padding || typeof padding !== 'object') return '';
+  const p = padding as CellPadding;
+  const side = (tag: string, px: number) => `<w:${tag} w:w="${pxToDxa(px)}" w:type="dxa"/>`;
+  return `<w:tcMar>${side('top', p.topPx)}${side('left', p.leftPx)}${side('bottom', p.bottomPx)}${side('right', p.rightPx)}</w:tcMar>`;
+}
+
 /** 세로 병합 중(pending) 열의 상태 — 몇 행 더 w:vMerge 이어짐 칸을 채워야 하는지, 그 칸의 가로폭(colspan)·너비(dxa) */
 interface PendingVMerge {
   remaining: number;
@@ -208,9 +216,10 @@ function renderTableRow(
         : verticalAlign === 'top' || verticalAlign === 'bottom'
           ? `<w:vAlign w:val="${verticalAlign}"/>`
           : '';
+    const cellMarginXml = renderCellMarginXml(cell.attrs.cellPadding);
     cellsXml +=
       `<w:tc><w:tcPr><w:tcW w:w="${totalWidthDxa}" w:type="dxa"/>` +
-      `${gridSpanXml}${vMergeXml}${bordersXml}${shdXml}${vAlignXml}</w:tcPr>${cellBody}</w:tc>`;
+      `${gridSpanXml}${vMergeXml}${bordersXml}${shdXml}${vAlignXml}${cellMarginXml}</w:tcPr>${cellBody}</w:tc>`;
     if (rowspan > 1) pendingVMerge.set(col, { remaining: rowspan - 1, colspan, widthDxa: totalWidthDxa });
     col += colspan;
   }

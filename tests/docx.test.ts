@@ -509,6 +509,67 @@ describe('docx import: default paragraph alignment inherited from the default pa
   });
 });
 
+describe('docx import: table cell margins (w:tblCellMar/w:tcMar, cascaded like real Word)', () => {
+  // 우리 CSS는 모든 셀에 고정된 0.4rem 0.6rem(≈6.4px/9.6px) padding을 쓰는데, 실제 문서가
+  // 이보다 좁은 여백(예: 108dxa=7.2px)을 지정하면 그 차이만큼 셀 안 텍스트가 덜 들어가
+  // 원본에선 한 줄인 게 편집기에선 두 줄로 줄바꿈되는 원인이 된다.
+  function docxWithTablesXml(stylesTblPrXml: string, tableXml: string): Buffer {
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      (stylesTblPrXml
+        ? `<w:style w:type="table" w:default="1" w:styleId="a2"><w:name w:val="Normal Table"/><w:tblPr>${stylesTblPrXml}</w:tblPr></w:style>`
+        : '') +
+      '</w:styles>';
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    entries['word/styles.xml'] = strToU8(stylesXml);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${tableXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  const SIMPLE_TABLE =
+    '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr>' +
+    '<w:tc><w:p><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+
+  test('falls back to Word\'s standard cell margin (108dxa=7.2px left/right, 0 top/bottom) when nothing specifies one', () => {
+    const { doc } = importDocx(docxWithTablesXml('', SIMPLE_TABLE));
+    const cell = doc.child(0).child(0).child(0);
+    expect(cell.attrs.cellPadding).toEqual({ topPx: 0, rightPx: 7.2, bottomPx: 0, leftPx: 7.2 });
+  });
+
+  test('uses the default table style\'s own w:tblCellMar when the table itself does not specify one', () => {
+    const stylesTblPr = '<w:tblCellMar><w:top w:w="20" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>' +
+      '<w:bottom w:w="20" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>';
+    const { doc } = importDocx(docxWithTablesXml(stylesTblPr, SIMPLE_TABLE));
+    const cell = doc.child(0).child(0).child(0);
+    expect(cell.attrs.cellPadding).toEqual({ topPx: 20 / 15, rightPx: 7.2, bottomPx: 20 / 15, leftPx: 7.2 });
+  });
+
+  test('the table\'s own w:tblCellMar overrides the default table style', () => {
+    const tableXml =
+      '<w:tbl><w:tblPr><w:tblCellMar><w:left w:w="200" w:type="dxa"/><w:right w:w="200" w:type="dxa"/></w:tblCellMar></w:tblPr>' +
+      '<w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:p><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTablesXml('', tableXml));
+    const cell = doc.child(0).child(0).child(0);
+    expect(cell.attrs.cellPadding).toEqual({ topPx: 0, rightPx: 200 / 15, bottomPx: 0, leftPx: 200 / 15 });
+  });
+
+  test('a cell-level w:tcMar overrides the table default for that cell only', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:tcPr><w:tcMar><w:left w:w="300" w:type="dxa"/></w:tcMar></w:tcPr><w:p><w:r><w:t xml:space="preserve">a</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p><w:r><w:t xml:space="preserve">b</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTablesXml('', tableXml));
+    const row = doc.child(0).child(0);
+    expect(row.child(0).attrs.cellPadding).toEqual({ topPx: 0, rightPx: 7.2, bottomPx: 0, leftPx: 300 / 15 });
+    expect(row.child(1).attrs.cellPadding).toEqual({ topPx: 0, rightPx: 7.2, bottomPx: 0, leftPx: 7.2 });
+  });
+});
+
 describe('docx export', () => {
   test('round-trips formatted paragraphs, headings and tables through a full docx cycle', () => {
     const original = makeSampleDocx(['placeholder']);
@@ -792,6 +853,25 @@ describe('docx export', () => {
     const reimported = importDocx(exportDocx(original, doc));
     const reimportedCell = reimported.doc.child(0).child(0).child(0);
     expect(reimportedCell.attrs.verticalAlign).toBe('middle');
+  });
+
+  test('round-trips cell margins (w:tcPr/w:tcMar) read from the original OOXML', () => {
+    const original = makeSampleDocx(['placeholder']);
+    const cell = docxSchema.nodes.table_cell.create(
+      { colwidth: [100], cellPadding: { topPx: 1, rightPx: 12, bottomPx: 1, leftPx: 12 } },
+      docxSchema.nodes.paragraph.create(null, docxSchema.text('x')),
+    );
+    const row = docxSchema.nodes.table_row.create(null, [cell]);
+    const table = docxSchema.nodes.table.create(null, [row]);
+    const doc = docxSchema.nodes.doc.create(null, [table]);
+
+    const xml = renderDocumentXml(doc);
+    expect(xml).toContain('<w:tcMar>');
+    expect(xml).toContain(`<w:right w:w="${12 * 15}" w:type="dxa"/>`);
+
+    const reimported = importDocx(exportDocx(original, doc));
+    const reimportedCell = reimported.doc.child(0).child(0).child(0);
+    expect(reimportedCell.attrs.cellPadding).toEqual({ topPx: 1, rightPx: 12, bottomPx: 1, leftPx: 12 });
   });
 
   test('round-trips font color, font size and paragraph alignment', () => {

@@ -189,6 +189,27 @@ function borderSideFromDOM(cssValue: string): CellBorderSide | null {
 
 const VALID_VERTICAL_ALIGN = new Set(['top', 'middle', 'bottom']);
 
+/** 셀 안쪽 여백(docx의 w:tblCellMar/w:tcMar에서 계산된 최종값, px) — 4변 모두 확정된 값이다. */
+export interface CellPadding {
+  readonly topPx: number;
+  readonly rightPx: number;
+  readonly bottomPx: number;
+  readonly leftPx: number;
+}
+
+function cellPaddingToCSS(padding: CellPadding): string {
+  return `${padding.topPx}px ${padding.rightPx}px ${padding.bottomPx}px ${padding.leftPx}px`;
+}
+
+/** 계산된 CSS padding 값("Tpx Rpx Bpx Lpx")을 다시 CellPadding으로 되돌린다(HTML 붙여넣기 등 DOM 기반 입력용). */
+function cellPaddingFromDOM(cssValue: string): CellPadding | null {
+  if (!cssValue) return null;
+  const parts = cssValue.trim().split(/\s+/).map(parseFloat);
+  if (parts.length !== 4 || parts.some((v) => Number.isNaN(v))) return null;
+  const [topPx, rightPx, bottomPx, leftPx] = parts;
+  return { topPx, rightPx, bottomPx, leftPx };
+}
+
 const tableNodeSpecs = tableNodes({
   tableGroup: 'block',
   cellContent: 'block+',
@@ -232,6 +253,18 @@ const tableNodeSpecs = tableNodes({
         if (value && VALID_VERTICAL_ALIGN.has(value as string)) {
           attrs.style = `${(attrs.style as string | undefined) ?? ''}vertical-align: ${value as string};`;
         }
+      },
+    },
+    /**
+     * 셀 안쪽 여백(docx의 w:tblCellMar/w:tcMar) — CSS 기본값(0.4rem 0.6rem)은 모든 셀에
+     * 똑같이 적용되는 임의값이라, 원본이 이보다 좁은 여백을 쓰면 그 차이만큼 텍스트가 덜
+     * 들어가 원본에선 한 줄인 게 편집기에선 줄바꿈되는 원인이 된다. 없으면 null(CSS 기본값 사용).
+     */
+    cellPadding: {
+      default: null,
+      getFromDOM: (dom) => cellPaddingFromDOM((dom as HTMLElement).style.padding),
+      setDOMAttr: (value, attrs) => {
+        if (value) attrs.style = `${(attrs.style as string | undefined) ?? ''}padding: ${cellPaddingToCSS(value as CellPadding)};`;
       },
     },
   },
