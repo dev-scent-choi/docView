@@ -1787,7 +1787,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   align-items: stretch;
   justify-content: space-between;
   gap: 0.3rem;
-  padding: 0.1rem 0.7rem 0;
+  padding: 0.1rem 0.5rem 0;
   /* flex-shrink:0(=flex:none)이 없으면 그룹이 많아 한 줄에 다 안 들어갈 때 flexbox가 각
      그룹의 폭을 억지로 줄이는데, 안의 버튼 줄은 flex-wrap:wrap이라 폭이 줄어들수록 버튼이
      한 줄에 하나씩만 남게 줄바꿈되어(예: 표 그룹 6개 버튼이 세로로 6단 쌓임) 그룹 하나가
@@ -1965,7 +1965,10 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 
 /* 테두리 버튼 — 아이콘 버튼 옆에 작은 드롭다운 화살표가 붙어 클릭하면 옵션 메뉴가 뜬다. */
 .dropdown-btn { position: relative; display: inline-flex; align-items: center; }
-.dropdown-btn .icon-btn { width: 30px; }
+/* :not(.icon-btn-big)로 제외하지 않으면 이 규칙(클래스 2개)이 .icon-btn-big(클래스 1개)보다
+   우선순위가 높아져, 드롭다운 캐럿을 붙인 "붙여넣기" 큰 버튼까지 30px로 짜부라뜨려서
+   "붙여넣기" 4글자가 한 줄에 못 들어가고 한 글자씩 세로로 줄바꿈되는 버그가 있었다. */
+.dropdown-btn .icon-btn:not(.icon-btn-big) { width: 30px; }
 .dropdown-caret {
   display: inline-flex;
   align-items: center;
@@ -1989,13 +1992,16 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 /* 클립보드 그룹의 "붙여넣기" — 다른 리본 버튼(34px 정사각형)보다 훨씬 크게, 아이콘 위에
    드롭다운 화살표, 아래에 "붙여넣기" 글자가 온다(실제 워드와 같은 배치). */
 .icon-btn-big {
-  width: 46px;
+  width: 52px;
   height: 58px;
+  padding: 0;
   flex-direction: column;
   gap: 2px;
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   line-height: 1.15;
-  white-space: normal;
+  /* normal이면 "붙여넣기"처럼 띄어쓰기 없는 한글은 글자 사이 아무 데서나 줄바꿈이 허용돼,
+     버튼 폭이 살짝만 모자라도 한 글자씩 세로로 쌓여 보였다 — 한 줄 그대로 유지한다. */
+  white-space: nowrap;
   text-align: center;
 }
 .icon-btn-big svg { width: 22px; height: 22px; }
@@ -2007,14 +2013,17 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 
 /* "스타일" 그룹 — 미리보기 글자("가나다Aa") 위, 스타일 이름 아래로 된 갤러리 항목을 가로로
    나열한다(실제 워드는 스크롤/더보기가 있는 갤러리지만, 1차는 고정 나열만 한다). */
-.style-gallery { display: flex; align-items: stretch; gap: 0.15rem; overflow-x: auto; height: 100%; }
+/* 실제 워드도 스타일 갤러리를 고정 폭 안에 담고 나머지는 가로 스크롤/더보기 화살표로
+   넘겨서 본다 — 여기서도 폭을 제한해 리본 전체가 한 화면에 안 들어오고 스크롤이 생기던
+   문제(항목 11개를 전부 한 줄로 펼쳤던 게 가장 큰 원인)를 줄인다. */
+.style-gallery { display: flex; align-items: stretch; gap: 0.15rem; overflow-x: auto; height: 100%; max-width: 300px; }
 .style-gallery-item {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 0.15rem;
-  width: 62px;
+  width: 58px;
   padding: 0.2rem 0.15rem;
   border: 1px solid transparent;
   border-radius: 3px;
