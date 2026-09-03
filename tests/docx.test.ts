@@ -421,17 +421,17 @@ describe('docx import: default font family (w:docDefaults/w:rFonts, direct or th
 
   test('resolves w:eastAsiaTheme="minorEastAsia" to the theme minorFont Korean (Hang) typeface', () => {
     const docx = docxWithStylesAndTheme('w:asciiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"');
-    expect(getDocxDefaultFontFamily(docx)).toBe('"맑은 고딕", "Calibri"');
+    expect(getDocxDefaultFontFamily(docx)).toEqual({ eastAsia: '맑은 고딕', ascii: 'Calibri' });
   });
 
   test('resolves w:eastAsiaTheme="majorEastAsia" to the theme majorFont Korean (Hang) typeface', () => {
     const docx = docxWithStylesAndTheme('w:asciiTheme="majorHAnsi" w:eastAsiaTheme="majorEastAsia"');
-    expect(getDocxDefaultFontFamily(docx)).toBe('"맑은 고딕 제목", "Calibri Light"');
+    expect(getDocxDefaultFontFamily(docx)).toEqual({ eastAsia: '맑은 고딕 제목', ascii: 'Calibri Light' });
   });
 
   test('prefers a literal w:eastAsia typeface over a theme reference when both are absent/present', () => {
     const docx = docxWithStylesAndTheme('w:ascii="Arial" w:eastAsia="바탕체"');
-    expect(getDocxDefaultFontFamily(docx)).toBe('"바탕체", "Arial"');
+    expect(getDocxDefaultFontFamily(docx)).toEqual({ eastAsia: '바탕체', ascii: 'Arial' });
   });
 
   test('returns null when styles.xml has no w:docDefaults rFonts at all', () => {
@@ -459,7 +459,7 @@ describe('docx import: default font family (w:docDefaults/w:rFonts, direct or th
     const base = makeSampleDocx(['x']);
     const entries = unzipSync(base);
     entries['word/styles.xml'] = strToU8(stylesXml);
-    expect(getDocxDefaultFontFamily(Buffer.from(zipSync(entries)))).toBe('"굴림", "Arial"');
+    expect(getDocxDefaultFontFamily(Buffer.from(zipSync(entries)))).toEqual({ eastAsia: '굴림', ascii: 'Arial' });
   });
 });
 

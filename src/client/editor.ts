@@ -28,6 +28,11 @@ interface Permissions {
   readonly canEdit: boolean;
 }
 
+interface ScriptFontFamily {
+  readonly eastAsia: string | null;
+  readonly ascii: string | null;
+}
+
 interface ViewInfo {
   readonly docId: string;
   readonly name: string;
@@ -36,7 +41,7 @@ interface ViewInfo {
   readonly editHasUnsupportedContent: boolean;
   readonly pageSetup: PageSetup | null;
   readonly defaultFontSizePt: number | null;
-  readonly defaultFontFamily: string | null;
+  readonly defaultFontFamily: ScriptFontFamily | null;
 }
 
 const params = new URLSearchParams(location.search);
@@ -82,15 +87,38 @@ function applyDefaultFontSize(pt: number | null): void {
 }
 
 /**
- * 문서의 실제 기본 서체(word/theme/theme1.xml로 해석된 값, 예: "맑은 고딕")를 편집 화면
- * 기본 폰트로 앞에 붙인다 — 이게 없으면 이 앱 UI용 폰트(Pretendard 등)로 그려져 Word에서
- * 보던 글꼴과 아예 다른 서체가 된다. 기존 --font-sans는 그 뒤에 폴백으로 남겨둔다.
+ * 한글(Hangul) 코드 영역 — 이 범위의 글자만 eastAsia 서체(예: 굴림)를 쓰게 강제하고, 나머지
+ * (숫자·영문·기호 등)는 ascii 서체(예: Arial)로 넘긴다. 그냥 "굴림, Arial" 순서로만 나열하면
+ * 브라우저는 "이 글자를 그릴 수 있는 첫 폰트"로 폴백하는데, 굴림도 숫자 글리프를 갖고 있어
+ * Arial까지 안 내려가 버린다 — 그래서 날짜("2026. 07. 24") 같은 숫자가 Word에서 보이는 것보다
+ * 눈에 띄게 얇게 보였다(실제 문서로 확인한 결과). unicode-range로 스크립트별 폰트를 강제로
+ * 나눠야 Word처럼 숫자는 ascii 서체로, 한글은 eastAsia 서체로 각각 그려진다.
  */
-function applyDefaultFontFamily(family: string | null): void {
-  if (!family) return;
+const HANGUL_UNICODE_RANGE = 'U+1100-11FF, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF';
+
+/**
+ * 문서의 실제 기본 서체(한글 eastAsia + 영문/숫자 ascii, word/theme/theme1.xml로 해석된 값)를
+ * 편집 화면 기본 폰트로 적용한다. 두 서체가 다르면 위 unicode-range로 스크립트별로 갈라 쓰는
+ * 합성 폰트를 만들어 쓰고, 하나만 있거나 둘이 같으면 그냥 그 서체 하나만 쓴다.
+ */
+function applyDefaultFontFamily(family: ScriptFontFamily | null): void {
+  if (!family || (!family.eastAsia && !family.ascii)) return; // 이게 없으면 이 앱 UI용 폰트로 그려져 Word와 아예 다른 서체가 된다
+  const { eastAsia, ascii } = family;
   // .ProseMirror 자신에게 이미 font-family 선언이 있어(style.css) 상위 요소의 inline
   // font-family는 상속되지 않는다 — 그 선언이 참조하는 CSS 변수로 값을 흘려보낸다.
-  editorHost.style.setProperty('--doc-font-family', `${family}, var(--font-sans)`);
+  if (eastAsia && ascii && eastAsia !== ascii) {
+    const styleEl = document.createElement('style');
+    styleEl.textContent =
+      `@font-face { font-family: "doc-mixed-font"; src: local("${eastAsia}"); unicode-range: ${HANGUL_UNICODE_RANGE}; }` +
+      `@font-face { font-family: "doc-mixed-font"; src: local("${ascii}"); }`;
+    document.head.appendChild(styleEl);
+    editorHost.style.setProperty(
+      '--doc-font-family',
+      `"doc-mixed-font", "${eastAsia}", "${ascii}", var(--font-sans)`,
+    );
+  } else {
+    editorHost.style.setProperty('--doc-font-family', `"${eastAsia ?? ascii}", var(--font-sans)`);
+  }
 }
 
 /**

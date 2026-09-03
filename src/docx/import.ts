@@ -767,26 +767,35 @@ function resolveFontRef(
   return null;
 }
 
-/** w:rFonts 요소 하나를 CSS font-family 값으로 푼다(테마 참조 포함). 없으면 null. */
-function resolveFontFamilyFromRFonts(rFonts: XmlNode | undefined, themeXml: string | undefined): string | null {
+/**
+ * 문서 기본 서체 — Word는 한글(eastAsia)과 영문/숫자(ascii)에 서로 다른 서체를 쓸 수 있다
+ * (예: eastAsia="굴림", ascii="Arial"). 브라우저의 CSS font-family 목록은 "이 글자를 그릴 수
+ * 있는 첫 폰트"로 폴백해 스크립트별 지정을 구분하지 못하므로(굴림도 숫자 글리프를 갖고 있어
+ * Arial까지 안 내려간다), 두 값을 따로 둔 채 돌려준다 — 실제 CSS 적용은 client/editor.ts가
+ * unicode-range로 스크립트별로 갈라 처리한다.
+ */
+export interface ScriptFontFamily {
+  readonly eastAsia: string | null;
+  readonly ascii: string | null;
+}
+
+/** w:rFonts 요소 하나에서 한글·영문 서체를 각각 푼다(테마 참조 포함). 둘 다 없으면 null. */
+function resolveFontFamilyFromRFonts(rFonts: XmlNode | undefined, themeXml: string | undefined): ScriptFontFamily | null {
   if (!rFonts) return null;
   const attrs = attrsOf(rFonts);
   const eastAsia = resolveFontRef(attrs['@_w:eastAsia'], attrs['@_w:eastAsiaTheme'], themeXml, 'hang');
   const ascii = resolveFontRef(attrs['@_w:ascii'], attrs['@_w:asciiTheme'], themeXml, 'latin');
-  const families = [eastAsia, ascii].filter(
-    (family, index, all): family is string => family !== null && all.indexOf(family) === index,
-  );
-  return families.length > 0 ? families.map((family) => `"${family}"`).join(', ') : null;
+  return eastAsia || ascii ? { eastAsia, ascii } : null;
 }
 
 /**
- * word/styles.xml의 문서 기본 서체를 CSS font-family 값으로 뽑아낸다 — 직접 서식이 없는
- * 실행문은 이 서체로 보여야 브라우저의 기본 UI 폰트가 아니라 Word가 실제로 쓰는 서체와
- * 같아진다. 기본 문단 스타일 자체가 서체를 지정하면(흔히 리터럴로) 그 값이 docDefaults(흔히
- * 테마 참조)보다 우선한다 — 실제 Word의 상속 순서와 같다. 지정된 서체가 전혀 없으면 null
+ * word/styles.xml의 문서 기본 서체(한글/영문 각각)를 뽑아낸다 — 직접 서식이 없는 실행문은
+ * 이 서체로 보여야 브라우저의 기본 UI 폰트가 아니라 Word가 실제로 쓰는 서체와 같아진다.
+ * 기본 문단 스타일 자체가 서체를 지정하면(흔히 리터럴로) 그 값이 docDefaults(흔히 테마
+ * 참조)보다 우선한다 — 실제 Word의 상속 순서와 같다. 지정된 서체가 전혀 없으면 null
  * (기존 CSS 폴백 유지).
  */
-export function getDocxDefaultFontFamily(docxBytes: Uint8Array): string | null {
+export function getDocxDefaultFontFamily(docxBytes: Uint8Array): ScriptFontFamily | null {
   const entries = unzipSync(docxBytes);
   const stylesXmlBytes = entries['word/styles.xml'];
   if (!stylesXmlBytes) return null;
