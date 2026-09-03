@@ -1788,6 +1788,13 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   justify-content: space-between;
   gap: 0.3rem;
   padding: 0.1rem 0.7rem 0;
+  /* flex-shrink:0(=flex:none)이 없으면 그룹이 많아 한 줄에 다 안 들어갈 때 flexbox가 각
+     그룹의 폭을 억지로 줄이는데, 안의 버튼 줄은 flex-wrap:wrap이라 폭이 줄어들수록 버튼이
+     한 줄에 하나씩만 남게 줄바꿈되어(예: 표 그룹 6개 버튼이 세로로 6단 쌓임) 그룹 하나가
+     비정상적으로 길쭉해지고 그 높이에 맞춰 다른 모든 그룹까지 늘어나 버렸다(실제 증상).
+     .toolbar-format이 이미 overflow-x:auto로 가로 스크롤을 대신 처리하므로, 그룹은 항상
+     자기 내용 그대로의 폭을 유지하게 한다. */
+  flex: none;
   /* 일반 --v-glass-line(옅은 크림색)은 도구 영역 배경과 거의 구분이 안 돼서, 그룹 구분선만
      더 진한 색으로 따로 준다. */
   border-right: 1px solid color-mix(in srgb, var(--v-glass-line) 40%, var(--color-ink-soft) 60%);
