@@ -364,10 +364,23 @@ function rowHeightOf(trChildren: readonly XmlNode[]): RowHeight | null {
   return { rule: hRule === 'exact' ? 'exact' : 'atLeast', px: dxaToPx(val) };
 }
 
-function tableFrom(tblNode: XmlNode): PMNode {
+/**
+ * w:tblGrid 열 폭 합이 페이지 내용 폭(contentWidthPx)보다 넓으면, Word가 실제로 그러듯
+ * (AutoFit) 비율을 유지한 채 내용 폭에 맞춰 축소한다. contentWidthPx를 모르거나(sectPr 없음)
+ * 이미 내용 폭 이내면 그대로 둔다 — 원본보다 좁은 표를 억지로 늘리지는 않는다(과거에 고친
+ * width:100% 강제 확장 버그의 재발 방지).
+ */
+function fitGridColWidthsPx(gridColWidthsPx: readonly number[], contentWidthPx: number | null): number[] {
+  const total = gridColWidthsPx.reduce((sum, w) => sum + w, 0);
+  if (contentWidthPx === null || total <= contentWidthPx || total <= 0) return [...gridColWidthsPx];
+  const scale = contentWidthPx / total;
+  return gridColWidthsPx.map((w) => Math.max(1, Math.round(w * scale)));
+}
+
+function tableFrom(tblNode: XmlNode, contentWidthPx: number | null): PMNode {
   const tblChildren = childrenOf(tblNode);
   const trNodes = findAll(tblChildren, 'w:tr');
-  const gridColWidths = gridColWidthsOf(tblChildren);
+  const gridColWidths = fitGridColWidthsPx(gridColWidthsOf(tblChildren).map(dxaToPx), contentWidthPx);
   const tableBorderDefaults = tableBorderDefaultsOf(tblChildren);
   const tableAlign = tableAlignOf(tblChildren);
   const rowHeights: Array<RowHeight | null> = [];
@@ -408,7 +421,7 @@ function tableFrom(tblNode: XmlNode): PMNode {
       { height: rowHeights[row] },
       placements.map((p) => {
         const widths = gridColWidths.slice(p.col, p.col + p.colspan);
-        const colwidth = widths.length === p.colspan ? widths.map(dxaToPx) : null;
+        const colwidth = widths.length === p.colspan ? widths : null;
         const cellOverride = cellBorderOverrideOf(tcPrChildrenOf(p.tc));
         const borders = resolveCellBorders(tableBorderDefaults, cellOverride, {
           row: p.row,
@@ -508,6 +521,35 @@ export function extractSectPrXml(documentXml: string): string | null {
   return matches && matches.length > 0 ? matches[matches.length - 1] : null;
 }
 
+/** Word가 실제로 쓰는 기본 폰트 크기가 없을 때의 대체값(10pt) — Word 새 문서의 기본값도 이와 같다. */
+const FALLBACK_DEFAULT_FONT_SIZE_PT = 10;
+
+/** w:docDefaults/w:rPrDefault/w:rPr/w:sz — 직접 서식도, 스타일도 지정하지 않은 실행문이 실제로
+ * 쓰는 폰트 크기(half-point). 없으면 10pt로 대체한다. */
+function defaultFontSizePtOf(docDefaults: XmlNode | undefined): number {
+  if (!docDefaults) return FALLBACK_DEFAULT_FONT_SIZE_PT;
+  const rPrDefault = findFirst(childrenOf(docDefaults), 'w:rPrDefault');
+  const rPr = rPrDefault && findFirst(childrenOf(rPrDefault), 'w:rPr');
+  const sz = rPr && findFirst(childrenOf(rPr), 'w:sz');
+  const val = sz ? Number(attrsOf(sz)['@_w:val']) : NaN;
+  return Number.isFinite(val) && val > 0 ? val / 2 : FALLBACK_DEFAULT_FONT_SIZE_PT;
+}
+
+/**
+ * word/styles.xml의 문서 기본 폰트 크기만 가볍게 뽑아낸다 — 직접 서식(w:rPr/w:sz)이 없는
+ * 실행문은 이 값을 상속받아 렌더링해야 브라우저 기본값(16px)이 아니라 Word가 실제로 보여주는
+ * 크기와 같아진다(client/editor.ts가 .ProseMirror 기본 font-size로 적용).
+ */
+export function getDocxDefaultFontSizePt(docxBytes: Uint8Array): number {
+  const entries = unzipSync(docxBytes);
+  const stylesXmlBytes = entries['word/styles.xml'];
+  if (!stylesXmlBytes) return FALLBACK_DEFAULT_FONT_SIZE_PT;
+  const parsed = parser.parse(strFromU8(stylesXmlBytes)) as XmlNode[];
+  const stylesEl = findFirst(parsed, 'w:styles');
+  const stylesChildren = stylesEl ? childrenOf(stylesEl) : [];
+  return defaultFontSizePtOf(findFirst(stylesChildren, 'w:docDefaults'));
+}
+
 /**
  * 페이지 크기·여백만 가볍게 뽑아낸다(표·문단 전체를 파싱하는 importDocx보다 훨씬 싸다) —
  * 뷰어가 "이 문서를 실제 Word 페이지 비율로 얼마나 넓게 그릴지" 계산하는 용도(src/routes/viewer.ts).
@@ -538,6 +580,7 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
   const bodyEl = documentEl && findFirst(childrenOf(documentEl), 'w:body');
   const bodyChildren = bodyEl ? childrenOf(bodyEl) : [];
   const pageSetup = pageSetupOf(findFirst(bodyChildren, 'w:sectPr'));
+  const contentWidthPx = pageSetup ? pageSetup.widthPx - pageSetup.marginLeftPx - pageSetup.marginRightPx : null;
 
   const blocks: PMNode[] = [];
   const paragraphRun: Array<{ node: PMNode; isListItem: boolean }> = [];
@@ -551,7 +594,7 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
       paragraphRun.push(paragraphFrom(child));
     } else if (tag === 'w:tbl') {
       flushParagraphRun();
-      blocks.push(tableFrom(child));
+      blocks.push(tableFrom(child, contentWidthPx));
     }
     // w:sectPr 등 그 외 body 직속 요소는 무시한다 (v1 미지원 영역)
   }

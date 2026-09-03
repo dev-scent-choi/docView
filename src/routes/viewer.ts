@@ -16,7 +16,7 @@ import {
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { extractPdfText, searchPdfText, type PageText } from '../search.js';
 import { detectNearbyTextStyle } from '../textStyle.js';
-import { docxHasUnsupportedContent, getDocxPageSetup } from '../docx/import.js';
+import { docxHasUnsupportedContent, getDocxDefaultFontSizePt, getDocxPageSetup } from '../docx/import.js';
 import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup, updateMarkup } from '../markup.js';
 import { touchPresence } from '../presence.js';
 import { flushNow, getCurrentBytes } from '../collab/room.js';
@@ -391,6 +391,15 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
         view.meta.ext === 'docx'
           ? await store.readOriginal(view.meta.id, view.meta.ext).then(getDocxPageSetup).catch(() => null)
           : null;
+      // 직접 서식도 스타일도 없는 실행문이 상속받는 문서 기본 폰트 크기(w:docDefaults) —
+      // 없으면 브라우저 기본값(16px)이 적용되어 Word가 실제로 보여주는 크기와 달라진다.
+      const defaultFontSizePt =
+        view.meta.ext === 'docx'
+          ? await store
+              .readOriginal(view.meta.id, view.meta.ext)
+              .then(getDocxDefaultFontSizePt)
+              .catch(() => null)
+          : null;
       return {
         success: true,
         data: {
@@ -406,6 +415,7 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
           viewer: view.claims.viewer,
           editHasUnsupportedContent,
           pageSetup,
+          defaultFontSizePt,
         },
       };
     },

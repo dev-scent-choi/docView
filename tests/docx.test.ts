@@ -1,7 +1,7 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { describe, expect, test } from 'vitest';
 import { exportDocx, renderDocumentXml } from '../src/docx/export.js';
-import { importDocx } from '../src/docx/import.js';
+import { getDocxDefaultFontSizePt, importDocx } from '../src/docx/import.js';
 import { docxSchema } from '../src/docx/schema.js';
 import { makeSampleDocx } from './helpers.js';
 
@@ -309,6 +309,78 @@ describe('docx import: page setup, table alignment, row height, cell vertical al
     entries['word/document.xml'] = strToU8(xml);
     const { doc } = importDocx(Buffer.from(zipSync(entries)));
     expect(doc.child(0).child(0).child(0).attrs.verticalAlign).toBe('middle');
+  });
+
+  const A4_SECTPR =
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>';
+
+  function docxWithTableAndSectPr(tableXml: string, sectPrXml: string = A4_SECTPR): Buffer {
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${tableXml}${sectPrXml}`);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  test('scales column widths down to fit the page content width when w:tblGrid overflows it', () => {
+    // A4, 1인치 여백 -> 내용 폭 602px(794-96-96). 표는 그 폭보다 훨씬 넓은 800px(6000dxa*2)로 지정됨.
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="6000"/><w:gridCol w:w="6000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableAndSectPr(tableXml));
+    const row = doc.child(0).child(0);
+    // 800px -> 602px로 축소되므로 비율(1:1)을 유지한 채 각각 301px이 되어야 한다.
+    expect(row.child(0).attrs.colwidth).toEqual([301]);
+    expect(row.child(1).attrs.colwidth).toEqual([301]);
+  });
+
+  test('leaves column widths untouched when w:tblGrid already fits within the page content width', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableAndSectPr(tableXml));
+    expect(doc.child(0).child(0).child(0).attrs.colwidth).toEqual([200]); // 3000/15, 좁은 표는 그대로
+  });
+
+  test('leaves column widths untouched when there is no page setup to compare against', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="6000"/><w:gridCol w:w="6000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithTableAndSectPr(tableXml, '<w:sectPr/>'));
+    const row = doc.child(0).child(0);
+    expect(row.child(0).attrs.colwidth).toEqual([400]);
+    expect(row.child(1).attrs.colwidth).toEqual([400]);
+  });
+});
+
+describe('docx import: default font size (w:docDefaults, for documents with no direct/style font size)', () => {
+  function docxWithStylesXml(stylesXml: string): Buffer {
+    const base = makeSampleDocx(['x']);
+    const entries = unzipSync(base);
+    entries['word/styles.xml'] = strToU8(stylesXml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  test('reads w:docDefaults/w:rPrDefault/w:rPr/w:sz as the document default font size (half-points -> pt)', () => {
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>' +
+      '</w:styles>';
+    expect(getDocxDefaultFontSizePt(docxWithStylesXml(stylesXml))).toBe(11);
+  });
+
+  test('falls back to 10pt when styles.xml has no w:docDefaults sz', () => {
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:styles>';
+    expect(getDocxDefaultFontSizePt(docxWithStylesXml(stylesXml))).toBe(10);
   });
 });
 

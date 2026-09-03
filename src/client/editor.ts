@@ -35,6 +35,7 @@ interface ViewInfo {
   readonly permissions: Permissions;
   readonly editHasUnsupportedContent: boolean;
   readonly pageSetup: PageSetup | null;
+  readonly defaultFontSizePt: number | null;
 }
 
 const params = new URLSearchParams(location.search);
@@ -65,6 +66,18 @@ function applyPageSetup(pageSetup: PageSetup | null): void {
     `${pageSetup.marginTopPx}px ${pageSetup.marginRightPx}px ${pageSetup.marginBottomPx}px ${pageSetup.marginLeftPx}px`;
   // .ProseMirror의 임의 max-width:65ch 캡을 풀어서 실제 여백만큼의 콘텐츠 폭을 그대로 쓰게 한다
   editorHost.classList.add('page-sized');
+}
+
+/**
+ * 직접 서식도 문단 스타일도 없는 실행문은 Word에서 word/styles.xml의 문서 기본값(대개
+ * 10~11pt)을 상속받아 보여지는데, 웹뷰어는 그 상속을 계산하지 않고 브라우저 기본값(16px)을
+ * 그대로 썼다 — 그래서 직접 서식이 거의 없는 문서 전체가 원본보다 커 보였다. editorHost에
+ * 상속 가능한 기본 font-size로 걸어두면, 직접 서식이 있는 실행문(fontSize 마크가 만든
+ * 인라인 style)은 이 상속값을 그대로 덮어써 영향받지 않는다.
+ */
+function applyDefaultFontSize(pt: number | null): void {
+  if (!pt) return;
+  editorHost.style.fontSize = `${(pt * 4) / 3}px`; // 1pt = 96/72px = 4/3px
 }
 
 /**
@@ -331,6 +344,7 @@ async function main(): Promise<void> {
     warningEl.hidden = false;
   }
   applyPageSetup(info.pageSetup);
+  applyDefaultFontSize(info.defaultFontSizePt);
 
   const ydoc = new Y.Doc();
   const fragment = ydoc.getXmlFragment('prosemirror');
