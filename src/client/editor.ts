@@ -36,6 +36,7 @@ interface ViewInfo {
   readonly editHasUnsupportedContent: boolean;
   readonly pageSetup: PageSetup | null;
   readonly defaultFontSizePt: number | null;
+  readonly defaultFontFamily: string | null;
 }
 
 const params = new URLSearchParams(location.search);
@@ -78,6 +79,18 @@ function applyPageSetup(pageSetup: PageSetup | null): void {
 function applyDefaultFontSize(pt: number | null): void {
   if (!pt) return;
   editorHost.style.fontSize = `${(pt * 4) / 3}px`; // 1pt = 96/72px = 4/3px
+}
+
+/**
+ * 문서의 실제 기본 서체(word/theme/theme1.xml로 해석된 값, 예: "맑은 고딕")를 편집 화면
+ * 기본 폰트로 앞에 붙인다 — 이게 없으면 이 앱 UI용 폰트(Pretendard 등)로 그려져 Word에서
+ * 보던 글꼴과 아예 다른 서체가 된다. 기존 --font-sans는 그 뒤에 폴백으로 남겨둔다.
+ */
+function applyDefaultFontFamily(family: string | null): void {
+  if (!family) return;
+  // .ProseMirror 자신에게 이미 font-family 선언이 있어(style.css) 상위 요소의 inline
+  // font-family는 상속되지 않는다 — 그 선언이 참조하는 CSS 변수로 값을 흘려보낸다.
+  editorHost.style.setProperty('--doc-font-family', `${family}, var(--font-sans)`);
 }
 
 /**
@@ -345,6 +358,7 @@ async function main(): Promise<void> {
   }
   applyPageSetup(info.pageSetup);
   applyDefaultFontSize(info.defaultFontSizePt);
+  applyDefaultFontFamily(info.defaultFontFamily);
 
   const ydoc = new Y.Doc();
   const fragment = ydoc.getXmlFragment('prosemirror');

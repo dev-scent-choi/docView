@@ -2062,7 +2062,11 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 
 .editor-surface .ProseMirror {
   outline: none;
-  font-family: var(--font-sans);
+  /* editor.ts의 applyDefaultFontFamily가 --doc-font-family를 editorHost에 걸어 Word의 실제
+     문서 기본 서체로 덮어쓴다 — 여기서 font-family를 직접 선언해두면(inline style이 아니라
+     이 자리에서 그냥 var(--font-sans)로 고정하면) 상위 요소의 inline font-family는 상속되지
+     않으므로(이 요소 자신에게 이미 값이 있으므로) 반드시 변수를 거쳐야 한다. */
+  font-family: var(--doc-font-family, var(--font-sans));
   line-height: 1.75;
   max-width: 65ch;
 }
@@ -2088,6 +2092,10 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   border: 1px solid var(--color-line);
   padding: 0.4rem 0.6rem;
   min-width: 2em;
+  /* 브라우저의 <td> 기본값은 vertical-align:middle이지만, Word는 w:tcPr/w:vAlign이 없는 칸을
+     top으로 그린다 — schema.ts의 verticalAlign 셀 속성이 명시된 칸만 인라인 style로 이 기본을
+     덮어쓰므로, 명시 없는 칸은 이 top이 곧 Word의 실제 기본 렌더링과 같아진다. */
+  vertical-align: top;
   /* table-layout:fixed에서도 URL·경로처럼 공백 없는 긴 토큰은 줄바꿈 없이 셀 밖으로
      넘칠 수 있다 — 그런 긴 토큰도 줄바꿈되게 한다 */
   overflow-wrap: break-word;

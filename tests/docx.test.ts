@@ -1,7 +1,7 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { describe, expect, test } from 'vitest';
 import { exportDocx, renderDocumentXml } from '../src/docx/export.js';
-import { getDocxDefaultFontSizePt, importDocx } from '../src/docx/import.js';
+import { getDocxDefaultFontFamily, getDocxDefaultFontSizePt, importDocx } from '../src/docx/import.js';
 import { docxSchema } from '../src/docx/schema.js';
 import { makeSampleDocx } from './helpers.js';
 
@@ -381,6 +381,54 @@ describe('docx import: default font size (w:docDefaults, for documents with no d
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:styles>';
     expect(getDocxDefaultFontSizePt(docxWithStylesXml(stylesXml))).toBe(10);
+  });
+});
+
+describe('docx import: default font family (w:docDefaults/w:rFonts, direct or theme-resolved)', () => {
+  const THEME1_XML =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>' +
+    '<a:fontScheme name="Office">' +
+    '<a:majorFont><a:latin typeface="Calibri Light"/><a:font script="Hang" typeface="맑은 고딕 제목"/></a:majorFont>' +
+    '<a:minorFont><a:latin typeface="Calibri"/><a:font script="Hang" typeface="맑은 고딕"/></a:minorFont>' +
+    '</a:fontScheme></a:themeElements></a:theme>';
+
+  function docxWithStylesAndTheme(rFontsAttrs: string): Buffer {
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      `<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts ${rFontsAttrs}/></w:rPr></w:rPrDefault></w:docDefaults>` +
+      '</w:styles>';
+    const base = makeSampleDocx(['x']);
+    const entries = unzipSync(base);
+    entries['word/styles.xml'] = strToU8(stylesXml);
+    entries['word/theme/theme1.xml'] = strToU8(THEME1_XML);
+    return Buffer.from(zipSync(entries));
+  }
+
+  test('resolves w:eastAsiaTheme="minorEastAsia" to the theme minorFont Korean (Hang) typeface', () => {
+    const docx = docxWithStylesAndTheme('w:asciiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"');
+    expect(getDocxDefaultFontFamily(docx)).toBe('"맑은 고딕", "Calibri"');
+  });
+
+  test('resolves w:eastAsiaTheme="majorEastAsia" to the theme majorFont Korean (Hang) typeface', () => {
+    const docx = docxWithStylesAndTheme('w:asciiTheme="majorHAnsi" w:eastAsiaTheme="majorEastAsia"');
+    expect(getDocxDefaultFontFamily(docx)).toBe('"맑은 고딕 제목", "Calibri Light"');
+  });
+
+  test('prefers a literal w:eastAsia typeface over a theme reference when both are absent/present', () => {
+    const docx = docxWithStylesAndTheme('w:ascii="Arial" w:eastAsia="바탕체"');
+    expect(getDocxDefaultFontFamily(docx)).toBe('"바탕체", "Arial"');
+  });
+
+  test('returns null when styles.xml has no w:docDefaults rFonts at all', () => {
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:styles>';
+    const base = makeSampleDocx(['x']);
+    const entries = unzipSync(base);
+    entries['word/styles.xml'] = strToU8(stylesXml);
+    expect(getDocxDefaultFontFamily(Buffer.from(zipSync(entries)))).toBeNull();
   });
 });
 

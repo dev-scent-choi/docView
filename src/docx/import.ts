@@ -550,6 +550,66 @@ export function getDocxDefaultFontSizePt(docxBytes: Uint8Array): number {
   return defaultFontSizePtOf(findFirst(stylesChildren, 'w:docDefaults'));
 }
 
+/** a:fontScheme/a:minorFont(또는 a:majorFont) 안에서 라틴 기본 서체와 한글(Hang) 서체를 뽑는다. */
+function themeTypefaceOf(themeXml: string, slot: 'minorFont' | 'majorFont'): { latin: string | null; hang: string | null } {
+  const slotMatch = new RegExp(`<a:${slot}>([\\s\\S]*?)</a:${slot}>`).exec(themeXml);
+  if (!slotMatch) return { latin: null, hang: null };
+  const body = slotMatch[1];
+  const latin = /<a:latin typeface="([^"]*)"/.exec(body)?.[1];
+  const hang = /<a:font script="Hang" typeface="([^"]*)"/.exec(body)?.[1];
+  return { latin: latin || null, hang: hang || null };
+}
+
+/**
+ * w:rFonts의 한 서체 지정(예: w:eastAsia/w:eastAsiaTheme, w:ascii/w:asciiTheme)을 실제 서체
+ * 이름으로 푼다. 직접 이름(literal)이 있으면 그걸 그대로 쓰고, 테마 참조(예: "majorEastAsia")만
+ * 있으면 word/theme/theme1.xml의 해당 슬롯(major/minor)에서 script에 맞는 서체(한글은 Hang,
+ * 라틴은 latin)를 찾는다.
+ */
+function resolveFontRef(
+  literal: string | undefined,
+  themeRef: string | undefined,
+  themeXml: string | undefined,
+  script: 'hang' | 'latin',
+): string | null {
+  if (literal) return literal;
+  if (themeRef && themeXml) {
+    const slot = /major/i.test(themeRef) ? 'majorFont' : 'minorFont';
+    const typefaces = themeTypefaceOf(themeXml, slot);
+    return typefaces[script];
+  }
+  return null;
+}
+
+/**
+ * word/styles.xml의 문서 기본 서체(w:docDefaults/w:rPrDefault/w:rPr/w:rFonts)를 CSS
+ * font-family 값으로 뽑아낸다 — 직접 서식이 없는 실행문은 이 서체로 보여야 브라우저의
+ * 기본 UI 폰트가 아니라 Word가 실제로 쓰는 서체(이 프로젝트가 다루는 문서 대부분은
+ * 테마의 맑은 고딕)와 같아진다. 테마 참조(예: eastAsiaTheme)는 word/theme/theme1.xml을
+ * 함께 읽어 실제 서체 이름으로 해석한다. 지정된 서체가 전혀 없으면 null(기존 CSS 폴백 유지).
+ */
+export function getDocxDefaultFontFamily(docxBytes: Uint8Array): string | null {
+  const entries = unzipSync(docxBytes);
+  const stylesXmlBytes = entries['word/styles.xml'];
+  if (!stylesXmlBytes) return null;
+  const parsed = parser.parse(strFromU8(stylesXmlBytes)) as XmlNode[];
+  const stylesEl = findFirst(parsed, 'w:styles');
+  const docDefaults = stylesEl && findFirst(childrenOf(stylesEl), 'w:docDefaults');
+  const rPrDefault = docDefaults && findFirst(childrenOf(docDefaults), 'w:rPrDefault');
+  const rPr = rPrDefault && findFirst(childrenOf(rPrDefault), 'w:rPr');
+  const rFonts = rPr && findFirst(childrenOf(rPr), 'w:rFonts');
+  if (!rFonts) return null;
+  const attrs = attrsOf(rFonts);
+  const themeXmlBytes = entries['word/theme/theme1.xml'];
+  const themeXml = themeXmlBytes ? strFromU8(themeXmlBytes) : undefined;
+  const eastAsia = resolveFontRef(attrs['@_w:eastAsia'], attrs['@_w:eastAsiaTheme'], themeXml, 'hang');
+  const ascii = resolveFontRef(attrs['@_w:ascii'], attrs['@_w:asciiTheme'], themeXml, 'latin');
+  const families = [eastAsia, ascii].filter(
+    (family, index, all): family is string => family !== null && all.indexOf(family) === index,
+  );
+  return families.length > 0 ? families.map((family) => `"${family}"`).join(', ') : null;
+}
+
 /**
  * 페이지 크기·여백만 가볍게 뽑아낸다(표·문단 전체를 파싱하는 importDocx보다 훨씬 싸다) —
  * 뷰어가 "이 문서를 실제 Word 페이지 비율로 얼마나 넓게 그릴지" 계산하는 용도(src/routes/viewer.ts).

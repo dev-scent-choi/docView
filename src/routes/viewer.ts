@@ -16,7 +16,12 @@ import {
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { extractPdfText, searchPdfText, type PageText } from '../search.js';
 import { detectNearbyTextStyle } from '../textStyle.js';
-import { docxHasUnsupportedContent, getDocxDefaultFontSizePt, getDocxPageSetup } from '../docx/import.js';
+import {
+  docxHasUnsupportedContent,
+  getDocxDefaultFontFamily,
+  getDocxDefaultFontSizePt,
+  getDocxPageSetup,
+} from '../docx/import.js';
 import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup, updateMarkup } from '../markup.js';
 import { touchPresence } from '../presence.js';
 import { flushNow, getCurrentBytes } from '../collab/room.js';
@@ -400,6 +405,14 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
               .then(getDocxDefaultFontSizePt)
               .catch(() => null)
           : null;
+      // 문서 기본 서체(word/theme/theme1.xml로 해석) — 없으면 null(에디터가 기존 폰트를 그대로 씀).
+      const defaultFontFamily =
+        view.meta.ext === 'docx'
+          ? await store
+              .readOriginal(view.meta.id, view.meta.ext)
+              .then(getDocxDefaultFontFamily)
+              .catch(() => null)
+          : null;
       return {
         success: true,
         data: {
@@ -416,6 +429,7 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
           editHasUnsupportedContent,
           pageSetup,
           defaultFontSizePt,
+          defaultFontFamily,
         },
       };
     },
