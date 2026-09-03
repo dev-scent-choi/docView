@@ -463,11 +463,23 @@ async function main(): Promise<void> {
   const zoomLevelEl = document.getElementById('zoom-level') as HTMLElement;
   const ZOOM_MIN = 0.6;
   const ZOOM_MAX = 2;
-  let zoom = 1;
+  // 뷰어("바로 보기")는 페이지를 실제 96dpi 크기가 아니라 .pages-container(최대 1120px,
+  // 좌우 1rem 패딩 → 실사용 1088px)에 맞춰 확대해서 보여준다 — 편집기는 지금까지 페이지를
+  // 항상 실제 크기(zoom=100%)로만 그려서, 같은 문서인데 "종이 자체가 더 작아 보인다"는
+  // 차이가 났다. 뷰어와 같은 컨테이너 폭 기준으로 초기 줌을 계산해 화면에 보이는 크기를 맞춘다.
+  const VIEWER_PAGE_CONTAINER_MAX_PX = 1120;
+  const VIEWER_PAGE_CONTAINER_PADDING_PX = 32; // 뷰어 .pages-container의 좌우 1rem(16px)×2
+  function computeInitialZoom(pageWidthPx: number): number {
+    const availableWidthPx = Math.min(VIEWER_PAGE_CONTAINER_MAX_PX, window.innerWidth) - VIEWER_PAGE_CONTAINER_PADDING_PX;
+    const fitZoom = availableWidthPx / pageWidthPx;
+    return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(fitZoom * 10) / 10));
+  }
+  let zoom = info.pageSetup ? computeInitialZoom(info.pageSetup.widthPx) : 1;
   function applyZoom(): void {
     zoomHost.style.zoom = String(zoom);
     zoomLevelEl.textContent = `${Math.round(zoom * 100)}%`;
   }
+  applyZoom();
   document.getElementById('zoom-in')?.addEventListener('click', () => {
     zoom = Math.min(ZOOM_MAX, Math.round((zoom + 0.1) * 10) / 10);
     applyZoom();
