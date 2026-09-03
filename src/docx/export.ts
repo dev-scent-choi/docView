@@ -1,6 +1,7 @@
-import { strToU8, unzipSync, zipSync } from 'fflate';
+import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import type { Mark, Node as PMNode } from 'prosemirror-model';
-import type { CellBorderSide, CellBorders } from './schema.js';
+import { extractSectPrXml } from './import.js';
+import type { CellBorderSide, CellBorders, RowHeight } from './schema.js';
 
 function escapeXml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -141,6 +142,14 @@ interface PendingVMerge {
  * pendingVMerge 칸은 열 위치가 절대 겹치지 않으므로(겹치면 애초에 이 행에 그 열의 실제 셀이
  * 없었을 것이다) 열 번호를 따로 계산할 필요 없이 앞에서부터 순서대로 배치하면 된다.
  */
+/** table_row의 height 속성(atLeast/exact, px)을 <w:trPr><w:trHeight .../></w:trPr>로 직렬화한다. 없으면 빈 문자열(자동 높이). */
+function renderRowHeightXml(height: unknown): string {
+  if (!height || typeof height !== 'object') return '';
+  const h = height as RowHeight;
+  const hRule = h.rule === 'exact' ? 'exact' : 'atLeast';
+  return `<w:trPr><w:trHeight w:val="${pxToDxa(h.px)}" w:hRule="${hRule}"/></w:trPr>`;
+}
+
 function renderTableRow(
   row: PMNode,
   pendingVMerge: Map<number, PendingVMerge>,
@@ -149,6 +158,7 @@ function renderTableRow(
   const cells: PMNode[] = [];
   row.forEach((cell) => cells.push(cell));
 
+  const trPrXml = renderRowHeightXml(row.attrs.height);
   let cellsXml = '';
   let col = 0;
   let cellIndex = 0;
@@ -190,14 +200,22 @@ function renderTableRow(
       ? `<w:shd w:val="clear" w:color="auto" w:fill="${background.replace('#', '').toUpperCase()}"/>`
       : '';
     const bordersXml = renderCellBordersXml(cell.attrs.borders);
+    const verticalAlign = cell.attrs.verticalAlign;
+    // docx는 top/center/bottom, 스키마·CSS 쪽은 top/middle/bottom을 쓰므로 여기서 되돌린다.
+    const vAlignXml =
+      verticalAlign === 'middle'
+        ? '<w:vAlign w:val="center"/>'
+        : verticalAlign === 'top' || verticalAlign === 'bottom'
+          ? `<w:vAlign w:val="${verticalAlign}"/>`
+          : '';
     cellsXml +=
       `<w:tc><w:tcPr><w:tcW w:w="${totalWidthDxa}" w:type="dxa"/>` +
-      `${gridSpanXml}${vMergeXml}${bordersXml}${shdXml}</w:tcPr>${cellBody}</w:tc>`;
+      `${gridSpanXml}${vMergeXml}${bordersXml}${shdXml}${vAlignXml}</w:tcPr>${cellBody}</w:tc>`;
     if (rowspan > 1) pendingVMerge.set(col, { remaining: rowspan - 1, colspan, widthDxa: totalWidthDxa });
     col += colspan;
   }
 
-  return `<w:tr>${cellsXml}</w:tr>`;
+  return `<w:tr>${trPrXml}${cellsXml}</w:tr>`;
 }
 
 function renderTable(node: PMNode): string {
@@ -223,8 +241,12 @@ function renderTable(node: PMNode): string {
     (_, i) => `<w:gridCol w:w="${columnWidthsDxa.get(i) ?? CELL_WIDTH_DXA}"/>`,
   ).join('');
 
+  // 표 자체가 페이지 안에서 어디 놓이는지(셀 안 문단 정렬과는 별개) — 없으면(기본 왼쪽) 생략한다.
+  const align = node.attrs.align;
+  const jcXml = align === 'center' || align === 'right' ? `<w:jc w:val="${align}"/>` : '';
+
   return (
-    `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>${BORDER}</w:tblBorders></w:tblPr>` +
+    `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>${jcXml}<w:tblBorders>${BORDER}</w:tblBorders></w:tblPr>` +
     `<w:tblGrid>${gridCols}</w:tblGrid>${rowsXml}</w:tbl>`
   );
 }
@@ -249,13 +271,17 @@ function renderBlock(node: PMNode): string {
 const DOCUMENT_XML_HEADER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
 const NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
-export function renderDocumentXml(doc: PMNode): string {
+/**
+ * sectPrXml을 생략하면(주로 테스트에서) 빈 <w:sectPr/>을 쓴다 — 실제 저장 경로(exportDocx)는
+ * 항상 원본 문서에서 뽑아낸 실제 sectPrXml을 넘겨 페이지 크기·여백 등을 보존한다.
+ */
+export function renderDocumentXml(doc: PMNode, sectPrXml: string = '<w:sectPr/>'): string {
   let body = '';
   doc.forEach((node) => {
     body += renderBlock(node);
   });
   return (
-    `${DOCUMENT_XML_HEADER}<w:document xmlns:w="${NS_W}"><w:body>${body}<w:sectPr/></w:body></w:document>`
+    `${DOCUMENT_XML_HEADER}<w:document xmlns:w="${NS_W}"><w:body>${body}${sectPrXml}</w:body></w:document>`
   );
 }
 
@@ -264,9 +290,15 @@ export function renderDocumentXml(doc: PMNode): string {
  * 그대로 보존하고 word/document.xml만 교체한다 — 단, 이 함수가 만드는 document.xml은
  * 스타일 정의를 참조만 할 뿐(Heading1 등) 재정의하지 않으므로, 원본에 해당 스타일이
  * 없으면(예: 빈 스타일시트로 새로 만든 docx) 기본 서식으로 표시될 수 있다.
+ *
+ * w:sectPr(페이지 크기·여백 등)은 이 스키마가 전혀 모델링하지 않으므로, 매번 새로 만드는 대신
+ * 원본 word/document.xml에서 그대로 뽑아 재사용한다 — 그래야 편집·재저장을 거쳐도 페이지
+ * 설정이 유지된다(과거엔 항상 빈 <w:sectPr/>로 덮어써서 편집 후 페이지 크기가 사라졌었다).
  */
 export function exportDocx(originalDocxBytes: Uint8Array, doc: PMNode): Uint8Array {
   const entries = unzipSync(originalDocxBytes);
-  entries['word/document.xml'] = strToU8(renderDocumentXml(doc));
+  const originalDocumentXml = entries['word/document.xml'];
+  const sectPrXml = (originalDocumentXml && extractSectPrXml(strFromU8(originalDocumentXml))) ?? '<w:sectPr/>';
+  entries['word/document.xml'] = strToU8(renderDocumentXml(doc, sectPrXml));
   return zipSync(entries);
 }

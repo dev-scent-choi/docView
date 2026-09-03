@@ -1,7 +1,7 @@
 import { strFromU8, unzipSync } from 'fflate';
 import { XMLParser } from 'fast-xml-parser';
 import { Node as PMNode, type NodeType } from 'prosemirror-model';
-import { docxSchema, type CellBorderSide, type CellBorders } from './schema.js';
+import { docxSchema, type CellBorderSide, type CellBorders, type PageSetup, type RowHeight } from './schema.js';
 
 /**
  * fast-xml-parser를 preserveOrder 모드로 쓴다 — OOXML은 같은 태그(w:p, w:tbl 등)가
@@ -180,9 +180,11 @@ function tableCellFrom(
   const tcChildren = childrenOf(tcNode);
   const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p).node);
   const content = paragraphs.length > 0 ? paragraphs : [docxSchema.nodes.paragraph.create()];
-  const background = backgroundOf(tcPrChildrenOf(tcNode));
+  const tcPrChildren = tcPrChildrenOf(tcNode);
+  const background = backgroundOf(tcPrChildren);
+  const verticalAlign = verticalAlignOf(tcPrChildren);
   return docxSchema.nodes.table_cell.create(
-    { colspan, rowspan, colwidth: colwidth ? [...colwidth] : null, background, borders },
+    { colspan, rowspan, colwidth: colwidth ? [...colwidth] : null, background, borders, verticalAlign },
     content,
   );
 }
@@ -190,6 +192,16 @@ function tableCellFrom(
 function tcPrChildrenOf(tcNode: XmlNode): XmlNode[] {
   const tcPr = findFirst(childrenOf(tcNode), 'w:tcPr');
   return tcPr ? childrenOf(tcPr) : [];
+}
+
+/** w:tcPr/w:vAlign — 셀 안 내용의 세로 정렬. docx는 top/center/bottom, CSS vertical-align은 top/middle/bottom. */
+function verticalAlignOf(tcPrChildren: readonly XmlNode[]): string | null {
+  const vAlign = findFirst(tcPrChildren, 'w:vAlign');
+  if (!vAlign) return null;
+  const val = attrsOf(vAlign)['@_w:val'];
+  if (val === 'center') return 'middle';
+  if (val === 'bottom' || val === 'top') return val;
+  return null;
 }
 
 /** w:tcPr/w:gridSpan@w:val — 가로 병합 칸 수. 없으면 1(병합 없음). */
@@ -328,16 +340,43 @@ interface CellPlacement {
  * 시작 칸의 rowspan만 늘리는 방식으로 표현하므로, w:vMerge가 "continue"인 <w:tc>는 새 셀을
  * 만들지 않고 같은 열의 시작 칸(originByCol) rowspan만 1 늘린 뒤 건너뛴다.
  */
+/** w:tblPr/w:jc — 표 자체가 페이지 안에서 왼쪽/가운데/오른쪽 중 어디 놓이는지(셀 안 문단 정렬과 무관). */
+function tableAlignOf(tblChildren: readonly XmlNode[]): string | null {
+  const tblPr = findFirst(tblChildren, 'w:tblPr');
+  const tblPrChildren = tblPr ? childrenOf(tblPr) : [];
+  const jc = findFirst(tblPrChildren, 'w:jc');
+  if (!jc) return null;
+  const val = attrsOf(jc)['@_w:val'];
+  return val === 'center' || val === 'right' ? val : null;
+}
+
+/** w:trPr/w:trHeight — 행 높이. hRule="auto"(또는 요소 자체가 없음)는 "지정 없음"과 동일하게 null. */
+function rowHeightOf(trChildren: readonly XmlNode[]): RowHeight | null {
+  const trPr = findFirst(trChildren, 'w:trPr');
+  const trPrChildren = trPr ? childrenOf(trPr) : [];
+  const trHeight = findFirst(trPrChildren, 'w:trHeight');
+  if (!trHeight) return null;
+  const attrs = attrsOf(trHeight);
+  const val = Number(attrs['@_w:val']);
+  if (!Number.isFinite(val) || val <= 0) return null;
+  const hRule = attrs['@_w:hRule'];
+  if (hRule === 'auto') return null;
+  return { rule: hRule === 'exact' ? 'exact' : 'atLeast', px: dxaToPx(val) };
+}
+
 function tableFrom(tblNode: XmlNode): PMNode {
   const tblChildren = childrenOf(tblNode);
   const trNodes = findAll(tblChildren, 'w:tr');
   const gridColWidths = gridColWidthsOf(tblChildren);
   const tableBorderDefaults = tableBorderDefaultsOf(tblChildren);
+  const tableAlign = tableAlignOf(tblChildren);
+  const rowHeights: Array<RowHeight | null> = [];
 
   const rowPlacements: CellPlacement[][] = [];
   const originByCol = new Map<number, CellPlacement>();
 
   trNodes.forEach((tr, row) => {
+    rowHeights.push(rowHeightOf(childrenOf(tr)));
     const placements: CellPlacement[] = [];
     let col = 0;
     for (const tc of findAll(childrenOf(tr), 'w:tc')) {
@@ -364,9 +403,9 @@ function tableFrom(tblNode: XmlNode): PMNode {
     ...rowPlacements.map((placements) => placements.reduce((sum, p) => sum + p.colspan, 0)),
   );
 
-  const rows = rowPlacements.map((placements) =>
+  const rows = rowPlacements.map((placements, row) =>
     docxSchema.nodes.table_row.create(
-      null,
+      { height: rowHeights[row] },
       placements.map((p) => {
         const widths = gridColWidths.slice(p.col, p.col + p.colspan);
         const colwidth = widths.length === p.colspan ? widths.map(dxaToPx) : null;
@@ -383,7 +422,7 @@ function tableFrom(tblNode: XmlNode): PMNode {
       }),
     ),
   );
-  return docxSchema.nodes.table.create(null, rows);
+  return docxSchema.nodes.table.create({ align: tableAlign }, rows);
 }
 
 /**
@@ -416,6 +455,8 @@ export interface DocxImportResult {
   readonly doc: PMNode;
   /** 이미지 등 v1 미지원 요소가 포함되어 편집·재저장 시 유실될 수 있는지 */
   readonly hasUnsupportedContent: boolean;
+  /** 페이지 크기·여백(w:sectPr/w:pgSz·w:pgMar) — 화면에 실제 Word 페이지 비율로 그리기 위함. 없으면 null. */
+  readonly pageSetup: PageSetup | null;
 }
 
 /**
@@ -427,6 +468,59 @@ export function docxHasUnsupportedContent(docxBytes: Uint8Array): boolean {
   const documentXmlBytes = entries['word/document.xml'];
   if (!documentXmlBytes) return false;
   return /<w:drawing\b|<w:object\b|<w:pict\b/.test(strFromU8(documentXmlBytes));
+}
+
+/** w:sectPr(파싱된 트리)에서 페이지 크기·여백을 읽는다. w:pgSz가 없으면(비정상 문서) null.
+ * 여백이 명시 안 된 변은 Word 기본값(1인치=1440dxa)으로 채운다. */
+function pageSetupOf(sectPr: XmlNode | undefined): PageSetup | null {
+  if (!sectPr) return null;
+  const sectPrChildren = childrenOf(sectPr);
+  const pgSz = findFirst(sectPrChildren, 'w:pgSz');
+  if (!pgSz) return null;
+  const pgSzAttrs = attrsOf(pgSz);
+  const w = Number(pgSzAttrs['@_w:w']);
+  const h = Number(pgSzAttrs['@_w:h']);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+  const pgMar = findFirst(sectPrChildren, 'w:pgMar');
+  const pgMarAttrs = pgMar ? attrsOf(pgMar) : {};
+  const marginOf = (key: string): number => {
+    const v = Number(pgMarAttrs[key]);
+    return dxaToPx(Number.isFinite(v) && v >= 0 ? v : 1440);
+  };
+  return {
+    widthPx: dxaToPx(w),
+    heightPx: dxaToPx(h),
+    marginTopPx: marginOf('@_w:top'),
+    marginBottomPx: marginOf('@_w:bottom'),
+    marginLeftPx: marginOf('@_w:left'),
+    marginRightPx: marginOf('@_w:right'),
+    orientation: pgSzAttrs['@_w:orient'] === 'landscape' ? 'landscape' : 'portrait',
+  };
+}
+
+/**
+ * word/document.xml 원본 문자열에서 (마지막) w:sectPr 요소를 그대로 문자열로 뽑아낸다 — 우리가
+ * 모델링하지 않는 세부 설정(헤더/푸터 참조, 단 나누기 등)까지 손실 없이 내보내기 위해, 파싱 결과를
+ * 재조립하는 대신 원본 텍스트를 그대로 들고 있다가 export.ts가 그대로 되돌려 쓴다.
+ */
+export function extractSectPrXml(documentXml: string): string | null {
+  const matches = documentXml.match(/<w:sectPr\b[^>]*(?:\/>|>[\s\S]*?<\/w:sectPr>)/g);
+  return matches && matches.length > 0 ? matches[matches.length - 1] : null;
+}
+
+/**
+ * 페이지 크기·여백만 가볍게 뽑아낸다(표·문단 전체를 파싱하는 importDocx보다 훨씬 싸다) —
+ * 뷰어가 "이 문서를 실제 Word 페이지 비율로 얼마나 넓게 그릴지" 계산하는 용도(src/routes/viewer.ts).
+ */
+export function getDocxPageSetup(docxBytes: Uint8Array): PageSetup | null {
+  const entries = unzipSync(docxBytes);
+  const documentXmlBytes = entries['word/document.xml'];
+  if (!documentXmlBytes) return null;
+  const sectPrXml = extractSectPrXml(strFromU8(documentXmlBytes));
+  if (!sectPrXml) return null;
+  const parsed = parser.parse(sectPrXml) as XmlNode[];
+  const sectPr = findFirst(parsed, 'w:sectPr');
+  return pageSetupOf(sectPr);
 }
 
 /** docx(zip) 바이트 → ProseMirror 문서. 알려지지 않은 요소(이미지·머리글 등)는 건너뛴다. */
@@ -443,6 +537,7 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
   const documentEl = findFirst(parsed, 'w:document');
   const bodyEl = documentEl && findFirst(childrenOf(documentEl), 'w:body');
   const bodyChildren = bodyEl ? childrenOf(bodyEl) : [];
+  const pageSetup = pageSetupOf(findFirst(bodyChildren, 'w:sectPr'));
 
   const blocks: PMNode[] = [];
   const paragraphRun: Array<{ node: PMNode; isListItem: boolean }> = [];
@@ -464,5 +559,5 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
 
   const content = blocks.length > 0 ? blocks : [docxSchema.nodes.paragraph.create()];
   const doc = (docxSchema.nodes.doc as NodeType).create(null, content);
-  return { doc, hasUnsupportedContent };
+  return { doc, hasUnsupportedContent, pageSetup };
 }

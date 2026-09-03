@@ -1,5 +1,5 @@
 import OrderedMap from 'orderedmap';
-import { Schema, type MarkSpec, type NodeSpec } from 'prosemirror-model';
+import { Schema, type MarkSpec, type Node as PMNode, type NodeSpec } from 'prosemirror-model';
 import { addListNodes } from 'prosemirror-schema-list';
 import { tableNodes } from 'prosemirror-tables';
 
@@ -94,6 +94,68 @@ const marks: Record<string, MarkSpec> = {
   },
 };
 
+/**
+ * docx의 w:sectPr/w:pgSz·w:pgMar — 페이지 크기·여백. import.ts가 원본에서 그대로 읽어오고,
+ * export.ts는 이 스키마와 무관하게 원본 w:sectPr 자체를 그대로 보존해 내보낸다(우리가
+ * 모델링하지 않는 세부 설정까지 안전하게 되돌아가도록). 여기 있는 값은 오직 "화면에 실제
+ * Word 페이지와 같은 비율로 얼마나 넓게 그릴지" 계산에만 쓰인다.
+ */
+export interface PageSetup {
+  readonly widthPx: number;
+  readonly heightPx: number;
+  readonly marginTopPx: number;
+  readonly marginBottomPx: number;
+  readonly marginLeftPx: number;
+  readonly marginRightPx: number;
+  readonly orientation: 'portrait' | 'landscape';
+}
+
+/** docx의 w:trPr/w:trHeight — 행 높이. rule이 'auto'면 이 속성 자체가 없음(null)과 동일하게 다룬다. */
+export interface RowHeight {
+  readonly rule: 'atLeast' | 'exact';
+  readonly px: number;
+}
+
+function rowHeightToDOMStyle(height: unknown): Record<string, string> {
+  const h = height as RowHeight | null;
+  return h ? { style: `height: ${h.px}px;` } : {};
+}
+
+function rowHeightFromDOM(dom: HTMLElement): RowHeight | null {
+  const px = parseFloat(dom.style.height);
+  return Number.isFinite(px) && px > 0 ? { rule: 'atLeast', px } : null;
+}
+
+/** docx의 w:tblPr/w:jc — 표 자체가 페이지(콘텐츠 영역) 안에서 왼쪽/가운데/오른쪽 중 어디에 놓이는지.
+ * 셀 안 문단 정렬(paragraph의 align)과는 완전히 별개 개념이다. */
+function tableAlignToDOMStyle(align: unknown): Record<string, string> {
+  if (align === 'center') return { style: 'margin-left: auto; margin-right: auto;' };
+  if (align === 'right') return { style: 'margin-left: auto; margin-right: 0;' };
+  return {};
+}
+
+/**
+ * 표 자체의 실제 너비(px) — 첫 행 각 셀의 colwidth(모두 있을 때만) 합. 하나라도 없으면
+ * (예: 편집기에서 새로 만든 표) null을 돌려주고, CSS 기본값(width:100%)에 맡긴다.
+ * Word 원본 표가 페이지 폭보다 좁을 때 억지로 100%까지 늘어나 셀 너비가 실제보다 커지는
+ * 문제(사용자가 "Cell 너비가 Word 원본과 다르다"고 지적한 부분)를 막기 위함이다.
+ */
+function tableWidthPx(node: PMNode): number | null {
+  const firstRow = node.firstChild;
+  if (!firstRow) return null;
+  let total = 0;
+  let ok = true;
+  firstRow.forEach((cell) => {
+    const colwidth = cell.attrs.colwidth as number[] | null;
+    if (!Array.isArray(colwidth) || colwidth.length === 0) {
+      ok = false;
+      return;
+    }
+    total += colwidth.reduce((sum, w) => sum + w, 0);
+  });
+  return ok && total > 0 ? total : null;
+}
+
 /** 셀 한 변의 테두리 — docx의 w:tcBorders/w:tblBorders 한 변(top/right/bottom/left)에 대응 */
 export interface CellBorderSide {
   /** CSS border-style 값(solid/dashed/dotted/double) — docx w:val(single/dashed/dotted/double 등)에서 변환 */
@@ -125,42 +187,82 @@ function borderSideFromDOM(cssValue: string): CellBorderSide | null {
   return { style, widthPx: parseFloat(widthStr), color: match[3] };
 }
 
-const withLists = addListNodes(OrderedMap.from(baseNodes), 'paragraph block*', 'block');
-const withTables = withLists.append(
-  tableNodes({
-    tableGroup: 'block',
-    cellContent: 'block+',
-    cellAttributes: {
-      /** 셀 음영(docx의 w:tcPr/w:shd) — "#rrggbb" 또는 없음(null) */
-      background: {
-        default: null,
-        getFromDOM: (dom) => (dom as HTMLElement).style.backgroundColor || null,
-        setDOMAttr: (value, attrs) => {
-          if (value) attrs.style = `${(attrs.style as string | undefined) ?? ''}background-color: ${value as string};`;
-        },
-      },
-      /** 셀 4변 테두리(docx의 w:tcBorders/w:tblBorders에서 계산된 최종값) — 없으면 null(에디터 기본 테두리 사용) */
-      borders: {
-        default: null,
-        getFromDOM: (dom) => {
-          const style = (dom as HTMLElement).style;
-          const borders: CellBorders = {
-            top: borderSideFromDOM(style.borderTop),
-            right: borderSideFromDOM(style.borderRight),
-            bottom: borderSideFromDOM(style.borderBottom),
-            left: borderSideFromDOM(style.borderLeft),
-          };
-          return borders.top || borders.right || borders.bottom || borders.left ? borders : null;
-        },
-        setDOMAttr: (value, attrs) => {
-          if (!value) return;
-          const borders = value as CellBorders;
-          const extra = BORDER_SIDES.map((side) => `border-${side}: ${borderSideToCSS(borders[side])};`).join(' ');
-          attrs.style = `${(attrs.style as string | undefined) ?? ''}${extra}`;
-        },
+const VALID_VERTICAL_ALIGN = new Set(['top', 'middle', 'bottom']);
+
+const tableNodeSpecs = tableNodes({
+  tableGroup: 'block',
+  cellContent: 'block+',
+  cellAttributes: {
+    /** 셀 음영(docx의 w:tcPr/w:shd) — "#rrggbb" 또는 없음(null) */
+    background: {
+      default: null,
+      getFromDOM: (dom) => (dom as HTMLElement).style.backgroundColor || null,
+      setDOMAttr: (value, attrs) => {
+        if (value) attrs.style = `${(attrs.style as string | undefined) ?? ''}background-color: ${value as string};`;
       },
     },
-  }),
-);
+    /** 셀 4변 테두리(docx의 w:tcBorders/w:tblBorders에서 계산된 최종값) — 없으면 null(에디터 기본 테두리 사용) */
+    borders: {
+      default: null,
+      getFromDOM: (dom) => {
+        const style = (dom as HTMLElement).style;
+        const borders: CellBorders = {
+          top: borderSideFromDOM(style.borderTop),
+          right: borderSideFromDOM(style.borderRight),
+          bottom: borderSideFromDOM(style.borderBottom),
+          left: borderSideFromDOM(style.borderLeft),
+        };
+        return borders.top || borders.right || borders.bottom || borders.left ? borders : null;
+      },
+      setDOMAttr: (value, attrs) => {
+        if (!value) return;
+        const borders = value as CellBorders;
+        const extra = BORDER_SIDES.map((side) => `border-${side}: ${borderSideToCSS(borders[side])};`).join(' ');
+        attrs.style = `${(attrs.style as string | undefined) ?? ''}${extra}`;
+      },
+    },
+    /** 셀 안 내용의 세로 정렬(docx의 w:tcPr/w:vAlign) — 문단의 가로 정렬(align)과는 별개 축이다 */
+    verticalAlign: {
+      default: null,
+      getFromDOM: (dom) => {
+        const v = (dom as HTMLElement).style.verticalAlign;
+        return v === 'top' || v === 'middle' || v === 'bottom' ? v : null;
+      },
+      setDOMAttr: (value, attrs) => {
+        if (value && VALID_VERTICAL_ALIGN.has(value as string)) {
+          attrs.style = `${(attrs.style as string | undefined) ?? ''}vertical-align: ${value as string};`;
+        }
+      },
+    },
+  },
+});
+
+/**
+ * prosemirror-tables가 만들어주는 table/table_row 스펙은 attrs가 아예 없다(셀 안쪽만 다룸) —
+ * "표 자체가 페이지 어디에 놓이는지(정렬)"와 "행 높이"는 표/행 자신의 속성이라 별도로 얹는다.
+ */
+const patchedTableNodeSpecs: Record<string, NodeSpec> = {
+  ...tableNodeSpecs,
+  table: {
+    ...tableNodeSpecs.table,
+    attrs: { align: { default: null } },
+    toDOM: (node) => {
+      const widthPx = tableWidthPx(node);
+      const alignStyle = tableAlignToDOMStyle(node.attrs.align).style ?? '';
+      const widthStyle = widthPx ? `width: ${widthPx}px;` : '';
+      const style = `${widthStyle}${alignStyle}`;
+      return ['table', style ? { style } : {}, ['tbody', 0]];
+    },
+  },
+  table_row: {
+    ...tableNodeSpecs.table_row,
+    attrs: { height: { default: null } },
+    parseDOM: [{ tag: 'tr', getAttrs: (dom) => ({ height: rowHeightFromDOM(dom as HTMLElement) }) }],
+    toDOM: (node) => ['tr', rowHeightToDOMStyle(node.attrs.height), 0],
+  },
+};
+
+const withLists = addListNodes(OrderedMap.from(baseNodes), 'paragraph block*', 'block');
+const withTables = withLists.append(patchedTableNodeSpecs);
 
 export const docxSchema = new Schema({ nodes: withTables, marks });

@@ -16,7 +16,7 @@ import {
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { extractPdfText, searchPdfText, type PageText } from '../search.js';
 import { detectNearbyTextStyle } from '../textStyle.js';
-import { docxHasUnsupportedContent } from '../docx/import.js';
+import { docxHasUnsupportedContent, getDocxPageSetup } from '../docx/import.js';
 import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup, updateMarkup } from '../markup.js';
 import { touchPresence } from '../presence.js';
 import { flushNow, getCurrentBytes } from '../collab/room.js';
@@ -385,6 +385,12 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
               .then(docxHasUnsupportedContent)
               .catch(() => false)
           : false;
+      // docx 에디터가 실제 Word 페이지 크기·여백 비율로 화면을 그리기 위한 값(src/client/editor.ts).
+      // 원본을 다시 읽어야 해서(canEdit 여부와 무관하게) docx일 때만 계산한다.
+      const pageSetup =
+        view.meta.ext === 'docx'
+          ? await store.readOriginal(view.meta.id, view.meta.ext).then(getDocxPageSetup).catch(() => null)
+          : null;
       return {
         success: true,
         data: {
@@ -399,6 +405,7 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
           permissions: view.claims.perms,
           viewer: view.claims.viewer,
           editHasUnsupportedContent,
+          pageSetup,
         },
       };
     },

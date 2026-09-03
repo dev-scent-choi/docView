@@ -11,13 +11,14 @@ import {
   deleteRow,
   deleteTable,
   goToNextCell,
+  TableView,
   tableEditing,
 } from 'prosemirror-tables';
 import type { Node as PMNode } from 'prosemirror-model';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { redo, undo, ySyncPlugin, yCursorPlugin, yUndoPlugin } from 'y-prosemirror';
-import { docxSchema } from '../docx/schema.js';
+import { docxSchema, type PageSetup } from '../docx/schema.js';
 import { pickPresenceColorForName, renderPresenceAvatars } from './presence.js';
 
 interface Permissions {
@@ -33,6 +34,7 @@ interface ViewInfo {
   readonly viewer: string;
   readonly permissions: Permissions;
   readonly editHasUnsupportedContent: boolean;
+  readonly pageSetup: PageSetup | null;
 }
 
 const params = new URLSearchParams(location.search);
@@ -46,6 +48,57 @@ const editorHost = document.getElementById('editor') as HTMLElement;
 const errorScreen = document.getElementById('error-screen') as HTMLElement;
 const errorMessage = document.getElementById('error-message') as HTMLElement;
 const toolbar = document.getElementById('toolbar') as HTMLElement;
+
+/**
+ * Word 원본의 실제 페이지 크기·여백으로 편집 화면의 "종이" 크기를 그린다 — 기존엔 항상
+ * 고정된 CSS 값(860px, 65ch 등 문서 크기와 무관한 임의 수치)을 썼는데, 그 임의값이 곧 "용지
+ * 폭이 실제보다 좁아 보인다"/"셀 너비가 원본과 다르다"는 문제의 원인이었다. 페이지 전체 폭을
+ * 그대로 쓰고 여백을 padding으로 재현하면, 안쪽 콘텐츠 폭(=페이지 폭-여백)이 Word의 실제
+ * 텍스트 영역 폭과 정확히 같아진다 — 표가 그 안에서 백분율이 아니라 자기 실제 폭(px)으로
+ * 그려지므로(schema.ts의 table toDOM) 셀 너비도 함께 정확해진다.
+ */
+function applyPageSetup(pageSetup: PageSetup | null): void {
+  if (!pageSetup) return; // 원본에서 못 읽으면(비정상 문서) 기존 CSS 기본값을 그대로 둔다
+  editorHost.style.width = `${pageSetup.widthPx}px`;
+  editorHost.style.maxWidth = `${pageSetup.widthPx}px`;
+  editorHost.style.padding =
+    `${pageSetup.marginTopPx}px ${pageSetup.marginRightPx}px ${pageSetup.marginBottomPx}px ${pageSetup.marginLeftPx}px`;
+  // .ProseMirror의 임의 max-width:65ch 캡을 풀어서 실제 여백만큼의 콘텐츠 폭을 그대로 쓰게 한다
+  editorHost.classList.add('page-sized');
+}
+
+/**
+ * columnResizing()의 기본 TableView는 <table>을 직접 document.createElement로 만들고
+ * schema.ts의 table.toDOM은 아예 호출하지 않는다 — 그래서 표 자체의 정렬(w:tblPr/w:jc,
+ * 셀 안 문단 정렬과는 별개)이 스키마에만 있고 화면엔 전혀 반영되지 않았다. columnResizing이
+ * 공식으로 제공하는 View 옵션으로 이 클래스를 대신 넣어 정렬 스타일만 덧붙인다.
+ */
+class AlignedTableView extends TableView {
+  constructor(node: PMNode, defaultCellMinWidth: number) {
+    super(node, defaultCellMinWidth);
+    this.applyAlign(node);
+  }
+
+  private applyAlign(node: PMNode): void {
+    const align = node.attrs.align as string | null;
+    if (align === 'center') {
+      this.table.style.marginLeft = 'auto';
+      this.table.style.marginRight = 'auto';
+    } else if (align === 'right') {
+      this.table.style.marginLeft = 'auto';
+      this.table.style.marginRight = '0';
+    } else {
+      this.table.style.marginLeft = '';
+      this.table.style.marginRight = '';
+    }
+  }
+
+  override update(node: PMNode): boolean {
+    const ok = super.update(node);
+    if (ok) this.applyAlign(node);
+    return ok;
+  }
+}
 
 function showFatalError(message: string): void {
   editorHost.hidden = true;
@@ -277,6 +330,7 @@ async function main(): Promise<void> {
   if (info.editHasUnsupportedContent) {
     warningEl.hidden = false;
   }
+  applyPageSetup(info.pageSetup);
 
   const ydoc = new Y.Doc();
   const fragment = ydoc.getXmlFragment('prosemirror');
@@ -308,7 +362,7 @@ async function main(): Promise<void> {
       yCursorPlugin(provider.awareness),
       yUndoPlugin(),
       keymap(buildKeymap()),
-      columnResizing(),
+      columnResizing({ View: AlignedTableView }),
       tableEditing(),
       buildSearchPlugin(),
     ],

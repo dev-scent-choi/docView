@@ -2066,6 +2066,11 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   line-height: 1.75;
   max-width: 65ch;
 }
+/* Word 원본의 실제 페이지 크기를 읽어온 문서(.page-sized, editor.ts의 applyPageSetup)는 임의
+   글자수 기준 폭(65ch) 대신 실제 여백만큼의 콘텐츠 폭을 그대로 쓴다 — .editor-surface 자체의
+   폭(=Word 페이지 폭)과 padding(=Word 여백)이 이미 실제 값으로 설정되어 있으므로, 여기서는
+   그 남은 폭을 100% 채우기만 하면 된다. */
+.editor-surface.page-sized .ProseMirror { max-width: none; }
 .editor-surface .ProseMirror h1,
 .editor-surface .ProseMirror h2,
 .editor-surface .ProseMirror h3 { line-height: 1.3; letter-spacing: -0.01em; text-wrap: balance; }

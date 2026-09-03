@@ -226,6 +226,92 @@ describe('docx import: manual line breaks (w:br)', () => {
   });
 });
 
+describe('docx import: page setup, table alignment, row height, cell vertical align', () => {
+  function docxWithSectPr(sectPrXml: string): Buffer {
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', sectPrXml);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  test('reads page size and margins from w:sectPr (A4 portrait, 1-inch margins)', () => {
+    // A4: 11906 x 16838 dxa. 1인치 여백 = 1440dxa.
+    const sectPr =
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>';
+    const { pageSetup } = importDocx(docxWithSectPr(sectPr));
+    expect(pageSetup).not.toBeNull();
+    expect(pageSetup!.widthPx).toBe(794); // 11906/15
+    expect(pageSetup!.heightPx).toBe(1123); // 16838/15
+    expect(pageSetup!.marginTopPx).toBe(96); // 1440/15
+    expect(pageSetup!.marginLeftPx).toBe(96);
+    expect(pageSetup!.orientation).toBe('portrait');
+  });
+
+  test('reads landscape orientation', () => {
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace(
+      '<w:sectPr/>',
+      '<w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/></w:sectPr>',
+    );
+    entries['word/document.xml'] = strToU8(xml);
+    const { pageSetup } = importDocx(Buffer.from(zipSync(entries)));
+    expect(pageSetup!.orientation).toBe('landscape');
+    expect(pageSetup!.widthPx).toBe(1123);
+  });
+
+  test('returns null pageSetup when w:sectPr has no w:pgSz', () => {
+    const { pageSetup } = importDocx(makeSampleDocx(['x']));
+    expect(pageSetup).toBeNull();
+  });
+
+  test('reads w:tblPr/w:jc as the table-level align attribute (distinct from cell paragraph align)', () => {
+    const tableXml =
+      '<w:tbl><w:tblPr><w:jc w:val="center"/></w:tblPr><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid>' +
+      '<w:tr><w:tc><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${tableXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    const { doc } = importDocx(Buffer.from(zipSync(entries)));
+    const table = doc.child(0);
+    expect(table.attrs.align).toBe('center'); // 표 자체의 위치
+    const cellParagraph = table.child(0).child(0).firstChild!;
+    expect(cellParagraph.attrs.align).toBe('right'); // 셀 안 문단의 정렬 — 별개
+  });
+
+  test('reads w:trHeight (atLeast) as row height in px, and treats hRule="auto" as unset', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid>' +
+      '<w:tr><w:trPr><w:trHeight w:val="720" w:hRule="atLeast"/></w:trPr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc></w:tr>' +
+      '<w:tr><w:trPr><w:trHeight w:val="720" w:hRule="auto"/></w:trPr><w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr>' +
+      '</w:tbl>';
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${tableXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    const { doc } = importDocx(Buffer.from(zipSync(entries)));
+    const table = doc.child(0);
+    expect(table.child(0).attrs.height).toEqual({ rule: 'atLeast', px: 48 }); // 720/15
+    expect(table.child(1).attrs.height).toBeNull();
+  });
+
+  test('reads w:tcPr/w:vAlign as the cell verticalAlign attribute', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:tcPr><w:vAlign w:val="center"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl>';
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${tableXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    const { doc } = importDocx(Buffer.from(zipSync(entries)));
+    expect(doc.child(0).child(0).child(0).attrs.verticalAlign).toBe('middle');
+  });
+});
+
 describe('docx export', () => {
   test('round-trips formatted paragraphs, headings and tables through a full docx cycle', () => {
     const original = makeSampleDocx(['placeholder']);
@@ -441,6 +527,74 @@ describe('docx export', () => {
 
     expect(t.child(2).childCount).toBe(1); // 세로 병합 이어짐 칸은 별개 셀로 안 생긴다
     expect(t.child(2).child(0).textContent).toBe('B3');
+  });
+
+  test('preserves the original w:sectPr (page size/margins) across an edit that never touches it', () => {
+    // makeSampleDocx는 빈 <w:sectPr/>만 만들어주므로, 실제 페이지 크기가 있는 원본을 직접 조립한다.
+    const entries = unzipSync(makeSampleDocx(['placeholder']));
+    const realSectPr =
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800"/></w:sectPr>';
+    entries['word/document.xml'] = strToU8(
+      strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', realSectPr),
+    );
+    const original = Buffer.from(zipSync(entries));
+
+    const doc = docxSchema.nodes.doc.create(null, [
+      docxSchema.nodes.paragraph.create(null, docxSchema.text('edited text')),
+    ]);
+    const exported = exportDocx(original, doc);
+    const exportedXml = strFromU8(unzipSync(exported)['word/document.xml']);
+    expect(exportedXml).toContain(realSectPr);
+
+    const reimported = importDocx(exported);
+    expect(reimported.pageSetup).toEqual({
+      widthPx: 794,
+      heightPx: 1123,
+      marginTopPx: 96,
+      marginBottomPx: 96,
+      marginLeftPx: 120,
+      marginRightPx: 120,
+      orientation: 'portrait',
+    });
+  });
+
+  test('round-trips table-level alignment (w:tblPr/w:jc) and row height (w:trHeight)', () => {
+    const original = makeSampleDocx(['placeholder']);
+    const cell = docxSchema.nodes.table_cell.create(
+      { colwidth: [100] },
+      docxSchema.nodes.paragraph.create(null, docxSchema.text('x')),
+    );
+    const row = docxSchema.nodes.table_row.create({ height: { rule: 'exact', px: 40 } }, [cell]);
+    const table = docxSchema.nodes.table.create({ align: 'center' }, [row]);
+    const doc = docxSchema.nodes.doc.create(null, [table]);
+
+    const xml = renderDocumentXml(doc);
+    expect(xml).toContain('<w:jc w:val="center"/>');
+    expect(xml).toContain(`<w:trHeight w:val="${40 * 15}" w:hRule="exact"/>`);
+
+    const reimported = importDocx(exportDocx(original, doc));
+    const reimportedTable = reimported.doc.child(0);
+    expect(reimportedTable.attrs.align).toBe('center');
+    expect(reimportedTable.child(0).attrs.height).toEqual({ rule: 'exact', px: 40 });
+  });
+
+  test('round-trips cell vertical alignment (w:tcPr/w:vAlign)', () => {
+    const original = makeSampleDocx(['placeholder']);
+    const cell = docxSchema.nodes.table_cell.create(
+      { colwidth: [100], verticalAlign: 'middle' },
+      docxSchema.nodes.paragraph.create(null, docxSchema.text('x')),
+    );
+    const row = docxSchema.nodes.table_row.create(null, [cell]);
+    const table = docxSchema.nodes.table.create(null, [row]);
+    const doc = docxSchema.nodes.doc.create(null, [table]);
+
+    const xml = renderDocumentXml(doc);
+    expect(xml).toContain('<w:vAlign w:val="center"/>');
+
+    const reimported = importDocx(exportDocx(original, doc));
+    const reimportedCell = reimported.doc.child(0).child(0).child(0);
+    expect(reimportedCell.attrs.verticalAlign).toBe('middle');
   });
 
   test('round-trips font color, font size and paragraph alignment', () => {
