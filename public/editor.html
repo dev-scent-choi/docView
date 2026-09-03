@@ -43,17 +43,9 @@
       </div>
     </div>
     <div class="toolbar-group toolbar-format">
-      <div class="ribbon-group">
-        <div class="ribbon-group-buttons">
-          <button id="btn-undo" class="icon-btn" title="실행 취소 (Ctrl+Z)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.51 13a9 9 0 1 0 2.13-9.36L3 7"/></svg>
-          </button>
-          <button id="btn-redo" class="icon-btn" title="다시 실행 (Ctrl+Y)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M20.49 13a9 9 0 1 1-2.13-9.36L21 7"/></svg>
-          </button>
-        </div>
-        <span class="ribbon-group-label">실행 취소</span>
-      </div>
+      <!-- 실제 워드 "홈" 리본에는 실행 취소/다시 실행이 없다 — 빠른 실행 도구 모음(제목표시줄)에만
+           있고 리본에는 없으므로 여기서도 그룹 자체를 두지 않는다. 단축키(Ctrl+Z/Y)는
+           buildKeymap()에서 별도로 계속 동작한다. -->
 
       <!-- 클립보드: 붙여넣기/잘라내기/복사/서식 복사 — 아직 별도 기능 없이 배치만 워드와 맞춘다
            (레이아웃 우선, 기능은 추후 작업). -->
