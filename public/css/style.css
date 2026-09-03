@@ -1768,6 +1768,10 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   align-items: stretch;
   gap: 1rem;
   padding: 0.4rem 1.1rem 0.5rem;
+  /* .toolbar-group의 기본 flex-wrap:wrap을 이 리본 줄에서는 끈다 — 그룹이 다 안 들어가면
+     실제 워드처럼 가로 스크롤로 넘기지, 아래로 두 번째 줄이 생기면(줄바꿈) 리본처럼 안 보인다. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
 }
 /* flex:none이 없으면 이 구분선이 한 줄의 유일한 "줄어들 수 있는" 아이템이 되어(아이콘 버튼은 전부
    flex:none) 도구가 많아 줄이 넘칠 때 flexbox가 폭을 통째로 0으로 눌러버려 아예 안 보였다 — 실제
@@ -1973,6 +1977,73 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 }
 .dropdown-caret svg { width: 12px; height: 12px; flex: none; stroke-width: 2.4; }
 .dropdown-caret:hover { background: var(--v-hover); }
+
+/* ---------- docx 편집기 리본을 실제 워드 "홈" 탭 배치에 맞춘 도구들 ---------- */
+/* 클립보드 그룹의 "붙여넣기" — 다른 리본 버튼(34px 정사각형)보다 훨씬 크게, 아이콘 위에
+   드롭다운 화살표, 아래에 "붙여넣기" 글자가 온다(실제 워드와 같은 배치). */
+.icon-btn-big {
+  width: 46px;
+  height: 58px;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.68rem;
+  line-height: 1.15;
+  white-space: normal;
+  text-align: center;
+}
+.icon-btn-big svg { width: 22px; height: 22px; }
+.icon-btn-big .dropdown-caret { width: auto; height: auto; padding: 0; }
+.icon-btn-big .dropdown-caret svg { width: 10px; height: 10px; }
+
+/* "추가 기능" 그룹의 큰 버튼 — 위에 강조점 아이콘, 아래에 두 줄 라벨. */
+.addin-dot { width: 10px; height: 10px; border-radius: 50%; background: #f0a13d; flex: none; }
+
+/* "스타일" 그룹 — 미리보기 글자("가나다Aa") 위, 스타일 이름 아래로 된 갤러리 항목을 가로로
+   나열한다(실제 워드는 스크롤/더보기가 있는 갤러리지만, 1차는 고정 나열만 한다). */
+.style-gallery { display: flex; align-items: stretch; gap: 0.15rem; overflow-x: auto; height: 100%; }
+.style-gallery-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  width: 62px;
+  padding: 0.2rem 0.15rem;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+  flex: none;
+  color: inherit;
+  font-family: var(--font-sans);
+}
+.style-gallery-item:hover { background: var(--v-hover); border-color: var(--v-glass-line); }
+.style-gallery-preview { font-size: 0.92rem; line-height: 1.1; color: var(--v-text); white-space: nowrap; }
+.style-gallery-item[data-preview="spacingless"] .style-gallery-preview,
+.style-gallery-item[data-preview="normal"] .style-gallery-preview { font-weight: 400; }
+.style-gallery-item[data-preview="h1"] .style-gallery-preview { font-size: 1.25rem; font-weight: 600; }
+.style-gallery-item[data-preview="h2"] .style-gallery-preview { font-size: 1.05rem; font-weight: 600; }
+.style-gallery-item[data-preview="title"] .style-gallery-preview { font-size: 1.35rem; }
+.style-gallery-item[data-preview="subtitle"] .style-gallery-preview { color: var(--v-text-dim); }
+.style-gallery-item[data-preview="emphasis"] .style-gallery-preview { font-style: italic; color: var(--v-text-dim); }
+.style-gallery-item[data-preview="strong-emphasis"] .style-gallery-preview { font-style: italic; font-weight: 700; color: var(--v-accent); }
+.style-gallery-item[data-preview="strong"] .style-gallery-preview { font-weight: 700; }
+.style-gallery-item[data-preview="quote"] .style-gallery-preview { font-style: italic; color: var(--v-accent); }
+.style-gallery-item[data-preview="intense-quote"] .style-gallery-preview { font-style: italic; font-weight: 700; color: var(--v-accent); text-decoration: underline; }
+.style-gallery-label { font-size: 0.66rem; color: var(--v-text-dim); white-space: nowrap; }
+.style-gallery-more {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--v-text-dim);
+  cursor: pointer;
+}
+.style-gallery-more svg { width: 12px; height: 12px; }
 .dropdown-menu {
   position: absolute;
   top: 100%;
