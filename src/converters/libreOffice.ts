@@ -139,6 +139,72 @@ export function maxSheetRows(xlsxBytes: Uint8Array): number {
   return max;
 }
 
+/** a:fontScheme/a:minorFont(또는 a:majorFont) 안에서 라틴 기본 서체와 한글(Hang) 서체를 뽑는다. */
+function themeSlotTypefaces(
+  themeXml: string,
+  slot: 'minorFont' | 'majorFont',
+): { latin: string | null; hang: string | null } {
+  const slotMatch = new RegExp(`<a:${slot}>([\\s\\S]*?)</a:${slot}>`).exec(themeXml);
+  if (!slotMatch) return { latin: null, hang: null };
+  const body = slotMatch[1];
+  const latin = /<a:latin typeface="([^"]*)"/.exec(body)?.[1];
+  const hang = /<a:font script="Hang" typeface="([^"]*)"/.exec(body)?.[1];
+  return { latin: latin || null, hang: hang || null };
+}
+
+/**
+ * w:rFonts 속성 문자열 하나에서 테마 참조 하나(예: w:eastAsiaTheme="minorEastAsia")를
+ * word/theme/theme1.xml이 실제로 가리키는 리터럴 서체 이름으로 바꿔치기한다. 이미 같은
+ * 자리의 리터럴 서체(w:eastAsia 등)가 있으면 그 값을 존중하고 테마 참조만 지운다 — 리터럴과
+ * 테마 참조가 동시에 있을 때 LibreOffice가 어느 쪽을 우선하는지 불확실하므로 모호함을 없앤다.
+ */
+function replaceThemeFontAttr(
+  attrsStr: string,
+  themeAttr: string,
+  literalAttr: string,
+  script: 'latin' | 'hang',
+  themeXml: string,
+): string {
+  const themeMatch = new RegExp(`\\s${themeAttr}="([^"]*)"`).exec(attrsStr);
+  if (!themeMatch) return attrsStr;
+  const withoutTheme = attrsStr.replace(themeMatch[0], '');
+  if (new RegExp(`\\s${literalAttr}="`).test(attrsStr)) return withoutTheme;
+  const slot = /major/i.test(themeMatch[1]) ? 'majorFont' : 'minorFont';
+  const typeface = themeSlotTypefaces(themeXml, slot)[script];
+  return typeface ? `${withoutTheme} ${literalAttr}="${typeface}"` : withoutTheme;
+}
+
+function literalizeThemeFontsXml(xml: string, themeXml: string): string {
+  return xml.replace(/<w:rFonts\b([^>]*)\/>/g, (_whole, attrsStr: string) => {
+    let out = attrsStr;
+    out = replaceThemeFontAttr(out, 'w:asciiTheme', 'w:ascii', 'latin', themeXml);
+    out = replaceThemeFontAttr(out, 'w:eastAsiaTheme', 'w:eastAsia', 'hang', themeXml);
+    out = replaceThemeFontAttr(out, 'w:hAnsiTheme', 'w:hAnsi', 'latin', themeXml);
+    return `<w:rFonts${out}/>`;
+  });
+}
+
+/**
+ * docx 변환 전처리 — LibreOffice가 OOXML 테마 폰트 참조(w:eastAsiaTheme 등)를 안정적으로
+ * 해석하지 못해, 실제 설치된 서체(예: 맑은 고딕)를 두고도 자체 기본 서체(굴림 등)로 대체해
+ * 버리는 문제가 확인됐다 — 그 결과 줄바꿈·행 높이가 원본 Word 렌더링과 미묘하게 달라져,
+ * 표가 딱 맞게 들어가야 할 마지막 페이지에 불필요한 빈 페이지가 추가로 생기기도 한다.
+ * 변환 전에 테마 참조를 theme1.xml이 가리키는 실제 서체 이름으로 미리 박아 넣으면 이 문제를
+ * 피할 수 있다. 테마 파일이 없으면 원본을 그대로 반환한다.
+ */
+export function literalizeDocxThemeFonts(docxBytes: Uint8Array): Uint8Array {
+  const entries = unzipSync(docxBytes);
+  const themeXmlBytes = entries['word/theme/theme1.xml'];
+  if (!themeXmlBytes) return docxBytes;
+  const themeXml = strFromU8(themeXmlBytes);
+  const updated: Record<string, Uint8Array> = { ...entries };
+  for (const name of ['word/styles.xml', 'word/document.xml']) {
+    const bytes = entries[name];
+    if (bytes) updated[name] = strToU8(literalizeThemeFontsXml(strFromU8(bytes), themeXml));
+  }
+  return zipSync(updated);
+}
+
 type SourcePreprocessor = (bytes: Uint8Array) => Uint8Array;
 
 /**
@@ -260,7 +326,14 @@ export const officeConverter: Converter = {
   name: 'libreoffice',
   extensions: ['doc', 'docx', 'ppt', 'pptx', 'odt', 'odp', 'rtf', 'txt', 'hwp', 'hwpx'],
   async convert(sourcePath, targetPdfPath, sourceName) {
-    await convertWithSoffice(sourcePath, targetPdfPath, ['--convert-to', 'pdf'], sourceName);
+    const isDocx = path.extname(sourcePath).toLowerCase() === '.docx';
+    await convertWithSoffice(
+      sourcePath,
+      targetPdfPath,
+      ['--convert-to', 'pdf'],
+      sourceName,
+      isDocx ? literalizeDocxThemeFonts : undefined,
+    );
   },
 };
 

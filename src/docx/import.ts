@@ -140,12 +140,16 @@ function inlineContentOf(pChildren: readonly XmlNode[]): PMNode[] {
   return nodes;
 }
 
-function paragraphFrom(pNode: XmlNode): { node: PMNode; isListItem: boolean } {
+function paragraphFrom(pNode: XmlNode, defaultAlign: string | null): { node: PMNode; isListItem: boolean } {
   const pChildren = childrenOf(pNode);
   const pPr = findFirst(pChildren, 'w:pPr');
   const pPrChildren = pPr ? childrenOf(pPr) : [];
   const level = headingLevel(pPrChildren);
-  const align = alignOf(pPrChildren);
+  const hasPStyle = findFirst(pPrChildren, 'w:pStyle') !== undefined;
+  // 문단 자신의 w:jc가 없고, 다른 스타일도 참조하지 않으면(=암묵적으로 기본 스타일을 쓰면)
+  // 그 기본 스타일 자체의 정렬(예: w:jc="both")을 물려받는다 — 제목(heading)은 별도 스타일
+  // 캐스케이드를 아직 풀지 않으므로 이 폴백에서 제외한다(잘못 끼워맞추지 않기 위해).
+  const align = alignOf(pPrChildren) ?? (level === null && !hasPStyle ? defaultAlign : null);
   const isListItem = findFirst(pPrChildren, 'w:numPr') !== undefined;
   const inline = inlineContentOf(pChildren);
   const node =
@@ -176,9 +180,10 @@ function tableCellFrom(
   rowspan: number,
   colwidth: readonly number[] | null,
   borders: CellBorders,
+  defaultAlign: string | null,
 ): PMNode {
   const tcChildren = childrenOf(tcNode);
-  const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p).node);
+  const paragraphs = findAll(tcChildren, 'w:p').map((p) => paragraphFrom(p, defaultAlign).node);
   const content = paragraphs.length > 0 ? paragraphs : [docxSchema.nodes.paragraph.create()];
   const tcPrChildren = tcPrChildrenOf(tcNode);
   const background = backgroundOf(tcPrChildren);
@@ -377,7 +382,7 @@ function fitGridColWidthsPx(gridColWidthsPx: readonly number[], contentWidthPx: 
   return gridColWidthsPx.map((w) => Math.max(1, Math.round(w * scale)));
 }
 
-function tableFrom(tblNode: XmlNode, contentWidthPx: number | null): PMNode {
+function tableFrom(tblNode: XmlNode, contentWidthPx: number | null, defaultAlign: string | null): PMNode {
   const tblChildren = childrenOf(tblNode);
   const trNodes = findAll(tblChildren, 'w:tr');
   const gridColWidths = fitGridColWidthsPx(gridColWidthsOf(tblChildren).map(dxaToPx), contentWidthPx);
@@ -431,7 +436,7 @@ function tableFrom(tblNode: XmlNode, contentWidthPx: number | null): PMNode {
           totalRows,
           totalCols,
         });
-        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth, borders);
+        return tableCellFrom(p.tc, p.colspan, p.rowspan, colwidth, borders, defaultAlign);
       }),
     ),
   );
@@ -535,19 +540,70 @@ function defaultFontSizePtOf(docDefaults: XmlNode | undefined): number {
   return Number.isFinite(val) && val > 0 ? val / 2 : FALLBACK_DEFAULT_FONT_SIZE_PT;
 }
 
+/** w:docDefaults/w:rPrDefault/w:rPr/w:rFonts 요소 자체(있으면) — docDefaultsRFontsOf에서 쓴다. */
+function docDefaultsRFontsOf(stylesChildren: readonly XmlNode[]): XmlNode | undefined {
+  const docDefaults = findFirst(stylesChildren, 'w:docDefaults');
+  const rPrDefault = docDefaults && findFirst(childrenOf(docDefaults), 'w:rPrDefault');
+  const rPr = rPrDefault && findFirst(childrenOf(rPrDefault), 'w:rPr');
+  return rPr && findFirst(childrenOf(rPr), 'w:rFonts');
+}
+
 /**
- * word/styles.xml의 문서 기본 폰트 크기만 가볍게 뽑아낸다 — 직접 서식(w:rPr/w:sz)이 없는
+ * "기본" 문단 스타일(w:type="paragraph" w:default="1") — pStyle을 지정하지 않은 모든 문단이
+ * 암묵적으로 쓰는 스타일이다. 실제 문서에서 이 스타일 자체가 docDefaults와 다른 폰트 크기·
+ * 서체·정렬을 직접 지정하는 경우가 흔해서(예: docDefaults는 테마 맑은 고딕을 가리키지만
+ * 기본 스타일 자체는 리터럴로 굴림을 지정), 그 경우 실제로 적용되는 값은 이 스타일 쪽이다.
+ */
+function findDefaultParagraphStyle(stylesChildren: readonly XmlNode[]): XmlNode | undefined {
+  return findAll(stylesChildren, 'w:style').find((style) => {
+    const attrs = attrsOf(style);
+    return attrs['@_w:type'] === 'paragraph' && attrs['@_w:default'] === '1';
+  });
+}
+
+interface DefaultParagraphStyleInfo {
+  /** 스타일 자체가 지정한 폰트 크기(pt). 없으면 null → docDefaults로 폴백해야 한다. */
+  readonly sizePt: number | null;
+  /** 스타일 자체의 w:rFonts 요소. 없으면 undefined → docDefaults로 폴백해야 한다. */
+  readonly rFonts: XmlNode | undefined;
+  /** 스타일 자체의 문단 정렬(ProseMirror align 값). 없으면 null. */
+  readonly align: string | null;
+}
+
+function defaultParagraphStyleInfoOf(stylesChildren: readonly XmlNode[]): DefaultParagraphStyleInfo {
+  const style = findDefaultParagraphStyle(stylesChildren);
+  const styleChildren = style ? childrenOf(style) : [];
+  const rPr = findFirst(styleChildren, 'w:rPr');
+  const rPrChildren = rPr ? childrenOf(rPr) : [];
+  const sz = findFirst(rPrChildren, 'w:sz');
+  const szVal = sz ? Number(attrsOf(sz)['@_w:val']) : NaN;
+  const pPr = findFirst(styleChildren, 'w:pPr');
+  return {
+    sizePt: Number.isFinite(szVal) && szVal > 0 ? szVal / 2 : null,
+    rFonts: findFirst(rPrChildren, 'w:rFonts'),
+    align: alignOf(pPr ? childrenOf(pPr) : []),
+  };
+}
+
+function stylesChildrenOf(stylesXml: string): XmlNode[] {
+  const parsed = parser.parse(stylesXml) as XmlNode[];
+  const stylesEl = findFirst(parsed, 'w:styles');
+  return stylesEl ? childrenOf(stylesEl) : [];
+}
+
+/**
+ * word/styles.xml의 문서 기본 폰트 크기를 뽑아낸다 — 직접 서식(w:rPr/w:sz)도 스타일도 없는
  * 실행문은 이 값을 상속받아 렌더링해야 브라우저 기본값(16px)이 아니라 Word가 실제로 보여주는
- * 크기와 같아진다(client/editor.ts가 .ProseMirror 기본 font-size로 적용).
+ * 크기와 같아진다(client/editor.ts가 .ProseMirror 기본 font-size로 적용). 기본 문단 스타일
+ * 자체가 크기를 지정하면 그 값이 docDefaults보다 우선한다(실제 Word의 상속 순서).
  */
 export function getDocxDefaultFontSizePt(docxBytes: Uint8Array): number {
   const entries = unzipSync(docxBytes);
   const stylesXmlBytes = entries['word/styles.xml'];
   if (!stylesXmlBytes) return FALLBACK_DEFAULT_FONT_SIZE_PT;
-  const parsed = parser.parse(strFromU8(stylesXmlBytes)) as XmlNode[];
-  const stylesEl = findFirst(parsed, 'w:styles');
-  const stylesChildren = stylesEl ? childrenOf(stylesEl) : [];
-  return defaultFontSizePtOf(findFirst(stylesChildren, 'w:docDefaults'));
+  const stylesChildren = stylesChildrenOf(strFromU8(stylesXmlBytes));
+  const styleSizePt = defaultParagraphStyleInfoOf(stylesChildren).sizePt;
+  return styleSizePt ?? defaultFontSizePtOf(findFirst(stylesChildren, 'w:docDefaults'));
 }
 
 /** a:fontScheme/a:minorFont(또는 a:majorFont) 안에서 라틴 기본 서체와 한글(Hang) 서체를 뽑는다. */
@@ -581,33 +637,37 @@ function resolveFontRef(
   return null;
 }
 
-/**
- * word/styles.xml의 문서 기본 서체(w:docDefaults/w:rPrDefault/w:rPr/w:rFonts)를 CSS
- * font-family 값으로 뽑아낸다 — 직접 서식이 없는 실행문은 이 서체로 보여야 브라우저의
- * 기본 UI 폰트가 아니라 Word가 실제로 쓰는 서체(이 프로젝트가 다루는 문서 대부분은
- * 테마의 맑은 고딕)와 같아진다. 테마 참조(예: eastAsiaTheme)는 word/theme/theme1.xml을
- * 함께 읽어 실제 서체 이름으로 해석한다. 지정된 서체가 전혀 없으면 null(기존 CSS 폴백 유지).
- */
-export function getDocxDefaultFontFamily(docxBytes: Uint8Array): string | null {
-  const entries = unzipSync(docxBytes);
-  const stylesXmlBytes = entries['word/styles.xml'];
-  if (!stylesXmlBytes) return null;
-  const parsed = parser.parse(strFromU8(stylesXmlBytes)) as XmlNode[];
-  const stylesEl = findFirst(parsed, 'w:styles');
-  const docDefaults = stylesEl && findFirst(childrenOf(stylesEl), 'w:docDefaults');
-  const rPrDefault = docDefaults && findFirst(childrenOf(docDefaults), 'w:rPrDefault');
-  const rPr = rPrDefault && findFirst(childrenOf(rPrDefault), 'w:rPr');
-  const rFonts = rPr && findFirst(childrenOf(rPr), 'w:rFonts');
+/** w:rFonts 요소 하나를 CSS font-family 값으로 푼다(테마 참조 포함). 없으면 null. */
+function resolveFontFamilyFromRFonts(rFonts: XmlNode | undefined, themeXml: string | undefined): string | null {
   if (!rFonts) return null;
   const attrs = attrsOf(rFonts);
-  const themeXmlBytes = entries['word/theme/theme1.xml'];
-  const themeXml = themeXmlBytes ? strFromU8(themeXmlBytes) : undefined;
   const eastAsia = resolveFontRef(attrs['@_w:eastAsia'], attrs['@_w:eastAsiaTheme'], themeXml, 'hang');
   const ascii = resolveFontRef(attrs['@_w:ascii'], attrs['@_w:asciiTheme'], themeXml, 'latin');
   const families = [eastAsia, ascii].filter(
     (family, index, all): family is string => family !== null && all.indexOf(family) === index,
   );
   return families.length > 0 ? families.map((family) => `"${family}"`).join(', ') : null;
+}
+
+/**
+ * word/styles.xml의 문서 기본 서체를 CSS font-family 값으로 뽑아낸다 — 직접 서식이 없는
+ * 실행문은 이 서체로 보여야 브라우저의 기본 UI 폰트가 아니라 Word가 실제로 쓰는 서체와
+ * 같아진다. 기본 문단 스타일 자체가 서체를 지정하면(흔히 리터럴로) 그 값이 docDefaults(흔히
+ * 테마 참조)보다 우선한다 — 실제 Word의 상속 순서와 같다. 지정된 서체가 전혀 없으면 null
+ * (기존 CSS 폴백 유지).
+ */
+export function getDocxDefaultFontFamily(docxBytes: Uint8Array): string | null {
+  const entries = unzipSync(docxBytes);
+  const stylesXmlBytes = entries['word/styles.xml'];
+  if (!stylesXmlBytes) return null;
+  const stylesChildren = stylesChildrenOf(strFromU8(stylesXmlBytes));
+  const themeXmlBytes = entries['word/theme/theme1.xml'];
+  const themeXml = themeXmlBytes ? strFromU8(themeXmlBytes) : undefined;
+  const styleRFonts = defaultParagraphStyleInfoOf(stylesChildren).rFonts;
+  return (
+    resolveFontFamilyFromRFonts(styleRFonts, themeXml) ??
+    resolveFontFamilyFromRFonts(docDefaultsRFontsOf(stylesChildren), themeXml)
+  );
 }
 
 /**
@@ -641,6 +701,13 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
   const bodyChildren = bodyEl ? childrenOf(bodyEl) : [];
   const pageSetup = pageSetupOf(findFirst(bodyChildren, 'w:sectPr'));
   const contentWidthPx = pageSetup ? pageSetup.widthPx - pageSetup.marginLeftPx - pageSetup.marginRightPx : null;
+  // pStyle 없이 암묵적으로 "기본" 문단 스타일을 쓰는 문단(대부분의 실제 문서가 이렇다)이
+  // 실제로 상속받는 정렬 — w:jc가 없다고 곧 left인 게 아니라, 이 기본 스타일이 예컨대
+  // both(justify)를 지정하고 있을 수 있다(paragraphFrom 참고).
+  const stylesXmlBytes = entries['word/styles.xml'];
+  const defaultAlign = stylesXmlBytes
+    ? defaultParagraphStyleInfoOf(stylesChildrenOf(strFromU8(stylesXmlBytes))).align
+    : null;
 
   const blocks: PMNode[] = [];
   const paragraphRun: Array<{ node: PMNode; isListItem: boolean }> = [];
@@ -651,10 +718,10 @@ export function importDocx(docxBytes: Uint8Array): DocxImportResult {
   for (const child of bodyChildren) {
     const tag = tagOf(child);
     if (tag === 'w:p') {
-      paragraphRun.push(paragraphFrom(child));
+      paragraphRun.push(paragraphFrom(child, defaultAlign));
     } else if (tag === 'w:tbl') {
       flushParagraphRun();
-      blocks.push(tableFrom(child, contentWidthPx));
+      blocks.push(tableFrom(child, contentWidthPx, defaultAlign));
     }
     // w:sectPr 등 그 외 body 직속 요소는 무시한다 (v1 미지원 영역)
   }

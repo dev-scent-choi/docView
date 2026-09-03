@@ -382,6 +382,19 @@ describe('docx import: default font size (w:docDefaults, for documents with no d
       '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:styles>';
     expect(getDocxDefaultFontSizePt(docxWithStylesXml(stylesXml))).toBe(10);
   });
+
+  test('prefers the default paragraph style (w:type="paragraph" w:default="1") own w:sz over w:docDefaults', () => {
+    // 실제로 관찰된 패턴: 모든 문단이 암묵적으로 이 "기본" 스타일을 쓰고, 그 스타일 자체가
+    // docDefaults와 다른 크기를 직접 지정한다 — 이 경우 실제로 적용되는 크기는 스타일 쪽이다.
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>' +
+      '<w:style w:type="paragraph" w:default="1" w:styleId="a0"><w:name w:val="Normal"/>' +
+      '<w:rPr><w:sz w:val="20"/></w:rPr></w:style>' +
+      '</w:styles>';
+    expect(getDocxDefaultFontSizePt(docxWithStylesXml(stylesXml))).toBe(10);
+  });
 });
 
 describe('docx import: default font family (w:docDefaults/w:rFonts, direct or theme-resolved)', () => {
@@ -429,6 +442,70 @@ describe('docx import: default font family (w:docDefaults/w:rFonts, direct or th
     const entries = unzipSync(base);
     entries['word/styles.xml'] = strToU8(stylesXml);
     expect(getDocxDefaultFontFamily(Buffer.from(zipSync(entries)))).toBeNull();
+  });
+
+  test('prefers the default paragraph style\'s own literal w:rFonts over w:docDefaults (theme or literal)', () => {
+    // 실제로 관찰된 패턴: docDefaults는 테마(예: 맑은 고딕)를 가리키지만, 모든 문단이 암묵적으로
+    // 쓰는 "기본" 스타일 자체가 리터럴로 다른 서체를 직접 지정한다 — 실제로 적용되는 건 후자다.
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:docDefaults><w:rPrDefault><w:rPr>' +
+      '<w:rFonts w:asciiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/>' +
+      '</w:rPr></w:rPrDefault></w:docDefaults>' +
+      '<w:style w:type="paragraph" w:default="1" w:styleId="a0"><w:name w:val="Normal"/>' +
+      '<w:rPr><w:rFonts w:ascii="Arial" w:eastAsia="굴림"/></w:rPr></w:style>' +
+      '</w:styles>';
+    const base = makeSampleDocx(['x']);
+    const entries = unzipSync(base);
+    entries['word/styles.xml'] = strToU8(stylesXml);
+    expect(getDocxDefaultFontFamily(Buffer.from(zipSync(entries)))).toBe('"굴림", "Arial"');
+  });
+});
+
+describe('docx import: default paragraph alignment inherited from the default paragraph style', () => {
+  function docxWithDefaultStyleAndBody(defaultStylePPr: string, bodyXml: string): Buffer {
+    const stylesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      `<w:style w:type="paragraph" w:default="1" w:styleId="a0"><w:name w:val="Normal"/><w:pPr>${defaultStylePPr}</w:pPr></w:style>` +
+      '</w:styles>';
+    const base = makeSampleDocx([]);
+    const entries = unzipSync(base);
+    entries['word/styles.xml'] = strToU8(stylesXml);
+    const xml = strFromU8(entries['word/document.xml']).replace('<w:sectPr/>', `${bodyXml}<w:sectPr/>`);
+    entries['word/document.xml'] = strToU8(xml);
+    return Buffer.from(zipSync(entries));
+  }
+
+  test('applies the default style\'s w:jc="both" (justify) to a plain paragraph with no direct jc and no pStyle', () => {
+    const bodyXml = '<w:p><w:r><w:t xml:space="preserve">plain text</w:t></w:r></w:p>';
+    const { doc } = importDocx(docxWithDefaultStyleAndBody('<w:jc w:val="both"/>', bodyXml));
+    expect(doc.child(0).attrs.align).toBe('justify');
+  });
+
+  test('a paragraph\'s own direct w:jc still wins over the default style', () => {
+    const bodyXml =
+      '<w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p>';
+    const { doc } = importDocx(docxWithDefaultStyleAndBody('<w:jc w:val="both"/>', bodyXml));
+    expect(doc.child(0).attrs.align).toBe('right');
+  });
+
+  test('does not apply the default style\'s jc to a paragraph that references some other w:pStyle', () => {
+    const bodyXml =
+      '<w:p><w:pPr><w:pStyle w:val="SomeOtherStyle"/></w:pPr><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p>';
+    const { doc } = importDocx(docxWithDefaultStyleAndBody('<w:jc w:val="both"/>', bodyXml));
+    expect(doc.child(0).attrs.align).toBeNull();
+  });
+
+  test('applies the default style\'s alignment inside table cells too (e.g. a shaded title cell with no direct jc)', () => {
+    const tableXml =
+      '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="CCCCCC"/></w:tcPr>' +
+      '<w:p><w:r><w:t xml:space="preserve">제목</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    const { doc } = importDocx(docxWithDefaultStyleAndBody('<w:jc w:val="both"/>', tableXml));
+    const cellParagraph = doc.child(0).child(0).child(0).firstChild!;
+    expect(cellParagraph.attrs.align).toBe('justify');
   });
 });
 
