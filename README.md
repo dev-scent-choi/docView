@@ -15,6 +15,17 @@
 - (선택) LibreOffice — docx/pptx 등을 PDF로 변환하려면 필요. docx는 없어도 자동으로 서식 없는
   텍스트 미리보기 폴백으로 동작하지만, pptx는 이 폴백이 없어 LibreOffice 없이는 업로드가 거부된다
   (xlsx/csv는 LibreOffice 없이도 항상 정상 동작 — 셀 데이터만 직접 추출).
+- (선택) DWG 열람 — dwg는 먼저 DXF로 변환한 뒤 LibreOffice로 PDF화한다(위 LibreOffice도 필요).
+  DWG→DXF 변환기는 아래 둘 중 하나가 있으면 자동 감지된다:
+  - **LibreDWG (권장, 로그인 불필요)** — [공식 릴리스](https://github.com/LibreDWG/libredwg/releases)의
+    `libredwg-<버전>-win64.zip`을 받아 그 안의 `dwg2dxf.exe`와 함께 들어있는 `*.dll` 전부를
+    이 저장소의 `tools/` 폴더에 넣는다(`tools/dwg2dxf.exe`로 자동 인식됨). Program Files에
+    설치하는 게 아니라 파일을 복사하는 것뿐이라 관리자 권한이 필요 없다.
+  - **ODA File Converter** — [공식 사이트](https://www.opendesign.com/guestfiles/oda_file_converter)에서
+    받아 설치하면 자동 감지된다(계정 로그인이 필요하도록 최근 정책이 바뀌었다). 두 도구 모두
+    없으면 LibreDWG 쪽을 씀 — 변환 정확도는 ODA가 더 높지만 무인/스크립트 설치가 안 된다.
+  - 둘 다 표준 경로가 아닌 곳에 있다면 `DOCVIEW_DWG2DXF`(LibreDWG 실행 파일 경로) 또는
+    `DOCVIEW_ODA_CONVERTER`(ODAFileConverter.exe 경로) 환경 변수로 직접 지정할 수 있다.
 
 ## 설치
 
