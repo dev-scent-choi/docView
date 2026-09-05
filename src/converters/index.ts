@@ -1,4 +1,4 @@
-import { dwg2dxfPath, dwgConverter } from './dwgConverter.js';
+import { dwg2dxfPath, dwgConverter, odaConverterPath } from './dwgConverter.js';
 import { docxTextPreviewConverter } from './docxTextPreview.js';
 import { imageConverter } from './imageConverter.js';
 import {
@@ -22,7 +22,10 @@ const converters: readonly Converter[] = [
   // LibreOffice가 있으면 정확한 렌더링(officeConverter)을 쓰고, 없으면 docx만은 서식 없는
   // 텍스트 미리보기로라도 업로드·동시편집이 가능하게 한다(동시편집 대상이 docx뿐이라 이 정도로 충분).
   ...(sofficePath ? [officeConverter, spreadsheetConverter, dxfConverter] : [docxTextPreviewConverter]),
-  ...(sofficePath && dwg2dxfPath ? [dwgConverter] : []),
+  // dwgConverter 자체는 ODA File Converter/LibreDWG(dwg2dxf) 둘 중 하나만 있어도 동작하는데,
+  // 등록 여부를 dwg2dxfPath만으로 판단하면 ODA만 설치된 환경에서는 실제로는 변환 가능한데도
+  // .dwg 업로드가 415로 거부됐다 — 둘 중 하나라도 있으면 등록한다.
+  ...(sofficePath && (dwg2dxfPath || odaConverterPath) ? [dwgConverter] : []),
 ];
 
 const byExtension = new Map<string, Converter>(
