@@ -17,17 +17,28 @@ function escapeXmlText(value) {
   return value.replace(/[<>&'"]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[ch]);
 }
 
-/** 화면 열람용 워터마크 — 인쇄용(buildPrintPdf)과 같은 "열람자 이름 + 날짜" 문구를, PDF에 굽는 대신
+/** "2026-09-06 23:30:11" — toISOString은 UTC라 화면을 보는 사람의 실제 시계와 어긋나 보이므로
+ * 로컬 시각 그대로 초 단위까지 조립한다. */
+function formatWatermarkTimestamp(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
+/** 화면 열람용 워터마크 — 인쇄용(buildPrintPdf)과 같은 "열람자 이름 + 시각" 문구를, PDF에 굽는 대신
  * 각 페이지 위에 CSS 배경으로 반복해서 깐다. 토큰에 서명된(위조 불가) viewer 이름을 그대로 쓰므로
- * "이 화면을 캡처/유출하면 누가 봤었는지가 화면에 이미 찍혀 있다"는 억지력이 목적이며, 인쇄 시
- * 워터마크(서버가 PDF 픽셀에 실제로 굽는 것)를 대체하지 않는다. */
+ * "이 화면을 캡처/유출하면 누가 몇 시에 봤었는지가 화면에 이미 찍혀 있다"는 억지력이 목적이며,
+ * 인쇄 시 워터마크(서버가 PDF 픽셀에 실제로 굽는 것)를 대체하지 않는다. 이 페이지를 연 시점의
+ * 스냅샷이라 인쇄 워터마크처럼 이후로 실시간으로 흐르진 않는다. */
 function applyWatermark(viewerName) {
   if (!viewerName) return;
-  const text = `${viewerName}  ${new Date().toISOString().slice(0, 10)}`;
+  const text = `${viewerName}  ${formatWatermarkTimestamp(new Date())}`;
   const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="260" height="170">` +
-    `<text x="130" y="95" transform="rotate(-28 130 95)" text-anchor="middle" ` +
-    `font-family="sans-serif" font-size="15" fill="rgba(0,0,0,0.16)">${escapeXmlText(text)}</text>` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180">` +
+    `<text x="150" y="100" transform="rotate(-28 150 100)" text-anchor="middle" ` +
+    `font-family="sans-serif" font-size="14" fill="rgba(0,0,0,0.16)">${escapeXmlText(text)}</text>` +
     `</svg>`;
   document.documentElement.style.setProperty('--watermark-bg', `url("data:image/svg+xml,${encodeURIComponent(svg)}")`);
 }

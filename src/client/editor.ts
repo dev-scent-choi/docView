@@ -86,6 +86,33 @@ function applyDefaultFontSize(pt: number | null): void {
   editorHost.style.fontSize = `${(pt * 4) / 3}px`; // 1pt = 96/72px = 4/3px
 }
 
+function escapeXmlText(value: string): string {
+  return value.replace(/[<>&'"]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[ch] as string);
+}
+
+/** "2026-09-06 23:30:11" — toISOString은 UTC라 화면을 보는 사람의 실제 시계와 어긋나 보이므로
+ * 로컬 시각 그대로 초 단위까지 조립한다. viewer.js의 동명 함수와 같은 포맷(별도 번들이라 공유 불가). */
+function formatWatermarkTimestamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
+/** 뷰어(viewer.js)와 같은 화면 열람용 워터마크를 동시편집 화면에도 띄운다 — 토큰에 서명된(위조
+ * 불가) viewer 이름 + 이 화면을 연 시각을 편집 화면 전체에 옅게 반복해 깐다. */
+function applyWatermark(viewerName: string): void {
+  if (!viewerName) return;
+  const text = `${viewerName}  ${formatWatermarkTimestamp(new Date())}`;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180">` +
+    `<text x="150" y="100" transform="rotate(-28 150 100)" text-anchor="middle" ` +
+    `font-family="sans-serif" font-size="14" fill="rgba(0,0,0,0.16)">${escapeXmlText(text)}</text>` +
+    `</svg>`;
+  document.documentElement.style.setProperty('--watermark-bg', `url("data:image/svg+xml,${encodeURIComponent(svg)}")`);
+}
+
 /**
  * 한글(Hangul) 코드 영역 — 이 범위의 글자만 eastAsia 서체(예: 굴림)를 쓰게 강제하고, 나머지
  * (숫자·영문·기호 등)는 ascii 서체(예: Arial)로 넘긴다. 그냥 "굴림, Arial" 순서로만 나열하면
@@ -387,6 +414,7 @@ async function main(): Promise<void> {
   applyPageSetup(info.pageSetup);
   applyDefaultFontSize(info.defaultFontSizePt);
   applyDefaultFontFamily(info.defaultFontFamily);
+  applyWatermark(info.viewer);
 
   const ydoc = new Y.Doc();
   const fragment = ydoc.getXmlFragment('prosemirror');

@@ -140,6 +140,33 @@ function applyStyleToTd(td: HTMLTableCellElement, style: CellStyleAttrs | undefi
   td.classList.toggle('g-locked', style?.lk === 1);
 }
 
+function escapeXmlText(value: string): string {
+  return value.replace(/[<>&'"]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[ch] as string);
+}
+
+/** "2026-09-06 23:30:11" — toISOString은 UTC라 화면을 보는 사람의 실제 시계와 어긋나 보이므로
+ * 로컬 시각 그대로 초 단위까지 조립한다. viewer.js/editor.ts의 동명 함수와 같은 포맷(별도
+ * 번들이라 공유 불가). */
+function formatWatermarkTimestamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
+/** 뷰어/docx 편집기와 같은 화면 열람용 워터마크를 xlsx 동시편집 화면에도 띄운다. */
+function applyWatermark(viewerName: string): void {
+  if (!viewerName) return;
+  const text = `${viewerName}  ${formatWatermarkTimestamp(new Date())}`;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180">` +
+    `<text x="150" y="100" transform="rotate(-28 150 100)" text-anchor="middle" ` +
+    `font-family="sans-serif" font-size="14" fill="rgba(0,0,0,0.16)">${escapeXmlText(text)}</text>` +
+    `</svg>`;
+  document.documentElement.style.setProperty('--watermark-bg', `url("data:image/svg+xml,${encodeURIComponent(svg)}")`);
+}
+
 async function main(): Promise<void> {
   if (!token) {
     showFatalError('열람 토큰이 없습니다.');
@@ -167,6 +194,7 @@ async function main(): Promise<void> {
 
   titleEl.textContent = info.name;
   document.title = `${info.name} — DocView 편집`;
+  applyWatermark(info.viewer);
 
   const ydoc = new Y.Doc();
   const cells = ydoc.getMap<string>(GRID_CELLS_MAP);

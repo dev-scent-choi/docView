@@ -1102,6 +1102,19 @@ h2 {
 .grid-scroll::-webkit-scrollbar-thumb:hover { background-color: #8f96a3; }
 .grid-scroll::-webkit-scrollbar-corner { background: #f3f4f7; }
 
+/* 화면 열람용 워터마크(viewer.js의 applyWatermark, .page-frame::before와 같은 --watermark-bg를
+   공유) — .grid-container가 position:fixed라 이 오버레이는 grid-scroll을 아무리 스크롤해도
+   화면에 고정된 채로 유리판처럼 항상 같은 자리에 떠 있는다(그리드 셀 위에 매번 새로 찍는 게
+   아니라 뷰포트 기준으로 한 번만 깔아도 되므로 더 가볍다). */
+.grid-watermark-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background-image: var(--watermark-bg, none);
+  background-repeat: repeat;
+}
+
 .grid-inner { position: relative; }
 
 .grid-table {
@@ -2180,6 +2193,18 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 .editor-body .search-bar input { width: auto; flex: 1; }
 
 #editor-zoom-host { flex: 1; display: flex; flex-direction: column; transform-origin: top center; }
+
+/* 화면 열람용 워터마크(공유 --watermark-bg, viewer.js/editor.ts가 각자 채운다) — 편집기 본문은
+   중첩 스크롤 없이 body 자체가 스크롤되므로, position:fixed로 뷰포트에 고정해 얼마나 내려
+   스크롤해도 항상 같은 자리에 떠 있게 한다. 툴바(z-index:10)보다는 아래라 툴바 버튼은 안 가린다. */
+.doc-watermark-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background-image: var(--watermark-bg, none);
+  background-repeat: repeat;
+}
 
 /* ProseMirror 문서 내 검색 하이라이트 (Decoration으로 삽입되는 인라인 span) */
 .editor-search-hit { background: #fff3bf; border-radius: 2px; }
