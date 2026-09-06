@@ -588,6 +588,23 @@ h2 {
   transition: opacity 320ms ease;
 }
 
+/* 화면 열람용 워터마크(viewer.js의 applyWatermark가 --watermark-bg를 채운다) — 페이지 이미지
+   위, 검색 하이라이트/페이지 번호 배지 아래(z-index 낮게)에 깐다. 클릭·드래그를 가로채면 안 되므로
+   pointer-events:none. */
+.page-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background-image: var(--watermark-bg, none);
+  background-repeat: repeat;
+}
+
+/* 도면(반전) 모드는 배경이 어두워지므로(캔버스에만 invert 필터가 걸림) 워터마크도 같이
+   반전해야 어두운 글자(rgba(0,0,0,.16))가 밝은 글자로 바뀌어 계속 보인다. */
+.pages-invert .page-frame::before { filter: invert(1); }
+
 .page-frame.page-ready canvas { opacity: 1; }
 
 /* 보기 전용 회전(저장되지 않음) — transform-origin을 중앙에 두고 컨테이너와 함께 자연스럽게 돈다 */

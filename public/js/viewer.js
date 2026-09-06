@@ -13,6 +13,25 @@ const printBtn = document.getElementById('print-btn');
 const downloadBtn = document.getElementById('download-btn');
 const downloadAsBtn = document.getElementById('download-as-btn');
 
+function escapeXmlText(value) {
+  return value.replace(/[<>&'"]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[ch]);
+}
+
+/** 화면 열람용 워터마크 — 인쇄용(buildPrintPdf)과 같은 "열람자 이름 + 날짜" 문구를, PDF에 굽는 대신
+ * 각 페이지 위에 CSS 배경으로 반복해서 깐다. 토큰에 서명된(위조 불가) viewer 이름을 그대로 쓰므로
+ * "이 화면을 캡처/유출하면 누가 봤었는지가 화면에 이미 찍혀 있다"는 억지력이 목적이며, 인쇄 시
+ * 워터마크(서버가 PDF 픽셀에 실제로 굽는 것)를 대체하지 않는다. */
+function applyWatermark(viewerName) {
+  if (!viewerName) return;
+  const text = `${viewerName}  ${new Date().toISOString().slice(0, 10)}`;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="260" height="170">` +
+    `<text x="130" y="95" transform="rotate(-28 130 95)" text-anchor="middle" ` +
+    `font-family="sans-serif" font-size="15" fill="rgba(0,0,0,0.16)">${escapeXmlText(text)}</text>` +
+    `</svg>`;
+  document.documentElement.style.setProperty('--watermark-bg', `url("data:image/svg+xml,${encodeURIComponent(svg)}")`);
+}
+
 /** 페이지/그리드 공용 상단 위치 표시. pages 뷰에서는 편집 가능(페이지 이동), grid 뷰에서는
  * 읽기 전용(현재 보이는 행 범위 표시)으로 쓴다. */
 function setPageIndicator(current, total, { editable = true, suffix = '' } = {}) {
@@ -1885,6 +1904,7 @@ async function init() {
   pageCount = json.data.pageCount;
   pageDimensions = json.data.pages || null;
   permissions = json.data.permissions;
+  applyWatermark(json.data.viewer);
 
   // 측정/도면 모드는 도면·PDF 도구다 — word 등 다른 문서 종류를 pages 뷰로 볼 때는 의미가 없으므로
   // 실제 pdf 문서일 때만 보여준다 (grid 뷰는 initGridView가 이미 별도로 항상 숨긴다).
