@@ -127,30 +127,36 @@ function broadcast(room: Room, message: Uint8Array): void {
 }
 
 /**
- * Yjs 'update' 이벤트 하나가 xlsx 룸의 GRID_CELLS_MAP에 담은 셀 편집을 canonical 그리드에도
- * 즉시 반영한다. Y.Doc.on('update')는 원시 바이너리 업데이트만 주므로, 이 업데이트를 별도
- * "관찰용" Y.Doc에 적용해 어떤 키가 바뀌었는지 관찰한 뒤 그 값을 canonical에 옮겨 쓴다 — 이미
- * ydoc 자체에 적용된 값을 다시 읽으면 되므로 실제로는 관찰용 Y.Doc 없이 ydoc.getMap(...)에서
- * 직접 최신 값을 읽으면 된다(update 바이트 자체를 파싱할 필요 없음): update가 어떤 키를
- * 건드렸는지는 몰라도, ydoc의 GRID_CELLS_MAP은 이미 최신 상태이므로 전체를 다시 훑어
- * canonical과 다른 값만 반영하면 정확하다 — 다만 매 update마다 전체를 훑으면 페이지 하나(500행)
- * 안에서도 비효율적이므로, Task 6(윈도잉 컷오버) 전까지는 Yjs가 전체를 담고 있어 이 함수가
- * "전체를 훑는" 접근이어도 안전하다(과도기 단계). Task 6에서 "지금 구독 중인 페이지만 훑는"
- * 최적화된 버전으로 교체될 예정이다.
+ * xlsx 룸의 GRID_CELLS_MAP(Y.Map)에 생긴 변화 하나하나를 canonical 그리드에도 즉시 반영한다.
+ * 반드시 `cells.observe(...)`로 등록해서 써야 한다 — Y.Doc의 'update' 이벤트를 훑어 매번 맵
+ * 전체를 다시 스캔하는 방식은 삭제(`cells.delete(key)`)를 놓친다: 삭제된 키는 그 시점 맵의
+ * `for...of` 순회에 아예 나타나지 않으므로 "이 칸이 지워졌다"는 사실 자체를 관찰할 수 없다.
+ * `YMapEvent.changes.keys`는 각 키가 add/update/delete 중 무엇이었는지 직접 알려주므로,
+ * 삭제만 별도로 canonical을 0(빈 칸 sentinel)으로 되돌리고, 그 외에는 현재 맵 값을 그대로
+ * 읽어 반영한다.
  */
-function applyYjsUpdateToCanonical(canonicalGrid: GridDocument, ydoc: Y.Doc, _update: Uint8Array): void {
-  const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
-  for (const [key, value] of cells) {
+function applyCellsChangeToCanonical(
+  canonicalGrid: GridDocument,
+  cells: Y.Map<string>,
+  event: Y.YMapEvent<string>,
+): void {
+  for (const [key, change] of event.changes.keys) {
     const parsed = parseGridCellKey(key);
     if (!parsed) continue;
     const { sheetIdx, row, col } = parsed;
     const sheet = canonicalGrid.sheets[sheetIdx];
     if (!sheet || row >= sheet.rows.length || col >= sheet.colCount) continue;
-    const currentCell = sheet.rows[row][col];
-    const currentText = currentCell === 0 ? '' : currentCell.v;
-    if (currentText === value) continue;
-    (sheet.rows[row] as Array<{ v: string; s?: number } | 0>)[col] =
-      value === '' ? 0 : { v: value };
+    const rowArray = sheet.rows[row] as Array<{ v: string; s?: number } | 0>;
+    if (change.action === 'delete') {
+      rowArray[col] = 0;
+      continue;
+    }
+    const value = cells.get(key) ?? '';
+    const currentCell = rowArray[col];
+    rowArray[col] =
+      value === ''
+        ? 0
+        : { v: value, ...(currentCell !== 0 && currentCell.s !== undefined ? { s: currentCell.s } : {}) };
   }
 }
 
@@ -164,6 +170,13 @@ async function seedRoom(room: Room): Promise<void> {
       const grid = await parseXlsxToGrid(original);
       room.canonicalGrid = grid;
       await seedGridFromXlsx(ydoc, grid);
+      // 시딩이 끝난 뒤에만 관찰을 시작한다 — 시딩 자체도 GRID_CELLS_MAP에 쓰기(seedableCellValue로
+      // 서식이 벗겨진 "편집용" 텍스트, 예: "1,000" → "1000")를 하므로, 시딩 도중에 이미 관찰이
+      // 걸려 있으면 방금 room.canonicalGrid에 넣은 올바른 표시 텍스트를 그 벗겨진 값으로 되돌려
+      // 덮어써 버린다(사용자 편집이 하나도 없었는데도). canonicalGrid는 이미 parseXlsxToGrid의
+      // 결과로 정확히 채워져 있으므로, 이 시점 이후의 "진짜" 편집만 관찰하면 된다.
+      const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
+      cells.observe((event) => applyCellsChangeToCanonical(grid, cells, event));
     } else if (kind === 'pptx') {
       seedSlidesFromPptx(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
     } else {
@@ -398,9 +411,8 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     encoding.writeVarUint(encoder, MESSAGE_SYNC);
     writeUpdate(encoder, update);
     broadcast(room, encoding.toUint8Array(encoder));
-    if (room.kind === 'xlsx' && room.canonicalGrid) {
-      applyYjsUpdateToCanonical(room.canonicalGrid, ydoc, update);
-    }
+    // canonical 그리드 동기화는 이제 cells.observe(...)(seedRoom, 시딩 완료 후 등록)가 맡는다 —
+    // 여기서 다시 처리하면 삭제(cells.delete)를 놓치는 문제가 있었다(findings 참고).
     // 저장 결과를 반영하는 flushToStore 자신의 쓰기는 예외 — 위 suppressAutosaveReschedule 설명 참고.
     if (!room.suppressAutosaveReschedule) scheduleAutosave(room);
   });

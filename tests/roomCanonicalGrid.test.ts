@@ -7,7 +7,13 @@ import ExcelJS from 'exceljs';
 import * as decoding from 'lib0/decoding';
 import * as encoding from 'lib0/encoding';
 import * as Y from 'yjs';
-import { messageYjsSyncStep2, messageYjsUpdate, readUpdate, writeUpdate } from 'y-protocols/sync';
+import {
+  messageYjsSyncStep2,
+  messageYjsUpdate,
+  readUpdate,
+  writeSyncStep1,
+  writeUpdate,
+} from 'y-protocols/sync';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const MESSAGE_SYNC = 0;
@@ -44,6 +50,34 @@ async function makeSampleXlsx(): Promise<Buffer> {
   return Buffer.from(buffer as ArrayBuffer);
 }
 
+/** A2("Alice")에 굵게(bold) 스타일이 걸린 샘플 — canonical에 편집 후에도 스타일(.s)이
+ * 유지되는지 검증하기 위한 픽스처. */
+async function makeStyledSampleXlsx(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  sheet.getCell('A1').value = 'Name';
+  const aliceCell = sheet.getCell('A2');
+  aliceCell.value = 'Alice';
+  aliceCell.font = { bold: true };
+  sheet.getCell('B2').value = 10;
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(buffer as ArrayBuffer);
+}
+
+/** A2에 천단위 구분 쉼표 서식이 걸린 숫자 셀 — parseXlsxToGrid는 이걸 "1,000"으로 표시하지만
+ * Yjs cells 맵엔 편집 가능하도록 "1000"으로 시딩된다(seedableCellValue). canonical이 시딩
+ * 직후 이 쉼표-스트립 값에 오염되지 않는지 검증하기 위한 픽스처. */
+async function makeNumberFormattedXlsx(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  sheet.getCell('A1').value = 'Total';
+  const amountCell = sheet.getCell('A2');
+  amountCell.value = 1000;
+  amountCell.numFmt = '#,##0';
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(buffer as ArrayBuffer);
+}
+
 function sendCellEdit(socket: FakeSocket, key: string, value: string): void {
   // scratch는 room의 Y.Doc과 아무 인과관계도 공유하지 않는 완전히 새 Y.Doc이라, 이미 값이 있는
   // 같은 키에 값을 쓰면 Yjs Y.Map의 동시편집(concurrent) 충돌 해소 규칙(더 큰 clientID를 가진
@@ -60,6 +94,43 @@ function sendCellEdit(socket: FakeSocket, key: string, value: string): void {
   const encoder = encoding.createEncoder();
   encoding.writeVarUint(encoder, MESSAGE_SYNC);
   writeUpdate(encoder, update);
+  socket.emit('message', encoding.toUint8Array(encoder));
+}
+
+/**
+ * 클라이언트가 접속 직후 자기 상태 벡터(비어 있음)를 서버로 보내는 것을 흉내낸다 — 서버의
+ * handleMessage가 messageYjsSyncStep1 분기에서 room.ydoc과의 diff(=현재 룸의 전체 내용)를
+ * syncStep2로 되돌려 보내주고, 그 응답이 FakeSocket.send를 거쳐 socket.mirror에 적용된다.
+ * 이렇게 해야 socket.mirror가 room.ydoc과 같은 아이템 식별자(client/clock)를 공유하게 되어,
+ * 그 뒤 mirror에서 만든 delete가 room의 실제 항목을 지우는 delete로 정확히 병합된다(실제
+ * y-websocket 클라이언트가 접속 시 거치는 것과 같은 절차).
+ */
+function syncMirrorWithRoom(socket: FakeSocket): void {
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_SYNC);
+  writeSyncStep1(encoder, socket.mirror);
+  socket.emit('message', encoding.toUint8Array(encoder));
+}
+
+/** 실제 클라이언트(grid-editor.ts의 commitCell)가 셀을 지울 때 하는 것과 같은 동작 —
+ * `cells.set(key, '')`가 아니라 `cells.delete(key)` — 를 mirror Y.Doc에서 수행하고, 그 결과
+ * 생긴 update를 서버로 전송한다. syncMirrorWithRoom을 먼저 호출해 mirror가 room과 같은 항목을
+ * 알고 있어야만 delete가 실제로 뭔가를 지우는 update를 만들어낸다(안 그러면 mirror 로컬에
+ * 해당 키의 항목이 없어 delete가 아무 update도 생성하지 않는다). */
+function deleteCellViaClient(socket: FakeSocket, key: string): void {
+  let captured: Uint8Array | null = null;
+  const onUpdate = (update: Uint8Array) => {
+    captured = update;
+  };
+  socket.mirror.on('update', onUpdate);
+  socket.mirror.getMap<string>('cells').delete(key);
+  socket.mirror.off('update', onUpdate);
+  if (!captured) {
+    throw new Error('delete produced no update — was syncMirrorWithRoom called first?');
+  }
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_SYNC);
+  writeUpdate(encoder, captured);
   socket.emit('message', encoding.toUint8Array(encoder));
 }
 
@@ -140,5 +211,109 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
 
     const canonical = getRoomCanonicalGridForTest(docId);
     expect(canonical!.sheets[0].rows[1][0]).toEqual({ v: 'Alice Kim' });
+  });
+
+  test('deleting a cell (Y.Map key delete, not set to "") clears it to 0 in the canonical grid', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { gridCellKey } = await import('../src/collab/gridShared.js');
+
+    const docId = randomUUID();
+    const original = await makeSampleXlsx();
+    await store.saveOriginal(docId, 'xlsx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.xlsx',
+      ext: 'xlsx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+      viewKind: 'grid',
+    });
+
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+
+    // 편집 전 확인: A2는 "Alice"를 담고 있어야 한다.
+    const before = getRoomCanonicalGridForTest(docId);
+    expect(before!.sheets[0].rows[1][0]).toEqual({ v: 'Alice' });
+
+    // 실제 클라이언트(grid-editor.ts의 commitCell)가 셀을 지울 때 하는 것과 동일하게
+    // cells.delete(key)를 수행한다 — cells.set(key, '')가 아니다.
+    syncMirrorWithRoom(socket);
+    deleteCellViaClient(socket, gridCellKey(0, 1, 0));
+
+    const canonical = getRoomCanonicalGridForTest(docId);
+    expect(canonical!.sheets[0].rows[1][0]).toBe(0);
+  });
+
+  test('editing a cell that already has a style preserves its style (.s) in the canonical grid', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { gridCellKey } = await import('../src/collab/gridShared.js');
+
+    const docId = randomUUID();
+    const original = await makeStyledSampleXlsx();
+    await store.saveOriginal(docId, 'xlsx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.xlsx',
+      ext: 'xlsx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+      viewKind: 'grid',
+    });
+
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+
+    const before = getRoomCanonicalGridForTest(docId);
+    const beforeCell = before!.sheets[0].rows[1][0];
+    expect(beforeCell).not.toBe(0);
+    const styleIndex = (beforeCell as { v: string; s?: number }).s;
+    expect(styleIndex).toBeDefined();
+
+    // 텍스트만 바꾸는 편집 — 스타일은 건드리지 않는다.
+    sendCellEdit(socket, gridCellKey(0, 1, 0), 'Alice Kim');
+
+    const canonical = getRoomCanonicalGridForTest(docId);
+    expect(canonical!.sheets[0].rows[1][0]).toEqual({ v: 'Alice Kim', s: styleIndex });
+  });
+
+  test('seeding does not corrupt the canonical grid with the stripped (editable) cell text', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+
+    const docId = randomUUID();
+    const original = await makeNumberFormattedXlsx();
+    await store.saveOriginal(docId, 'xlsx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.xlsx',
+      ext: 'xlsx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+      viewKind: 'grid',
+    });
+
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+
+    // joinEditSession이 resolve된 직후, 편집 메시지를 하나도 보내기 전 — canonical은 여전히
+    // parseXlsxToGrid가 만든 올바른 표시 텍스트("1,000")를 담고 있어야 한다. seedGridFromXlsx가
+    // Yjs cells 맵에 심는 편집용 스트립 값("1000")으로 오염되면 안 된다.
+    const canonical = getRoomCanonicalGridForTest(docId);
+    const cell = canonical!.sheets[0].rows[1][0];
+    expect(cell).not.toBe(0);
+    expect((cell as { v: string }).v).toBe('1,000');
   });
 });
