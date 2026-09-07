@@ -35,6 +35,7 @@ import { exportXlsxFromGrid, reparseGridForViewer, seedGridFromXlsx } from '../x
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
 import { DOC_META_MAP, DOC_META_SAVED_AT_KEY } from './gridShared.js';
+import { runSerialized } from './saveSerializer.js';
 
 /**
  * y-websocket이 제공하는 참조 서버 유틸(bin/utils.cjs)을 그대로 쓰지 않고 같은 프로토콜을
@@ -82,6 +83,17 @@ interface Room {
   autosaveTimer: NodeJS.Timeout | null;
   /** 문서 시딩(원본 → Y.Doc)이 끝났는지 — 첫 연결에 syncStep1을 보내기 전에 기다린다 */
   readonly ready: Promise<void>;
+  /**
+   * true인 동안 발생한 ydoc 'update'는 scheduleAutosave를 다시 예약하지 않는다.
+   * flushToStore 자신이 저장 결과를 Y.Doc에 반영(pptx 배열 재작성, 저장 시각 기록)할 때만
+   * 짧게 켠다 — 이 자기 자신의 쓰기까지 "새 편집"으로 취급해 또 자동저장을 예약하면, 그
+   * 자동저장이 끝나며 다시 같은 쓰기를 하고 또 예약하는 식으로 영원히 반복된다(실사용자
+   * 편집이 하나도 없어도 8초마다 계속 저장·PDF 재변환이 도는 문제의 원인이었다). 진짜
+   * 사용자/원격 편집이 도착하는 시점(await 중, 이 플래그가 꺼져 있는 동안)에는 그대로
+   * scheduleAutosave가 걸려야 하므로, 함수 전체가 아니라 자기 자신의 동기적 쓰기 구간에만
+   * 좁게 두른다.
+   */
+  suppressAutosaveReschedule: boolean;
 }
 
 const rooms = new Map<string, Room>();
@@ -127,7 +139,8 @@ async function seedRoom(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<void
  * 현재 협업 상태(Y.Doc)를 원본 포맷으로 직렬화해 저장하고, 뷰어용 캐시(PDF 또는 그리드)를
  * 재생성하며, 렌더링·검색 캐시를 무효화한다. 유휴 자동 저장과 "마지막 참여자 퇴장" 양쪽에서 호출된다.
  */
-async function flushToStore(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<void> {
+async function flushToStore(room: Room): Promise<void> {
+  const { docId, kind, ydoc } = room;
   const meta = await store.readMeta(docId);
   if (!meta) return;
 
@@ -174,18 +187,23 @@ async function flushToStore(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<
     // 주기(8초 후)에서 자연스럽게 반영된다(그동안 sourcePageNumber가 한 번 더 낡은 채로 남는
     // 정도의 대가일 뿐, 편집 유실은 없다).
     if (JSON.stringify(slidesArray.toArray()) === snapshotBeforeSave) {
-      ydoc.transact(() => {
-        slidesArray.delete(0, slidesArray.length);
-        slidesArray.insert(
-          0,
-          finalParts.map((part, index) => ({
-            id: randomUUID(),
-            kind: 'original' as const,
-            sourceSlidePart: part,
-            sourcePageNumber: index + 1,
-          })),
-        );
-      });
+      room.suppressAutosaveReschedule = true;
+      try {
+        ydoc.transact(() => {
+          slidesArray.delete(0, slidesArray.length);
+          slidesArray.insert(
+            0,
+            finalParts.map((part, index) => ({
+              id: randomUUID(),
+              kind: 'original' as const,
+              sourceSlidePart: part,
+              sourcePageNumber: index + 1,
+            })),
+          );
+        });
+      } finally {
+        room.suppressAutosaveReschedule = false;
+      }
     }
 
     const converter = findConverter(meta.ext);
@@ -218,8 +236,23 @@ async function flushToStore(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<
   invalidateViewCaches(docId);
   await recordAudit({ type: 'edit_saved', docId });
   // 일반 Y.Map 쓰기라 기존 sync 프로토콜을 그대로 타고 모든 클라이언트에 전파된다 — 커스텀
-  // 메시지 없이도 클라이언트가 "저장됨" 표시를 실시간으로 띄울 수 있는 이유.
-  ydoc.getMap<number>(DOC_META_MAP).set(DOC_META_SAVED_AT_KEY, Date.now());
+  // 메시지 없이도 클라이언트가 "저장됨" 표시를 실시간으로 띄울 수 있는 이유. suppressAutosaveReschedule로
+  // 감싸는 이유는 Room 인터페이스 정의부의 설명 참고 — 이 쓰기 자체가 다음 자동저장을 또
+  // 예약해 버리면 실제 편집이 하나도 없어도 8초마다 영원히 재저장이 도는 루프가 생긴다.
+  room.suppressAutosaveReschedule = true;
+  try {
+    ydoc.getMap<number>(DOC_META_MAP).set(DOC_META_SAVED_AT_KEY, Date.now());
+  } finally {
+    room.suppressAutosaveReschedule = false;
+  }
+}
+
+/**
+ * 유휴 자동저장 타이머 / Ctrl+S 즉시저장 / 마지막 참여자 퇴장, 이 세 지점이 같은 문서를 저장할 때
+ * 서로 겹치지 않도록 docId별로 한 줄로 세운다 — saveSerializer.ts 참고.
+ */
+function queueFlush(room: Room): Promise<void> {
+  return runSerialized(room.docId, () => flushToStore(room));
 }
 
 /**
@@ -235,7 +268,7 @@ export async function flushNow(docId: string): Promise<boolean> {
     clearTimeout(room.autosaveTimer);
     room.autosaveTimer = null;
   }
-  await flushToStore(room.docId, room.kind, room.ydoc);
+  await queueFlush(room);
   return true;
 }
 
@@ -274,7 +307,7 @@ function scheduleAutosave(room: Room): void {
     // reject는 Node에서 unhandledRejection이 되어 프로세스 전체를 죽인다 — 그러면 이 문서만이
     // 아니라 그 순간 다른 모든 문서(docx/xlsx 포함)를 편집 중이던 세션까지 함께 끊긴다. 반드시
     // 여기서 잡아 로그만 남긴다.
-    flushToStore(room.docId, room.kind, room.ydoc).catch((error) => {
+    queueFlush(room).catch((error) => {
       console.error(`유휴 자동저장 실패 (문서 ${room.docId}):`, error);
     });
   }, AUTOSAVE_IDLE_MS);
@@ -299,6 +332,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     readOnlyConns: new Set<WebSocket>(),
     autosaveTimer: null,
     ready: seedRoom(docId, kind, ydoc),
+    suppressAutosaveReschedule: false,
   };
   rooms.set(docId, room);
 
@@ -307,7 +341,8 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     encoding.writeVarUint(encoder, MESSAGE_SYNC);
     writeUpdate(encoder, update);
     broadcast(room, encoding.toUint8Array(encoder));
-    scheduleAutosave(room);
+    // 저장 결과를 반영하는 flushToStore 자신의 쓰기는 예외 — 위 suppressAutosaveReschedule 설명 참고.
+    if (!room.suppressAutosaveReschedule) scheduleAutosave(room);
   });
 
   awareness.on(
@@ -342,7 +377,7 @@ function closeConn(room: Room, conn: WebSocket): void {
       }
       rooms.delete(room.docId);
       void room.ready
-        .then(() => flushToStore(room.docId, room.kind, room.ydoc))
+        .then(() => queueFlush(room))
         .catch((error) => console.error(`동시편집 종료 저장 실패 (문서 ${room.docId}):`, error))
         .finally(() => room.ydoc.destroy());
     }
