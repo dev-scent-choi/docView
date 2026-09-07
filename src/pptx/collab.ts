@@ -119,9 +119,25 @@ export function exportPptxFromSlides(pptxBytes: Uint8Array, slidesArray: Y.Array
   const zipEntries = { ...unzipSync(pptxBytes) };
   const entryList = slidesArray.toArray();
 
+  const originalRelsXml = strFromU8(zipEntries['ppt/_rels/presentation.xml.rels']);
+  const originalPresentationXml = strFromU8(zipEntries['ppt/presentation.xml']);
+
+  // 원본 슬라이드 파트 → 원본 rId, 원본 rId → 원본 sldId 매핑. 살아남는 'original' 슬라이드는 이
+  // 값들을 그대로 재사용해야 한다 — 그래야 p14:sectionLst(슬라이드 정렬 "구역")나
+  // p:custShowLst(사용자 지정 쇼)처럼 rId/sldId를 참조하는 기능이 내보내기마다 깨지지 않는다.
+  const originalPartToRelId = new Map<string, string>(
+    [...slideRelsMap(originalRelsXml)].map(([rId, part]) => [part, rId]),
+  );
+  const originalSldIdByRelId = new Map<string, number>();
+  for (const tag of originalPresentationXml.match(/<p:sldId\b[^>]*\/>/g) ?? []) {
+    const idMatch = /\bid="(\d+)"/.exec(tag);
+    const relIdMatch = /r:id="(rId\d+)"/.exec(tag);
+    if (idMatch && relIdMatch) originalSldIdByRelId.set(relIdMatch[1], Number(idMatch[1]));
+  }
+
   let nextSlideNumber = maxSlideNumber(zipEntries) + 1;
-  let nextRelId = maxRelId(strFromU8(zipEntries['ppt/_rels/presentation.xml.rels'])) + 1;
-  const nextSldId = maxSldId(strFromU8(zipEntries['ppt/presentation.xml'])) + 1;
+  let nextRelId = maxRelId(originalRelsXml) + 1;
+  let nextSldId = maxSldId(originalPresentationXml) + 1;
 
   const firstOriginalPart = entryList.find((e) => e.sourceSlidePart)?.sourceSlidePart;
   const layoutTarget = firstOriginalPart ? firstSlideLayoutTarget(zipEntries, firstOriginalPart) : null;
@@ -165,34 +181,46 @@ export function exportPptxFromSlides(pptxBytes: Uint8Array, slidesArray: Y.Array
     }
   }
 
-  // presentation.xml.rels: 최종 파트 목록 전체에 대해 rId를 다시 배정한다(살아남은 기존 rId도
-  // 재사용하지 않고 전부 새로 씀 — 중복/충돌 걱정 없이 항상 일관된 결과를 만들기 위해서다).
+  // presentation.xml.rels용 rId 배정: 원본에 이미 있던 파트(=살아남은 'original' 슬라이드)는 원래
+  // rId를 그대로 재사용하고, 새로 생긴 파트(duplicate/blank)만 새 rId를 할당한다.
   const partToRelId = new Map<string, string>();
   for (const part of finalParts) {
-    if (!partToRelId.has(part)) {
+    if (partToRelId.has(part)) continue;
+    const originalRelId = originalPartToRelId.get(part);
+    if (originalRelId) {
+      partToRelId.set(part, originalRelId);
+    } else {
       partToRelId.set(part, `rId${nextRelId}`);
       nextRelId += 1;
     }
   }
-  const otherRelsXml = strFromU8(zipEntries['ppt/_rels/presentation.xml.rels']);
-  const nonSlideRels = (otherRelsXml.match(/<Relationship\b[^>]*\/>/g) ?? []).filter(
-    (tag) => !/Target="(?:[^"]*\/)?slide\d+\.xml"/.test(tag),
-  );
+
+  // presentation.xml.rels: 기존 슬라이드 관계 태그만 "타겟 제거"하고(Target이 slideN.xml인 것만
+  // 정규식으로 지움 — 다른 관계 태그는 self-closing이 아니든, Target에 '>'가 들어있든 원본 문자열
+  // 그대로 절대 건드리지 않는다), 최종 슬라이드 목록에 대한 관계 태그를 그 뒤에 새로 덧붙인다.
+  // Content_Types의 Override 처리와 같은 패턴 — 파일 전체를 매치된 태그들로부터 재조립하지 않는다.
+  const slideRelRemovalRe = /<Relationship\b[^>]*Target="(?:[^"]*\/)?slide\d+\.xml"[^>]*\/>/g;
   const slideRelTags = [...partToRelId.entries()].map(
     ([part, rId]) =>
       `<Relationship Id="${rId}" Type="${SLIDE_RELATIONSHIP_TYPE}" Target="slides/${part}"/>`,
   );
-  zipEntries['ppt/_rels/presentation.xml.rels'] =
-    strToU8('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
-      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      `${nonSlideRels.join('')}${slideRelTags.join('')}</Relationships>`);
+  const newRelsXml = originalRelsXml
+    .replace(slideRelRemovalRe, '')
+    .replace('</Relationships>', `${slideRelTags.join('')}</Relationships>`);
+  zipEntries['ppt/_rels/presentation.xml.rels'] = strToU8(newRelsXml);
 
-  // presentation.xml: sldIdLst를 최종 순서대로 재작성한다.
-  const sldIdTags = finalParts.map((part, index) => {
+  // presentation.xml: sldIdLst를 최종 순서대로 재작성한다. 살아남은 'original' 슬라이드는 원래
+  // sldId 숫자를 재사용하고(그 rId가 원본에도 있었다면), 새로 생긴 파트만 새 sldId를 할당한다.
+  const sldIdTags = finalParts.map((part) => {
     const rId = partToRelId.get(part)!;
-    return `<p:sldId id="${nextSldId + index}" r:id="${rId}"/>`;
+    let sldId = originalSldIdByRelId.get(rId);
+    if (sldId === undefined) {
+      sldId = nextSldId;
+      nextSldId += 1;
+    }
+    return `<p:sldId id="${sldId}" r:id="${rId}"/>`;
   });
-  const presentationXml = strFromU8(zipEntries['ppt/presentation.xml']).replace(
+  const presentationXml = originalPresentationXml.replace(
     /<p:sldIdLst>[\s\S]*?<\/p:sldIdLst>/,
     `<p:sldIdLst>${sldIdTags.join('')}</p:sldIdLst>`,
   );

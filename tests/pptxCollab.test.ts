@@ -40,6 +40,26 @@ function slideOrderOf(pptxBytes: Uint8Array): string[] {
   return rIds.map((rId) => relMap.get(rId)!);
 }
 
+/** 주어진 슬라이드 파트(예: 'slide2.xml')가 presentation.xml.rels/presentation.xml에서 쓰는
+ * (rId, sldId 숫자) 쌍을 찾는다. 살아남은 'original' 슬라이드가 내보내기 전후로 이 값을
+ * 그대로 유지하는지 검증하는 데 쓴다(p14:sectionLst/custShowLst 등 외부 참조가 깨지지 않도록). */
+function relIdAndSldIdFor(pptxBytes: Uint8Array, part: string): { relId: string; sldId: number } {
+  const entries = unzipSync(pptxBytes);
+  const presentationXml = strFromU8(entries['ppt/presentation.xml']);
+  const presentationRelsXml = strFromU8(entries['ppt/_rels/presentation.xml.rels']);
+  const relTag = (presentationRelsXml.match(/<Relationship\b[^>]*\/>/g) ?? []).find((tag) =>
+    new RegExp(`Target="(?:[^"]*/)?${part.replace('.', '\\.')}"`).test(tag),
+  );
+  const relId = relTag ? /Id="(rId\d+)"/.exec(relTag)?.[1] : undefined;
+  if (!relId) throw new Error(`관계를 찾을 수 없습니다: ${part}`);
+  const sldIdTag = (presentationXml.match(/<p:sldId\b[^>]*\/>/g) ?? []).find((tag) =>
+    tag.includes(`r:id="${relId}"`),
+  );
+  const sldIdMatch = sldIdTag ? /\bid="(\d+)"/.exec(sldIdTag) : null;
+  if (!sldIdMatch) throw new Error(`sldId를 찾을 수 없습니다: ${part}`);
+  return { relId, sldId: Number(sldIdMatch[1]) };
+}
+
 describe('exportPptxFromSlides', () => {
   test('reordering the array reorders the exported presentation', () => {
     const ydoc = new Y.Doc();
@@ -52,10 +72,14 @@ describe('exportPptxFromSlides', () => {
     });
 
     const original = makeSamplePptx(['A', 'B', 'C']);
+    const before = relIdAndSldIdFor(original, 'slide2.xml');
     const out = exportPptxFromSlides(original, slidesArray);
     const entries = unzipSync(out);
     expect(strFromU8(entries['ppt/slides/slide1.xml'])).toContain('A'); // 원본 파트 그대로
     expect(slideOrderOf(out)).toEqual(['slide2.xml', 'slide3.xml', 'slide1.xml']);
+    // 살아남은 원본 슬라이드는 순서만 바뀌고 rId/sldId는 그대로 유지되어야 한다(섹션/사용자 지정
+    // 쇼처럼 이 값들을 참조하는 PowerPoint 기능이 재정렬만으로 깨지지 않도록).
+    expect(relIdAndSldIdFor(out, 'slide2.xml')).toEqual(before);
   });
 
   test('deleting a slide removes its part and shrinks the presentation', () => {
