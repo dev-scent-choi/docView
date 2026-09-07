@@ -26,3 +26,9 @@ await build({
   entryPoints: ['src/client/grid-editor.ts'],
   outfile: 'public/js/grid-editor.bundle.js',
 });
+
+await build({
+  ...shared,
+  entryPoints: ['src/client/editor-slides.ts'],
+  outfile: 'public/js/editor-slides.bundle.js',
+});
