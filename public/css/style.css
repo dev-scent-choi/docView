@@ -1244,6 +1244,83 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
    그대로 띄워 놓고, iframe은 그 뒤에서 조용히 준비된다. */
 .grid-editor-surface.g-render-pending .grid-editor-scroll { visibility: hidden; }
 
+/* ---------- pptx 슬라이드 구성 동시편집기 (editor-slides.html) ---------- */
+
+/* editor-slides.html (pptx 슬라이드 구성 편집) — grid-editor.ts의 height:100vh/overflow:hidden
+   페이지 크기 고정 패턴과 동일하게, 본문(.slides-editor-grid)이 남는 공간을 전부 채운다. */
+.slides-editor-page { height: 100vh; overflow: hidden; }
+
+.slides-editor-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1.2rem;
+  padding: 1.5rem;
+  align-content: start;
+}
+
+.slide-card {
+  position: relative;
+  border: 1px solid var(--v-glass-line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-page);
+  cursor: grab;
+}
+.slide-card:active { cursor: grabbing; }
+
+.slide-card-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #f3f4f7;
+  overflow: hidden;
+}
+.slide-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* 뷰어의 .page-number 배지와 같은 스타일(어두운 반투명 알약 모양) */
+.slide-card-number {
+  position: absolute;
+  bottom: 0.4rem;
+  right: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(20, 22, 28, 0.55);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+}
+
+/* 복사/삭제 버튼은 평소엔 숨겨져 있다가 카드에 마우스를 올리거나 포커스가 들어오면 보인다. */
+.slide-card-actions {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  display: flex;
+  gap: 0.2rem;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.slide-card:hover .slide-card-actions,
+.slide-card:focus-within .slide-card-actions {
+  opacity: 1;
+}
+.slide-card-actions .icon-btn {
+  width: 28px;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: var(--radius-sm);
+}
+.slide-card-actions .icon-btn:hover { background: #fff; }
+
 /* ---------- 수식 입력줄 (이름 상자 + fx + 셀 내용) — 스프레드시트임을 가장 먼저 알려주는 요소 ---------- */
 .formula-bar {
   flex: none;
