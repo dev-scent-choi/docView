@@ -30,15 +30,24 @@ import { invalidateRenderCache } from '../rendering.js';
 import { convertToPdf } from '../routes/documents.js';
 import { invalidateViewCaches } from '../routes/viewer.js';
 import { store } from '../storage.js';
-import { parseXlsxToGrid, saveGridDerived, type GridDocument } from '../spreadsheet.js';
+import {
+  parseXlsxToGrid,
+  saveGridDerived,
+  yieldToEventLoop,
+  YIELD_EVERY_N_ROWS,
+  type GridDocument,
+} from '../spreadsheet.js';
 import { exportXlsxFromGrid, reparseGridForViewer, seedGridFromXlsx } from '../xlsx/collab.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
+import { computeGridCellDisplay, formatComputedValueForStorage } from '../xlsx/formulas.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
 import {
   DOC_META_MAP,
   DOC_META_SAVED_AT_KEY,
   DOC_META_SAVE_ERROR_AT_KEY,
   GRID_CELLS_MAP,
+  GRID_COMPUTED_MAP,
+  gridCellKey,
   parseGridCellKey,
 } from './gridShared.js';
 import { runSerialized } from './saveSerializer.js';
@@ -165,6 +174,53 @@ function applyCellsChangeToCanonical(
   }
 }
 
+/**
+ * 시트 하나의 모든 수식 셀을 canonical 그리드 기준으로 다시 계산해 GRID_COMPUTED_MAP에
+ * 반영한다. 원본 셀 값(GRID_CELLS_MAP)은 절대 건드리지 않는다 — 계산된 표시값만 별도 맵에
+ * 쓴다. 더 이상 수식이 아니거나(빈 칸 포함) 존재하지 않는 셀의 옛 computed 값은 지운다 —
+ * 계산값이 GRID_CELLS_MAP으로 새지 않고, 낡은 값도 남지 않는다.
+ *
+ * 넓은 범위를 참조하는 수식이 많은 시트를 훑는 동안 이벤트 루프를 막지 않도록
+ * YIELD_EVERY_N_ROWS행마다 실제 이벤트 루프에 양보한다 — 대형 xlsx가 서버를 통째로 멈추던
+ * 버그(6355a17)가 이 반복문에서 재발하지 않도록 하는 필수 조치.
+ *
+ * 반드시 `cells.observe(...)`(아래 seedRoom에 등록)가 호출해야 한다 — Y.Doc의 'update'
+ * 이벤트가 아니다. 이 함수 자신이 GRID_COMPUTED_MAP에 쓰는 매 `ydoc.transact(...)`도 그
+ * Y.Doc의 'update'를 발생시키므로, 만약 'update' 핸들러 안에서 이 함수를 다시 트리거했다면
+ * "재계산 결과가 스스로 또 재계산을 유발"하는 무한 루프가 됐을 것이다(자동저장 무한 루프와
+ * 같은 클래스의 버그). `cells.observe`는 GRID_CELLS_MAP이 실제로 바뀔 때만 불리고
+ * GRID_COMPUTED_MAP 쓰기에는 반응하지 않으므로, 이 재귀 트리거가 원천적으로 없다 — 그래서
+ * 호출부에서도 room.suppressAutosaveReschedule로 감쌀 필요가 없다(각 computed 쓰기가
+ * scheduleAutosave를 다시 예약하는 건 8초 디바운스로 자연히 합쳐지는 무해한 부작용일 뿐이고,
+ * 반대로 "안전하게" 감쌌다가는 재계산이 진행되는 동안 도착한 진짜 편집의 자동저장 예약을
+ * 놓치는 별개의 버그를 새로 만든다).
+ */
+async function recomputeFormulasForSheet(room: Room, sheetIdx: number): Promise<void> {
+  if (!room.canonicalGrid) return;
+  const sheet = room.canonicalGrid.sheets[sheetIdx];
+  if (!sheet) return;
+  const computed = room.ydoc.getMap<string>(GRID_COMPUTED_MAP);
+  for (let start = 0; start < sheet.rows.length; start += YIELD_EVERY_N_ROWS) {
+    const end = Math.min(start + YIELD_EVERY_N_ROWS, sheet.rows.length);
+    room.ydoc.transact(() => {
+      for (let r = start; r < end; r += 1) {
+        const row = sheet.rows[r];
+        for (let c = 0; c < row.length; c += 1) {
+          const cell = row[c];
+          const key = gridCellKey(sheetIdx, r, c);
+          if (cell === 0 || !cell.v.startsWith('=')) {
+            if (computed.has(key)) computed.delete(key);
+            continue;
+          }
+          const value = computeGridCellDisplay(room.canonicalGrid!, sheetIdx, r, c);
+          computed.set(key, formatComputedValueForStorage(value));
+        }
+      }
+    });
+    await yieldToEventLoop();
+  }
+}
+
 async function seedRoom(room: Room): Promise<void> {
   const { docId, kind, ydoc } = room;
   try {
@@ -184,7 +240,28 @@ async function seedRoom(room: Room): Promise<void> {
       // 덮어써 버린다(사용자 편집이 하나도 없었는데도). canonicalGrid는 이미 parseXlsxToGrid의
       // 결과로 정확히 채워져 있으므로, 이 시점 이후의 "진짜" 편집만 관찰하면 된다.
       const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
-      cells.observe((event) => applyCellsChangeToCanonical(grid, cells, event));
+      cells.observe((event) => {
+        applyCellsChangeToCanonical(grid, cells, event);
+        // 이번 배치에서 실제로 바뀐 셀이 속한 시트만 재계산한다 — event.changes.keys가
+        // "시트:행:열" 키별로 add/update/delete를 알려주므로 거기서 시트 인덱스를 뽑아낸다.
+        // 재계산 자체는 비동기(양보 지점 있음)라 여기서 기다리지 않고 흘려보낸다 — 실패해도
+        // 콘솔에만 로그를 남기고(각 함수 내부에서 처리되는 예외는 없지만) 소켓 메시지 처리
+        // 자체를 막지 않기 위함.
+        const touchedSheets = new Set<number>();
+        for (const key of event.changes.keys.keys()) {
+          const parsed = parseGridCellKey(key);
+          if (parsed) touchedSheets.add(parsed.sheetIdx);
+        }
+        for (const sheetIdx of touchedSheets) {
+          void recomputeFormulasForSheet(room, sheetIdx);
+        }
+      });
+      // 시딩 직후 한 번은 반드시 재계산한다 — cells.observe는 "이 시점 이후의" 편집만
+      // 감지하므로, 원본 파일 자체에 이미 있던 수식들의 최초 계산값은 여기서 직접 채워야
+      // 클라이언트가 처음 문서를 열자마자 수식 결과를 볼 수 있다.
+      for (let sheetIdx = 0; sheetIdx < grid.sheets.length; sheetIdx += 1) {
+        await recomputeFormulasForSheet(room, sheetIdx);
+      }
     } else if (kind === 'pptx') {
       seedSlidesFromPptx(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
     } else {
