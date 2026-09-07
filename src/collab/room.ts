@@ -30,11 +30,17 @@ import { invalidateRenderCache } from '../rendering.js';
 import { convertToPdf } from '../routes/documents.js';
 import { invalidateViewCaches } from '../routes/viewer.js';
 import { store } from '../storage.js';
-import { parseXlsxToGrid, saveGridDerived } from '../spreadsheet.js';
+import { parseXlsxToGrid, saveGridDerived, type GridDocument } from '../spreadsheet.js';
 import { exportXlsxFromGrid, reparseGridForViewer, seedGridFromXlsx } from '../xlsx/collab.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
-import { DOC_META_MAP, DOC_META_SAVED_AT_KEY, DOC_META_SAVE_ERROR_AT_KEY } from './gridShared.js';
+import {
+  DOC_META_MAP,
+  DOC_META_SAVED_AT_KEY,
+  DOC_META_SAVE_ERROR_AT_KEY,
+  GRID_CELLS_MAP,
+  parseGridCellKey,
+} from './gridShared.js';
 import { runSerialized } from './saveSerializer.js';
 
 /**
@@ -82,7 +88,7 @@ interface Room {
   readonly readOnlyConns: Set<WebSocket>;
   autosaveTimer: NodeJS.Timeout | null;
   /** 문서 시딩(원본 → Y.Doc)이 끝났는지 — 첫 연결에 syncStep1을 보내기 전에 기다린다 */
-  readonly ready: Promise<void>;
+  ready: Promise<void>;
   /**
    * true인 동안 발생한 ydoc 'update'는 scheduleAutosave를 다시 예약하지 않는다.
    * flushToStore 자신이 저장 결과를 Y.Doc에 반영(pptx 배열 재작성, 저장 시각 기록)할 때만
@@ -94,6 +100,10 @@ interface Room {
    * 좁게 두른다.
    */
   suppressAutosaveReschedule: boolean;
+  /** xlsx 룸에서만 쓰인다 — 항상 전체 시트 데이터를 담는 "진짜" 데이터. Yjs cells 맵은 이제
+   * (Task 6 이후) 지금 구독 중인 페이지만 담는 캐시가 되므로, 저장·다운로드·수식 계산은 항상
+   * 이 필드를 기준으로 한다. docx/pptx 룸에서는 항상 null. */
+  canonicalGrid: GridDocument | null;
 }
 
 const rooms = new Map<string, Room>();
@@ -116,13 +126,43 @@ function broadcast(room: Room, message: Uint8Array): void {
   for (const conn of room.conns.keys()) send(room, conn, message);
 }
 
-async function seedRoom(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<void> {
+/**
+ * Yjs 'update' 이벤트 하나가 xlsx 룸의 GRID_CELLS_MAP에 담은 셀 편집을 canonical 그리드에도
+ * 즉시 반영한다. Y.Doc.on('update')는 원시 바이너리 업데이트만 주므로, 이 업데이트를 별도
+ * "관찰용" Y.Doc에 적용해 어떤 키가 바뀌었는지 관찰한 뒤 그 값을 canonical에 옮겨 쓴다 — 이미
+ * ydoc 자체에 적용된 값을 다시 읽으면 되므로 실제로는 관찰용 Y.Doc 없이 ydoc.getMap(...)에서
+ * 직접 최신 값을 읽으면 된다(update 바이트 자체를 파싱할 필요 없음): update가 어떤 키를
+ * 건드렸는지는 몰라도, ydoc의 GRID_CELLS_MAP은 이미 최신 상태이므로 전체를 다시 훑어
+ * canonical과 다른 값만 반영하면 정확하다 — 다만 매 update마다 전체를 훑으면 페이지 하나(500행)
+ * 안에서도 비효율적이므로, Task 6(윈도잉 컷오버) 전까지는 Yjs가 전체를 담고 있어 이 함수가
+ * "전체를 훑는" 접근이어도 안전하다(과도기 단계). Task 6에서 "지금 구독 중인 페이지만 훑는"
+ * 최적화된 버전으로 교체될 예정이다.
+ */
+function applyYjsUpdateToCanonical(canonicalGrid: GridDocument, ydoc: Y.Doc, _update: Uint8Array): void {
+  const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
+  for (const [key, value] of cells) {
+    const parsed = parseGridCellKey(key);
+    if (!parsed) continue;
+    const { sheetIdx, row, col } = parsed;
+    const sheet = canonicalGrid.sheets[sheetIdx];
+    if (!sheet || row >= sheet.rows.length || col >= sheet.colCount) continue;
+    const currentCell = sheet.rows[row][col];
+    const currentText = currentCell === 0 ? '' : currentCell.v;
+    if (currentText === value) continue;
+    (sheet.rows[row] as Array<{ v: string; s?: number } | 0>)[col] =
+      value === '' ? 0 : { v: value };
+  }
+}
+
+async function seedRoom(room: Room): Promise<void> {
+  const { docId, kind, ydoc } = room;
   try {
     const meta = await store.readMeta(docId);
     if (!meta) return;
     const original = await store.readOriginal(docId, meta.ext);
     if (kind === 'xlsx') {
       const grid = await parseXlsxToGrid(original);
+      room.canonicalGrid = grid;
       await seedGridFromXlsx(ydoc, grid);
     } else if (kind === 'pptx') {
       seedSlidesFromPptx(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
@@ -346,9 +386,11 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     conns,
     readOnlyConns: new Set<WebSocket>(),
     autosaveTimer: null,
-    ready: seedRoom(docId, kind, ydoc),
+    ready: Promise.resolve(), // 아래에서 즉시 덮어씀 — seedRoom(room)이 room 자신을 참조해야 해서
     suppressAutosaveReschedule: false,
+    canonicalGrid: null,
   };
+  room.ready = seedRoom(room);
   rooms.set(docId, room);
 
   ydoc.on('update', (update: Uint8Array) => {
@@ -356,6 +398,9 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     encoding.writeVarUint(encoder, MESSAGE_SYNC);
     writeUpdate(encoder, update);
     broadcast(room, encoding.toUint8Array(encoder));
+    if (room.kind === 'xlsx' && room.canonicalGrid) {
+      applyYjsUpdateToCanonical(room.canonicalGrid, ydoc, update);
+    }
     // 저장 결과를 반영하는 flushToStore 자신의 쓰기는 예외 — 위 suppressAutosaveReschedule 설명 참고.
     if (!room.suppressAutosaveReschedule) scheduleAutosave(room);
   });
@@ -533,4 +578,9 @@ export async function joinEditSession(
 /** 현재 메모리에 열려 있는 협업 룸 수 (진단·테스트용) */
 export function activeRoomCount(): number {
   return rooms.size;
+}
+
+/** 테스트 전용 — 룸의 canonical 그리드를 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */
+export function getRoomCanonicalGridForTest(docId: string): GridDocument | null {
+  return rooms.get(docId)?.canonicalGrid ?? null;
 }
