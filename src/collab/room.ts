@@ -69,6 +69,7 @@ export const XML_FRAGMENT_NAME = 'prosemirror';
 
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
+const MESSAGE_PAGE_SUBSCRIBE = 2;
 
 const AUTOSAVE_IDLE_MS = 8_000;
 const PING_INTERVAL_MS = 30_000;
@@ -118,6 +119,9 @@ interface Room {
    * 않는다 — exportXlsxFromGrid가 "한 번도 편집되지 않은 셀(수식 셀 포함)"을 가려내는 기준선
    * 으로 쓴다(예전 Yjs baseline/stylesBaseline 맵과 같은 역할). docx/pptx 룸에서는 항상 null. */
   baselineGrid: GridDocument | null;
+  /** xlsx 룸에서만 쓰인다 — 연결별로 "지금 이 시트의 이 페이지들을 보고 있다"를 추적한다.
+   * 연결이 끊기면(closeConn) 이 맵에서 즉시 제거한다. */
+  readonly pageSubscriptions: Map<WebSocket, { sheet: number; pages: readonly number[] }>;
 }
 
 const rooms = new Map<string, Room>();
@@ -493,6 +497,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     suppressAutosaveReschedule: false,
     canonicalGrid: null,
     baselineGrid: null,
+    pageSubscriptions: new Map(),
   };
   room.ready = seedRoom(room);
   rooms.set(docId, room);
@@ -532,6 +537,7 @@ function closeConn(room: Room, conn: WebSocket): void {
   if (controlled) {
     room.conns.delete(conn);
     room.readOnlyConns.delete(conn);
+    room.pageSubscriptions.delete(conn);
     removeAwarenessStates(room.awareness, [...controlled], null);
     if (room.conns.size === 0) {
       if (room.autosaveTimer) {
@@ -579,6 +585,22 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
       }
       case MESSAGE_AWARENESS: {
         applyAwarenessUpdate(room.awareness, decoding.readVarUint8Array(decoder), conn);
+        break;
+      }
+      case MESSAGE_PAGE_SUBSCRIBE: {
+        try {
+          const payload = decoding.readVarString(decoder);
+          const parsed = JSON.parse(payload) as { sheet: number; pages: readonly number[] };
+          if (
+            typeof parsed.sheet === 'number' &&
+            Array.isArray(parsed.pages) &&
+            parsed.pages.every((p) => typeof p === 'number')
+          ) {
+            room.pageSubscriptions.set(conn, { sheet: parsed.sheet, pages: parsed.pages });
+          }
+        } catch (error) {
+          console.error('페이지 구독 메시지 처리 오류:', error);
+        }
         break;
       }
       default:
@@ -681,6 +703,27 @@ export async function joinEditSession(
 /** 현재 메모리에 열려 있는 협업 룸 수 (진단·테스트용) */
 export function activeRoomCount(): number {
   return rooms.size;
+}
+
+/**
+ * 특정 시트에 대해, 지금 그 룸에 연결된 모든 클라이언트가 구독 중인 페이지 번호의 합집합을
+ * 계산한다. 아직 이 결과로 Yjs 내용을 채우거나 비우지는 않는다(Task 7이 이 함수를 재사용해서
+ * 실제 윈도잉을 구현한다) — 지금은 순수하게 "누가 무엇을 보고 있는지" 집계만 한다.
+ */
+function getSubscribedPageUnion(room: Room, sheet: number): Set<number> {
+  const union = new Set<number>();
+  for (const subscription of room.pageSubscriptions.values()) {
+    if (subscription.sheet !== sheet) continue;
+    for (const page of subscription.pages) union.add(page);
+  }
+  return union;
+}
+
+/** 테스트 전용 */
+export function getSubscribedPageUnionForTest(docId: string, sheet: number): Set<number> {
+  const room = rooms.get(docId);
+  if (!room) return new Set();
+  return getSubscribedPageUnion(room, sheet);
 }
 
 /** 테스트 전용 — 룸의 canonical 그리드를 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */
