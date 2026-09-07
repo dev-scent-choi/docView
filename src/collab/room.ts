@@ -30,7 +30,7 @@ import { invalidateRenderCache } from '../rendering.js';
 import { convertToPdf } from '../routes/documents.js';
 import { invalidateViewCaches } from '../routes/viewer.js';
 import { store } from '../storage.js';
-import { parseXlsxToGrid, serializeGrid } from '../spreadsheet.js';
+import { parseXlsxToGrid, saveGridDerived } from '../spreadsheet.js';
 import { exportXlsxFromGrid, reparseGridForViewer, seedGridFromXlsx } from '../xlsx/collab.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
@@ -150,7 +150,7 @@ async function flushToStore(room: Room): Promise<void> {
     await store.saveOriginal(docId, meta.ext, Buffer.from(newXlsxBytes));
     try {
       const grid = await reparseGridForViewer(newXlsxBytes);
-      await store.saveDerived(docId, 'grid', serializeGrid(grid));
+      await saveGridDerived(store, docId, grid);
       await store.writeMeta({
         ...meta,
         pageCount: grid.sheets.length,
