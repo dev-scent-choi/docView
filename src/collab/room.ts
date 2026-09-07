@@ -123,7 +123,7 @@ async function seedRoom(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<void
     const original = await store.readOriginal(docId, meta.ext);
     if (kind === 'xlsx') {
       const grid = await parseXlsxToGrid(original);
-      seedGridFromXlsx(ydoc, grid);
+      await seedGridFromXlsx(ydoc, grid);
     } else if (kind === 'pptx') {
       seedSlidesFromPptx(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
     } else {

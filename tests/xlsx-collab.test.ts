@@ -44,7 +44,7 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     expect((b1 as { v: string }).v).toBe('=SUM(A1:A2)');
 
     const ydoc = new Y.Doc();
-    seedGridFromXlsx(ydoc, grid);
+    await seedGridFromXlsx(ydoc, grid);
     expect(ydoc.getMap<string>(GRID_CELLS_MAP).get(gridCellKey(0, 0, 1))).toBe('=SUM(A1:A2)');
   });
 
@@ -53,7 +53,7 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     const grid = await parseXlsxToGrid(original);
 
     const ydoc = new Y.Doc();
-    seedGridFromXlsx(ydoc, grid);
+    await seedGridFromXlsx(ydoc, grid);
 
     const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
     // "다른 브라우저 탭"이 편집한 것처럼 셀 값을 직접 바꾼다 (실서비스에서는 그리드 클라이언트가
@@ -81,7 +81,7 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     const grid = await parseXlsxToGrid(original);
 
     const ydoc = new Y.Doc();
-    seedGridFromXlsx(ydoc, grid);
+    await seedGridFromXlsx(ydoc, grid);
 
     const clientA = new Y.Doc();
     Y.applyUpdate(clientA, Y.encodeStateAsUpdate(ydoc));
@@ -111,7 +111,7 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     const grid = await parseXlsxToGrid(original);
 
     const ydoc = new Y.Doc();
-    seedGridFromXlsx(ydoc, grid);
+    await seedGridFromXlsx(ydoc, grid);
 
     const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
     styles.set(gridCellKey(0, 0, 0), { b: 1, col: '#ff0000', bg: '#ffff00', a: 'c' }); // A1
@@ -135,7 +135,7 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     const grid = await parseXlsxToGrid(original);
 
     const ydoc = new Y.Doc();
-    seedGridFromXlsx(ydoc, grid);
+    await seedGridFromXlsx(ydoc, grid);
 
     const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
     cells.set(gridCellKey(0, 0, 0), '=B2+B3'); // A1
@@ -154,7 +154,7 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     const grid = await parseXlsxToGrid(original);
 
     const ydoc = new Y.Doc();
-    seedGridFromXlsx(ydoc, grid);
+    await seedGridFromXlsx(ydoc, grid);
 
     const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
     const before = structure.get('0')!;

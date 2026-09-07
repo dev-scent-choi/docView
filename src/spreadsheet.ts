@@ -1,6 +1,18 @@
 import ExcelJS from 'exceljs';
 import type { DocumentStore } from './storage.js';
 
+/** 대형 시트를 훑는 동기 반복문 중간에 이벤트 루프에 제어권을 돌려준다 — 이게 없으면 큰 xlsx를
+ * 열 때(파싱이든 동시편집 시딩이든) 그 몇 초~몇십 초 동안 Node가 단일 스레드라 그 문서를 연
+ * 사용자뿐 아니라 그 순간 서버에 접속한 모든 사용자·모든 다른 문서 요청까지 함께 멈춘다. */
+export function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** 이 개수의 행마다 한 번씩 yieldToEventLoop를 호출한다 — 너무 자주 양보하면(예: 매 행) setImmediate
+ * 오버헤드 자체가 커지고, 너무 뜸하면 양보 효과가 없다. 2000행은 실측 없이 정한 보수적인 값이라
+ * 필요하면 나중에 조정 가능하다. */
+const YIELD_EVERY_N_ROWS = 2000;
+
 /** 그리드 뷰 데이터 모델 — 원본 파일 대신 표시용 값·스타일만 담는다. */
 export interface GridCell {
   readonly v: string;
@@ -431,8 +443,12 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
   const themeColors = parseThemeColors(themes?.theme1);
   const sheets: GridSheet[] = [];
 
-  workbook.eachSheet((sheet) => {
-    if (sheet.state && sheet.state !== 'visible') return;
+  // workbook.eachSheet/sheet.eachRow는 콜백형 동기 API라 중간에 await로 이벤트 루프에 양보할 수
+  // 없다 — 배열(workbook.worksheets)을 직접 도는 for 루프로 바꿔, 대형 시트를 열 때 그 문서를 연
+  // 사용자뿐 아니라 그 순간 서버에 접속한 다른 모든 사용자·다른 문서 요청까지 함께 멈추지 않도록
+  // 주기적으로 양보한다.
+  for (const sheet of workbook.worksheets) {
+    if (sheet.state && sheet.state !== 'visible') continue;
     const rowCount = Math.min(sheet.actualRowCount || 0, MAX_ROWS);
     // actualColumnCount는 맨 오른쪽 열이 수식 셀만 있을 때 그 열을 세지 않는 경우가 있다(ExcelJS
     // 자체 버그로 보임 — 값이 아니라 수식만 있는 열은 "dimensions" 추적에서 빠지는 듯하다). 이 값만
@@ -440,13 +456,15 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
     // exportXlsxFromGrid의 "구조 밖 열 잘라내기" 로직이 그 열을 실제로 지워버린다. 그래서 전체
     // 행을 훑어 실제로 쓰인 최대 열 번호도 함께 구해 더 큰 쪽을 쓴다.
     let maxColUsed = 0;
-    sheet.eachRow((row) => {
-      row.eachCell({ includeEmpty: false }, (_cell, colNumber) => {
+    const scanRowCount = sheet.actualRowCount || 0;
+    for (let r = 1; r <= scanRowCount; r += 1) {
+      sheet.getRow(r).eachCell({ includeEmpty: false }, (_cell, colNumber) => {
         if (colNumber > maxColUsed) maxColUsed = colNumber;
       });
-    });
+      if (r % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
+    }
     const colCount = Math.min(Math.max(sheet.actualColumnCount || 0, maxColUsed), MAX_COLS);
-    if (rowCount === 0 || colCount === 0) return;
+    if (rowCount === 0 || colCount === 0) continue;
     // exceljs 타입 선언에는 없지만 런타임에는 시트 보호 시 채워진다(themes와 동일한 이유로 캐스팅)
     const sheetProtected = Boolean((sheet as unknown as { sheetProtection?: unknown }).sheetProtection);
 
@@ -472,6 +490,7 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
         cells[colNumber - 1] = styleRef === undefined ? { v: text } : { v: text, s: styleRef };
       });
       rows.push(cells);
+      if (r % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
     }
 
     // 서식만 남은 유령 행(값 없는 꼬리 행)을 잘라내 행 수를 실제 데이터 기준으로 맞춘다
@@ -497,7 +516,7 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
     const freezeCols = frozenView ? ((frozenView as { xSplit?: number }).xSplit ?? 0) : 0;
 
     sheets.push({ name: sheet.name, rowCount: rows.length, colCount, colWidths, merges, freezeRows, freezeCols, rows });
-  });
+  }
 
   return { sheets, styles: palette.toArray() };
 }

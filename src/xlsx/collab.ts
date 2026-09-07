@@ -14,7 +14,13 @@ import {
   type SheetStructure,
 } from '../collab/gridShared.js';
 import type { GridDocument, GridStyle } from '../spreadsheet.js';
-import { parseXlsxToGrid } from '../spreadsheet.js';
+import { parseXlsxToGrid, yieldToEventLoop } from '../spreadsheet.js';
+
+/** 이 개수의 행마다 한 번씩 트랜잭션을 끊고 이벤트 루프에 양보한다 — spreadsheet.ts의
+ * YIELD_EVERY_N_ROWS와 같은 이유(큰 시트를 열 때 서버 전체가 멈추지 않게). 겸사겸사 셀 하나당
+ * 트랜잭션 하나(=update 이벤트 하나) 대신 행 단위로 묶어, 처음 룸을 시딩하는 동안(아직 아무도
+ * 접속 안 했어도) 그 트랜잭션마다 broadcast/scheduleAutosave가 도는 낭비도 줄인다. */
+const YIELD_EVERY_N_ROWS = 2000;
 
 function toCellStyleAttrs(style: GridStyle): CellStyleAttrs {
   const attrs: { -readonly [K in keyof CellStyleAttrs]?: CellStyleAttrs[K] } = {};
@@ -71,46 +77,62 @@ function seedableCellValue(text: string, style: GridStyle | undefined): string {
   return Number.isFinite(Number(stripped)) && stripped !== '' ? stripped : text;
 }
 
-/** 읽기전용 그리드 뷰(parseXlsxToGrid의 결과)를 협업용 Y.Doc에 시딩한다. */
-export function seedGridFromXlsx(ydoc: Y.Doc, grid: GridDocument): void {
+/** 읽기전용 그리드 뷰(parseXlsxToGrid의 결과)를 협업용 Y.Doc에 시딩한다.
+ * 큰 시트를 셀 하나하나 동기로 심으면 그동안 서버 전체가 멈추므로(spreadsheet.ts의
+ * yieldToEventLoop 주석 참고), 행을 YIELD_EVERY_N_ROWS개씩 묶어 트랜잭션 하나로 심고 그 사이
+ * 사이에 이벤트 루프로 제어권을 돌려준다. */
+export async function seedGridFromXlsx(ydoc: Y.Doc, grid: GridDocument): Promise<void> {
   const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
   const baseline = ydoc.getMap<string>(GRID_BASELINE_MAP);
   const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
   const stylesBaseline = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP);
   const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
   const merges = ydoc.getMap<readonly GridMergeShape[]>(GRID_MERGES_MAP);
-  grid.sheets.forEach((sheet, sheetIdx) => {
-    structure.set(String(sheetIdx), {
-      name: sheet.name,
-      rowCount: sheet.rowCount,
-      colCount: sheet.colCount,
-      freezeRows: sheet.freezeRows,
-      freezeCols: sheet.freezeCols,
-      colWidths: sheet.colWidths,
+
+  for (let sheetIdx = 0; sheetIdx < grid.sheets.length; sheetIdx += 1) {
+    const sheet = grid.sheets[sheetIdx];
+    ydoc.transact(() => {
+      structure.set(String(sheetIdx), {
+        name: sheet.name,
+        rowCount: sheet.rowCount,
+        colCount: sheet.colCount,
+        freezeRows: sheet.freezeRows,
+        freezeCols: sheet.freezeCols,
+        colWidths: sheet.colWidths,
+      });
+      if (sheet.merges.length > 0) merges.set(String(sheetIdx), sheet.merges);
     });
-    if (sheet.merges.length > 0) merges.set(String(sheetIdx), sheet.merges);
     const covered = mergeCoveredCells(sheet.merges);
-    sheet.rows.forEach((row, r) => {
-      row.forEach((cell, c) => {
-        if (cell === 0) return;
-        if (covered.has(`${r}:${c}`)) return; // 병합에 덮인 칸 — 앵커의 중복 값이라 시딩하지 않는다
-        const key = gridCellKey(sheetIdx, r, c);
-        const style = cell.s !== undefined ? grid.styles[cell.s] : undefined;
-        if (cell.v !== '') {
-          const value = seedableCellValue(cell.v, style);
-          cells.set(key, value);
-          baseline.set(key, value);
-        }
-        if (style) {
-          const attrs = toCellStyleAttrs(style);
-          if (Object.keys(attrs).length > 0) {
-            styles.set(key, attrs);
-            stylesBaseline.set(key, attrs);
+
+    for (let start = 0; start < sheet.rows.length; start += YIELD_EVERY_N_ROWS) {
+      const end = Math.min(start + YIELD_EVERY_N_ROWS, sheet.rows.length);
+      ydoc.transact(() => {
+        for (let r = start; r < end; r += 1) {
+          const row = sheet.rows[r];
+          for (let c = 0; c < row.length; c += 1) {
+            const cell = row[c];
+            if (cell === 0) continue;
+            if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커의 중복 값이라 시딩하지 않는다
+            const key = gridCellKey(sheetIdx, r, c);
+            const style = cell.s !== undefined ? grid.styles[cell.s] : undefined;
+            if (cell.v !== '') {
+              const value = seedableCellValue(cell.v, style);
+              cells.set(key, value);
+              baseline.set(key, value);
+            }
+            if (style) {
+              const attrs = toCellStyleAttrs(style);
+              if (Object.keys(attrs).length > 0) {
+                styles.set(key, attrs);
+                stylesBaseline.set(key, attrs);
+              }
+            }
           }
         }
       });
-    });
-  });
+      await yieldToEventLoop();
+    }
+  }
 }
 
 /** '='로 시작하면 수식으로 저장한다(계산은 하지 않음 — 실제 결과는 저장 후 엑셀/뷰어에서 재계산된다). */
