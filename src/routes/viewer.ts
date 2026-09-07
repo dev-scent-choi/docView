@@ -12,6 +12,8 @@ import {
   burnMarkupIntoPdf,
   getPageDimensions,
   renderPage,
+  type PageSize,
+  type PersistedPageSizes,
 } from '../rendering.js';
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { extractPdfText, searchPdfText, type PageText } from '../search.js';
@@ -25,7 +27,7 @@ import {
 import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup, updateMarkup } from '../markup.js';
 import { touchPresence } from '../presence.js';
 import { flushNow, getCurrentBytes } from '../collab/room.js';
-import type { GridCell, GridHeader } from '../spreadsheet.js';
+import { computeLineOffsets, type GridCell, type GridHeader } from '../spreadsheet.js';
 import { store } from '../storage.js';
 import type { DocumentMeta, ViewClaims } from '../types.js';
 
@@ -101,11 +103,7 @@ export function invalidateViewCaches(docId: string): void {
   gridCache.invalidate(docId);
 }
 
-function indexGrid(buffer: Buffer): LoadedGrid {
-  const lineOffsets: number[] = [0];
-  for (let i = buffer.indexOf(10); i !== -1; i = buffer.indexOf(10, i + 1)) {
-    lineOffsets.push(i + 1);
-  }
+function buildLoadedGridFromOffsets(buffer: Buffer, lineOffsets: readonly number[]): LoadedGrid {
   const headerEnd = lineOffsets.length > 1 ? lineOffsets[1] - 1 : buffer.length;
   const header = JSON.parse(buffer.toString('utf8', 0, headerEnd)) as GridHeader;
   const sheetStartLine: number[] = [];
@@ -117,8 +115,47 @@ function indexGrid(buffer: Buffer): LoadedGrid {
   return { header, buffer, lineOffsets, sheetStartLine };
 }
 
-function loadGrid(docId: string): Promise<LoadedGrid> {
-  return gridCache.getOrLoad(docId, () => store.readDerived(docId, 'grid').then(indexGrid));
+function indexGrid(buffer: Buffer): LoadedGrid {
+  return buildLoadedGridFromOffsets(buffer, computeLineOffsets(buffer));
+}
+
+async function loadGridUncached(docId: string): Promise<LoadedGrid> {
+  const buffer = await store.readDerived(docId, 'grid');
+  if (await store.hasDerived(docId, 'gridindex')) {
+    const raw = await store.readDerived(docId, 'gridindex');
+    const { lineOffsets } = JSON.parse(raw.toString('utf8')) as { lineOffsets: number[] };
+    return buildLoadedGridFromOffsets(buffer, lineOffsets);
+  }
+  const grid = indexGrid(buffer);
+  await store.saveDerived(
+    docId,
+    'gridindex',
+    Buffer.from(JSON.stringify({ lineOffsets: grid.lineOffsets })),
+  );
+  return grid;
+}
+
+export function loadGrid(docId: string): Promise<LoadedGrid> {
+  return gridCache.getOrLoad(docId, () => loadGridUncached(docId));
+}
+
+/**
+ * PDF 페이지 크기를 영구 저장소에서 읽고/쓰는 콜백 쌍 — rendering.ts의 getPageSizes에 주입한다.
+ * 변환 시점(convertToPdf)에 이미 저장돼 있으면 그 파일만 읽고 PDF를 다시 파싱하지 않는다.
+ * 없으면(이 기능 배포 전에 업로드된 문서) 기존처럼 그 자리에서 계산한 뒤 이 save로 저장해,
+ * 다음부터는 그 문서도 빠른 경로를 타게 한다(자가치유).
+ */
+export function pageSizePersistence(docId: string): PersistedPageSizes {
+  return {
+    load: async () => {
+      if (!(await store.hasDerived(docId, 'pagesizes'))) return null;
+      const raw = await store.readDerived(docId, 'pagesizes');
+      return JSON.parse(raw.toString('utf8')) as readonly PageSize[];
+    },
+    save: async (sizes) => {
+      await store.saveDerived(docId, 'pagesizes', Buffer.from(JSON.stringify(sizes)));
+    },
+  };
 }
 
 /** PDF 텍스트 추출 결과 캐시 (문서당 1회 추출) */
@@ -377,9 +414,11 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
       // 페이지 크기를 미리 내려 뷰어가 로딩 전 프레임 크기를 고정한다 (스크롤 점프 정확도)
       const pages =
         viewKind === 'pages'
-          ? await getPageDimensions(view.meta.id, () => store.readDerived(view.meta.id, 'pdf')).catch(
-              () => undefined,
-            )
+          ? await getPageDimensions(
+              view.meta.id,
+              () => store.readDerived(view.meta.id, 'pdf'),
+              pageSizePersistence(view.meta.id),
+            ).catch(() => undefined)
           : undefined;
       // 편집기가 열리기 전 "저장하면 이미지가 사라집니다" 경고를 띄우기 위한 사전 검사
       // (canEdit 토큰 + docx일 때만 — 원본을 다시 읽는 비용이 있으므로 불필요하면 건너뛴다)
@@ -474,8 +513,12 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
       const view = await resolveView(request.query.token, reply);
       if (!view) return reply;
       try {
-        const png = await renderPage(view.meta.id, request.params.page, request.query.scale, () =>
-          store.readDerived(view.meta.id, 'pdf'),
+        const png = await renderPage(
+          view.meta.id,
+          request.params.page,
+          request.query.scale,
+          () => store.readDerived(view.meta.id, 'pdf'),
+          pageSizePersistence(view.meta.id),
         );
         return await reply.type('image/png').header('cache-control', 'private, no-store').send(png);
       } catch (error) {
