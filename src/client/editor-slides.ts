@@ -1,6 +1,7 @@
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from '../collab/pptxShared.js';
+import { DOC_META_MAP, DOC_META_SAVED_AT_KEY } from '../collab/gridShared.js';
 import { pickPresenceColorForName, renderPresenceAvatars } from './presence.js';
 
 interface Permissions {
@@ -114,6 +115,7 @@ function setupCardActions(): void {
         ]);
       });
     } else if (target.closest('.slide-card-delete')) {
+      if (slidesArray.length <= 1) return; // 마지막 남은 슬라이드는 지울 수 없다
       slidesArray.delete(index, 1);
     }
   });
@@ -166,6 +168,45 @@ async function main(): Promise<void> {
   renderSlides();
   setupDragAndDrop();
   setupCardActions();
+
+  // ---------- 저장 상태 표시(Office 365 스타일 "저장 중… / 저장됨") + Ctrl+S ----------
+  // grid-editor.ts와 완전히 동일한 패턴 — docMeta.savedAt은 서버의 flushToStore가 실제로
+  // 디스크에 쓴 뒤에만 갱신하는 일반 Y.Map 값이라(gridShared.ts, 문서 종류 공통), 이 pptx
+  // 편집기도 별도 서버 변경 없이 그대로 재사용할 수 있다.
+  const docMeta = ydoc.getMap<number>(DOC_META_MAP);
+  const saveStatusEl = document.getElementById('save-status') as HTMLElement | null;
+  const saveStatusTextEl = saveStatusEl?.querySelector('.save-status-text') as HTMLElement | null;
+  let lastKnownSavedAt = docMeta.get(DOC_META_SAVED_AT_KEY) ?? 0;
+  function setSaveStatus(status: 'saving' | 'saved'): void {
+    if (!saveStatusEl) return;
+    saveStatusEl.hidden = false;
+    saveStatusEl.dataset.status = status;
+    if (saveStatusTextEl) saveStatusTextEl.textContent = status === 'saving' ? '저장 중…' : '모든 변경 내용이 저장됨';
+  }
+  if (canEdit) {
+    ydoc.on('afterTransaction', (tx) => {
+      if (!tx.local || tx.changed.size === 0) return;
+      setSaveStatus('saving');
+    });
+  }
+  docMeta.observe(() => {
+    const savedAt = docMeta.get(DOC_META_SAVED_AT_KEY) ?? 0;
+    if (savedAt > lastKnownSavedAt) {
+      lastKnownSavedAt = savedAt;
+      setSaveStatus('saved');
+    }
+  });
+  if (canEdit) {
+    window.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        setSaveStatus('saving');
+        fetch(`/api/view/save?token=${encodeURIComponent(token)}`, { method: 'POST' }).catch(() => {
+          // 네트워크 오류 등으로 실패해도 8초 유휴 자동저장이 알아서 다시 시도하므로 별도 안내는 생략한다.
+        });
+      }
+    });
+  }
 }
 
 void main();
