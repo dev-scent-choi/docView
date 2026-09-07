@@ -9,6 +9,10 @@
  * 추가·삭제 같은 구조 변경은 셀 편집보다 훨씬 드물어 세밀한 CRDT가 필요 없다.
  */
 export const GRID_CELLS_MAP = 'cells';
+/** 수식 셀의 계산된 표시값만 담는 Y.Map — "시트:행:열" 키(gridCellKey와 동일 형식). 수식이
+ * 아닌 셀은 이 맵에 항목이 없다. cells는 항상 원본 텍스트(수식이면 수식 자체)만 담고, 여기에
+ * 계산된 값을 절대 섞지 않는다 — 섞으면 저장 시 수식이 정적 값으로 깨진다. */
+export const GRID_COMPUTED_MAP = 'computed';
 export const GRID_STRUCTURE_MAP = 'structure';
 /**
  * 문서 종류(xlsx/docx) 공통 — 서버가 실제로 디스크에 저장을 마친 시각(epoch ms)을 담아두는 작은

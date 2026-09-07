@@ -11,7 +11,7 @@ export function yieldToEventLoop(): Promise<void> {
 /** 이 개수의 행마다 한 번씩 yieldToEventLoop를 호출한다 — 너무 자주 양보하면(예: 매 행) setImmediate
  * 오버헤드 자체가 커지고, 너무 뜸하면 양보 효과가 없다. 2000행은 실측 없이 정한 보수적인 값이라
  * 필요하면 나중에 조정 가능하다. */
-const YIELD_EVERY_N_ROWS = 2000;
+export const YIELD_EVERY_N_ROWS = 2000;
 
 /** 그리드 뷰 데이터 모델 — 원본 파일 대신 표시용 값·스타일만 담는다. */
 export interface GridCell {

@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest';
-import { computeLineOffsets, saveGridDerived, type GridDocument } from '../src/spreadsheet.js';
+import { computeLineOffsets, saveGridDerived, YIELD_EVERY_N_ROWS, type GridDocument } from '../src/spreadsheet.js';
 
 describe('spreadsheet: computeLineOffsets', () => {
   test('returns byte offsets for each line, starting with 0', () => {
@@ -48,5 +48,12 @@ describe('spreadsheet: saveGridDerived', () => {
     expect(indexCall[1]).toBe('gridindex');
     const { lineOffsets } = JSON.parse((indexCall[2] as Buffer).toString('utf8'));
     expect(lineOffsets).toEqual(computeLineOffsets(serializedBytes));
+  });
+});
+
+describe('spreadsheet.ts: YIELD_EVERY_N_ROWS is exported', () => {
+  test('is a positive integer', () => {
+    expect(Number.isInteger(YIELD_EVERY_N_ROWS)).toBe(true);
+    expect(YIELD_EVERY_N_ROWS).toBeGreaterThan(0);
   });
 });

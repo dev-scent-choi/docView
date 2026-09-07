@@ -14,13 +14,8 @@ import {
   type SheetStructure,
 } from '../collab/gridShared.js';
 import type { GridDocument, GridStyle } from '../spreadsheet.js';
-import { parseXlsxToGrid, yieldToEventLoop } from '../spreadsheet.js';
+import { parseXlsxToGrid, yieldToEventLoop, YIELD_EVERY_N_ROWS } from '../spreadsheet.js';
 
-/** 이 개수의 행마다 한 번씩 트랜잭션을 끊고 이벤트 루프에 양보한다 — spreadsheet.ts의
- * YIELD_EVERY_N_ROWS와 같은 이유(큰 시트를 열 때 서버 전체가 멈추지 않게). 겸사겸사 셀 하나당
- * 트랜잭션 하나(=update 이벤트 하나) 대신 행 단위로 묶어, 처음 룸을 시딩하는 동안(아직 아무도
- * 접속 안 했어도) 그 트랜잭션마다 broadcast/scheduleAutosave가 도는 낭비도 줄인다. */
-const YIELD_EVERY_N_ROWS = 2000;
 
 function toCellStyleAttrs(style: GridStyle): CellStyleAttrs {
   const attrs: { -readonly [K in keyof CellStyleAttrs]?: CellStyleAttrs[K] } = {};
