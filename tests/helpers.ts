@@ -105,3 +105,142 @@ export function makeSampleDocx(paragraphs: readonly string[] = ['Hello DocView']
   };
   return Buffer.from(zipSync(entries));
 }
+
+const PPTX_CONTENT_TYPES_HEAD =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+  '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+  '<Default Extension="xml" ContentType="application/xml"/>' +
+  '<Override PartName="/ppt/presentation.xml" ' +
+  'ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>' +
+  '<Override PartName="/ppt/slideMasters/slideMaster1.xml" ' +
+  'ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>' +
+  '<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ' +
+  'ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>';
+
+const PPTX_ROOT_RELS =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+  '<Relationship Id="rId1" ' +
+  'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" ' +
+  'Target="ppt/presentation.xml"/>' +
+  '</Relationships>';
+
+const PPTX_SLIDE_MASTER_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+  'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+  'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+  '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+  '<p:grpSpPr/></p:spTree></p:cSld>' +
+  '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" ' +
+  'accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" ' +
+  'folHlink="folHlink"/>' +
+  '<p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst>' +
+  '</p:sldMaster>';
+
+const PPTX_SLIDE_MASTER_RELS =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+  '<Relationship Id="rId1" ' +
+  'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" ' +
+  'Target="../slideLayouts/slideLayout1.xml"/>' +
+  '</Relationships>';
+
+const PPTX_SLIDE_LAYOUT_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+  'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+  'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+  '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+  '<p:grpSpPr/></p:spTree></p:cSld></p:sldLayout>';
+
+const PPTX_SLIDE_LAYOUT_RELS =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+  '<Relationship Id="rId1" ' +
+  'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" ' +
+  'Target="../slideMasters/slideMaster1.xml"/>' +
+  '</Relationships>';
+
+function pptxSlideXml(text: string): string {
+  return (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+    'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+    '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+    '<p:grpSpPr/>' +
+    '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+    `<p:txBody><a:bodyPr/><a:p><a:r><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp>` +
+    '</p:spTree></p:cSld></p:sld>'
+  );
+}
+
+const PPTX_SLIDE_RELS =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+  '<Relationship Id="rId1" ' +
+  'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" ' +
+  'Target="../slideLayouts/slideLayout1.xml"/>' +
+  '</Relationships>';
+
+/**
+ * 최소한의 유효한 pptx를 직접 zip으로 조립한다(PowerPoint/LibreOffice 없이).
+ * slideTexts.length장의 슬라이드를 만들고, 전부 같은 slideMaster/slideLayout 하나를 공유한다.
+ */
+export function makeSamplePptx(slideTexts: readonly string[] = ['Slide 1']): Buffer {
+  const slideOverrides = slideTexts
+    .map(
+      (_, i) =>
+        `<Override PartName="/ppt/slides/slide${i + 1}.xml" ` +
+        'ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>',
+    )
+    .join('');
+  const contentTypesXml = `${PPTX_CONTENT_TYPES_HEAD}${slideOverrides}</Types>`;
+
+  const sldIdLst = slideTexts
+    .map((_, i) => `<p:sldId id="${256 + i}" r:id="rId${i + 2}"/>`)
+    .join('');
+  const presentationXml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+    'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+    `<p:sldIdLst>${sldIdLst}</p:sldIdLst>` +
+    '<p:sldSz cx="9144000" cy="6858000"/>' +
+    '</p:presentation>';
+
+  const presentationRelsEntries = [
+    '<Relationship Id="rId1" ' +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" ' +
+      'Target="slideMasters/slideMaster1.xml"/>',
+    ...slideTexts.map(
+      (_, i) =>
+        `<Relationship Id="rId${i + 2}" ` +
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" ' +
+        `Target="slides/slide${i + 1}.xml"/>`,
+    ),
+  ].join('');
+  const presentationRelsXml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    `${presentationRelsEntries}</Relationships>`;
+
+  const entries: Record<string, Uint8Array> = {
+    '[Content_Types].xml': strToU8(contentTypesXml),
+    '_rels/.rels': strToU8(PPTX_ROOT_RELS),
+    'ppt/presentation.xml': strToU8(presentationXml),
+    'ppt/_rels/presentation.xml.rels': strToU8(presentationRelsXml),
+    'ppt/slideMasters/slideMaster1.xml': strToU8(PPTX_SLIDE_MASTER_XML),
+    'ppt/slideMasters/_rels/slideMaster1.xml.rels': strToU8(PPTX_SLIDE_MASTER_RELS),
+    'ppt/slideLayouts/slideLayout1.xml': strToU8(PPTX_SLIDE_LAYOUT_XML),
+    'ppt/slideLayouts/_rels/slideLayout1.xml.rels': strToU8(PPTX_SLIDE_LAYOUT_RELS),
+  };
+  slideTexts.forEach((text, i) => {
+    entries[`ppt/slides/slide${i + 1}.xml`] = strToU8(pptxSlideXml(text));
+    entries[`ppt/slides/_rels/slide${i + 1}.xml.rels`] = strToU8(PPTX_SLIDE_RELS);
+  });
+
+  return Buffer.from(zipSync(entries));
+}
