@@ -104,6 +104,11 @@ interface Room {
    * (Task 6 이후) 지금 구독 중인 페이지만 담는 캐시가 되므로, 저장·다운로드·수식 계산은 항상
    * 이 필드를 기준으로 한다. docx/pptx 룸에서는 항상 null. */
   canonicalGrid: GridDocument | null;
+  /** xlsx 룸에서만 쓰인다 — 룸이 처음 시딩될 때 canonicalGrid를 깊은 복사해 둔 것("원본
+   * 그대로"). canonicalGrid는 편집을 따라 계속 바뀌지만 이 필드는 룸이 사는 동안 절대 바뀌지
+   * 않는다 — exportXlsxFromGrid가 "한 번도 편집되지 않은 셀(수식 셀 포함)"을 가려내는 기준선
+   * 으로 쓴다(예전 Yjs baseline/stylesBaseline 맵과 같은 역할). docx/pptx 룸에서는 항상 null. */
+  baselineGrid: GridDocument | null;
 }
 
 const rooms = new Map<string, Room>();
@@ -169,6 +174,9 @@ async function seedRoom(room: Room): Promise<void> {
     if (kind === 'xlsx') {
       const grid = await parseXlsxToGrid(original);
       room.canonicalGrid = grid;
+      // Node 20+(package.json engines)이라 내장 structuredClone을 그대로 쓴다 — GridDocument는
+      // 함수·순환참조·Map/Set이 전혀 없는 순수 JSON 모양 데이터라 깊은 복사에 안전하다.
+      room.baselineGrid = structuredClone(grid);
       await seedGridFromXlsx(ydoc, grid);
       // 시딩이 끝난 뒤에만 관찰을 시작한다 — 시딩 자체도 GRID_CELLS_MAP에 쓰기(seedableCellValue로
       // 서식이 벗겨진 "편집용" 텍스트, 예: "1,000" → "1000")를 하므로, 시딩 도중에 이미 관찰이
@@ -199,20 +207,24 @@ async function flushToStore(room: Room): Promise<void> {
 
   if (kind === 'xlsx') {
     const original = await store.readOriginal(docId, meta.ext);
-    const newXlsxBytes = await exportXlsxFromGrid(original, ydoc);
-    await store.saveOriginal(docId, meta.ext, Buffer.from(newXlsxBytes));
-    try {
-      const grid = await reparseGridForViewer(newXlsxBytes);
-      await saveGridDerived(store, docId, grid);
-      await store.writeMeta({
-        ...meta,
-        pageCount: grid.sheets.length,
-        status: 'ready',
-        viewKind: 'grid',
-        progress: 100,
-      });
-    } catch (error) {
-      console.error(`동시편집 저장 후 그리드 재생성 실패 (문서 ${docId}):`, error);
+    if (!room.canonicalGrid || !room.baselineGrid) {
+      console.error(`동시편집 저장 실패 — canonical 그리드 없음 (문서 ${docId})`);
+    } else {
+      const newXlsxBytes = await exportXlsxFromGrid(original, room.canonicalGrid, room.baselineGrid);
+      await store.saveOriginal(docId, meta.ext, Buffer.from(newXlsxBytes));
+      try {
+        const grid = await reparseGridForViewer(newXlsxBytes);
+        await saveGridDerived(store, docId, grid);
+        await store.writeMeta({
+          ...meta,
+          pageCount: grid.sheets.length,
+          status: 'ready',
+          viewKind: 'grid',
+          progress: 100,
+        });
+      } catch (error) {
+        console.error(`동시편집 저장 후 그리드 재생성 실패 (문서 ${docId}):`, error);
+      }
     }
   } else if (kind === 'pptx') {
     const original = await store.readOriginal(docId, meta.ext);
@@ -355,7 +367,8 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
   if (!meta) return null;
   const original = await store.readOriginal(docId, meta.ext);
   if (room.kind === 'xlsx') {
-    return exportXlsxFromGrid(original, room.ydoc);
+    if (!room.canonicalGrid || !room.baselineGrid) return null;
+    return exportXlsxFromGrid(original, room.canonicalGrid, room.baselineGrid);
   }
   if (room.kind === 'pptx') {
     // 읽기 전용 헬퍼라 Yjs 배열은 절대 건드리지 않는다 — flushToStore의 저장-후 배열 재작성과
@@ -402,6 +415,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     ready: Promise.resolve(), // 아래에서 즉시 덮어씀 — seedRoom(room)이 room 자신을 참조해야 해서
     suppressAutosaveReschedule: false,
     canonicalGrid: null,
+    baselineGrid: null,
   };
   room.ready = seedRoom(room);
   rooms.set(docId, room);

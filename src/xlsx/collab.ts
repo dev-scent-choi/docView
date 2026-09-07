@@ -8,12 +8,11 @@ import {
   GRID_STYLES_BASELINE_MAP,
   GRID_STYLES_MAP,
   gridCellKey,
-  parseGridCellKey,
   type CellStyleAttrs,
   type GridMergeShape,
   type SheetStructure,
 } from '../collab/gridShared.js';
-import type { GridDocument, GridStyle } from '../spreadsheet.js';
+import type { GridCell, GridDocument, GridStyle } from '../spreadsheet.js';
 import { parseXlsxToGrid, yieldToEventLoop, YIELD_EVERY_N_ROWS } from '../spreadsheet.js';
 
 
@@ -207,15 +206,37 @@ function applyStyleToCell(cell: ExcelJS.Cell, style: CellStyleAttrs | undefined)
   cell.numFmt = numFmtStringFor(style) ?? 'General';
 }
 
+/** canonicalGrid/baselineGrid의 셀(GridCell | 0)에서 표시 텍스트만 뽑는다 — 빈 칸(0 sentinel)과
+ * baseline 쪽 시트 자체가 없는 경우(새로 추가된 시트) 모두 빈 문자열로 취급한다. */
+function cellText(cell: GridCell | 0 | undefined): string {
+  return cell === 0 || cell === undefined ? '' : cell.v;
+}
+
+/** canonicalGrid/baselineGrid의 셀이 참조하는 스타일 인덱스를 실제 GridStyle로 해석한다 —
+ * grid.styles는 공용 스타일 배열이라 셀은 인덱스(.s)만 들고 있다(Yjs styles 맵과 달리 셀마다
+ * 통짜 서식 객체를 직접 들고 있지 않다). */
+function cellStyle(cell: GridCell | 0 | undefined, grid: GridDocument): GridStyle | undefined {
+  if (cell === 0 || cell === undefined || cell.s === undefined) return undefined;
+  return grid.styles[cell.s];
+}
+
 /**
  * 원본 xlsx(수식·서식 등 우리가 편집하지 않는 모든 것)를 그대로 로드한 뒤,
  * 실제로 사용자가 바꾼 셀(값·서식 각각)만 덮어써 재직렬화한다 — docx export와 같은
- * "바뀐 부분만 교체" 원칙. baseline과 값이 같은 셀(한 번도 편집되지 않은 셀 — 수식 셀 포함)은
+ * "바뀐 부분만 교체" 원칙. baselineGrid와 값이 같은 셀(한 번도 편집되지 않은 셀 — 수식 셀 포함)은
  * 건드리지 않는다: 수식 셀은 시딩 시 계산된 결괏값 문자열로만 채워지므로, 건드리지 않았는데도
- * `cells`에 있다고 전부 써버리면 수식 자체가 정적 값으로 깨진다.
+ * canonicalGrid에 있다고 전부 써버리면 수식 자체가 정적 값으로 깨진다.
  * 행/열 삭제(구조 축소)는 시트 끝에서부터만 지원한다(v1 스코프 단순화).
+ *
+ * 데이터 소스는 Yjs Y.Doc이 아니라 canonicalGrid/baselineGrid다(Task 3) — canonicalGrid는 룸이
+ * 항상 최신 상태로 유지하는 "단일 진실"이고, baselineGrid는 그 룸이 처음 시딩될 때의 깊은 복사본
+ * (한 번도 편집되지 않은 셀을 가려내는 기준선 — 예전 Yjs baseline/stylesBaseline 맵과 같은 역할).
  */
-export async function exportXlsxFromGrid(originalXlsxBytes: Uint8Array, ydoc: Y.Doc): Promise<Uint8Array> {
+export async function exportXlsxFromGrid(
+  originalXlsxBytes: Uint8Array,
+  canonicalGrid: GridDocument,
+  baselineGrid: GridDocument,
+): Promise<Uint8Array> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(originalXlsxBytes as unknown as ArrayBuffer);
   const visibleSheets = workbook.worksheets.filter((sheet) => !sheet.state || sheet.state === 'visible');
@@ -230,14 +251,8 @@ export async function exportXlsxFromGrid(originalXlsxBytes: Uint8Array, ydoc: Y.
     Boolean((sheet as unknown as { sheetProtection?: unknown }).sheetProtection),
   );
 
-  const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
-  const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
-  const baseline = ydoc.getMap<string>(GRID_BASELINE_MAP);
-  const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
-  const stylesBaseline = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP);
-
-  for (const [key, target] of structure) {
-    const sheetIdx = Number(key);
+  for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+    const target = canonicalGrid.sheets[sheetIdx];
     // 협업 중 새로 추가된 시트(webviewer 쪽 "+"/삽입 메뉴)는 원본 xlsx에 애초에 없어서
     // visibleSheets에 자리가 없다 — 지금 이름으로 새 워크시트를 만들어 그 자리에 채워 넣는다.
     let sheet = visibleSheets[sheetIdx];
@@ -258,44 +273,55 @@ export async function exportXlsxFromGrid(originalXlsxBytes: Uint8Array, ydoc: Y.
     }
   }
 
-  // 반대로, 협업 중 삭제된 시트(원래 있었는데 지금 structure엔 없는 인덱스)는 원본에서 그대로
+  // 반대로, 협업 중 삭제된 시트(원래 있었는데 지금 canonicalGrid.sheets엔 그 인덱스가 없는 것 —
+  // 배열이라 삭제는 항상 끝에서부터만 반영된다는 뜻, v1 스코프와 동일한 단순화)는 원본에서 그대로
   // 남아 재저장되고 있었다 — 실제로 워크북에서 제거한다.
-  for (let sheetIdx = 0; sheetIdx < originalSheetCount; sheetIdx += 1) {
-    if (structure.has(String(sheetIdx))) continue;
+  for (let sheetIdx = canonicalGrid.sheets.length; sheetIdx < originalSheetCount; sheetIdx += 1) {
     const sheet = visibleSheets[sheetIdx];
     if (sheet) workbook.removeWorksheet(sheet.id);
   }
 
-  const touchedValueKeys = new Set<string>([...baseline.keys(), ...cells.keys()]);
-  for (const key of touchedValueKeys) {
-    const before = baseline.get(key);
-    const after = cells.get(key);
-    if (before === after) continue; // 편집되지 않음 (수식 셀 포함) — 원본 그대로 둔다
+  for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+    const currentSheet = canonicalGrid.sheets[sheetIdx];
+    const baselineSheet = baselineGrid.sheets[sheetIdx];
+    const sheet = visibleSheets[sheetIdx];
+    if (!sheet) continue;
 
-    const parsed = parseGridCellKey(key);
-    if (!parsed) continue;
-    const target = structure.get(String(parsed.sheetIdx));
-    const sheet = visibleSheets[parsed.sheetIdx];
-    if (!target || !sheet) continue;
-    if (parsed.row >= target.rowCount || parsed.col >= target.colCount) continue;
-    sheet.getCell(parsed.row + 1, parsed.col + 1).value =
-      after === undefined || after === '' ? null : coerceCellValue(after);
+    for (let r = 0; r < currentSheet.rows.length; r += 1) {
+      const currentRow = currentSheet.rows[r];
+      const baselineRow = baselineSheet?.rows[r];
+      for (let c = 0; c < currentRow.length; c += 1) {
+        const currentCell = currentRow[c];
+        const baselineCell = baselineRow?.[c];
+        const currentText = cellText(currentCell);
+        const baselineText = cellText(baselineCell);
+        if (currentText === baselineText) continue; // 편집되지 않음 (수식 셀 포함) — 원본 그대로 둔다
+        if (r >= currentSheet.rowCount || c >= currentSheet.colCount) continue;
+        sheet.getCell(r + 1, c + 1).value = currentText === '' ? null : coerceCellValue(currentText);
+      }
+    }
   }
 
-  const touchedStyleKeys = new Set<string>([...stylesBaseline.keys(), ...styles.keys()]);
-  for (const key of touchedStyleKeys) {
-    const before = stylesBaseline.get(key);
-    const after = styles.get(key);
-    if (before === after) continue;
-    if (before && after && JSON.stringify(before) === JSON.stringify(after)) continue;
+  for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+    const currentSheet = canonicalGrid.sheets[sheetIdx];
+    const baselineSheet = baselineGrid.sheets[sheetIdx];
+    const sheet = visibleSheets[sheetIdx];
+    if (!sheet) continue;
 
-    const parsed = parseGridCellKey(key);
-    if (!parsed) continue;
-    const target = structure.get(String(parsed.sheetIdx));
-    const sheet = visibleSheets[parsed.sheetIdx];
-    if (!target || !sheet) continue;
-    if (parsed.row >= target.rowCount || parsed.col >= target.colCount) continue;
-    applyStyleToCell(sheet.getCell(parsed.row + 1, parsed.col + 1), after);
+    for (let r = 0; r < currentSheet.rows.length; r += 1) {
+      const currentRow = currentSheet.rows[r];
+      const baselineRow = baselineSheet?.rows[r];
+      for (let c = 0; c < currentRow.length; c += 1) {
+        const currentCell = currentRow[c];
+        const baselineCell = baselineRow?.[c];
+        const currentStyle = cellStyle(currentCell, canonicalGrid);
+        const baselineStyle = cellStyle(baselineCell, baselineGrid);
+        if (currentStyle === baselineStyle) continue;
+        if (currentStyle && baselineStyle && JSON.stringify(currentStyle) === JSON.stringify(baselineStyle)) continue;
+        if (r >= currentSheet.rowCount || c >= currentSheet.colCount) continue;
+        applyStyleToCell(sheet.getCell(r + 1, c + 1), currentStyle ? toCellStyleAttrs(currentStyle) : undefined);
+      }
+    }
   }
 
   for (let i = 0; i < visibleSheets.length; i += 1) {
