@@ -48,9 +48,17 @@ function embeddableFamilyOf(fontFamily: string): EmbeddableFontFamily {
 type PdfImageDocument = Awaited<ReturnType<typeof pdf>>;
 export type BytesProvider = () => Promise<Buffer>;
 
-interface PageSize {
+export interface PageSize {
   readonly width: number;
   readonly height: number;
+}
+
+/** getPageSizes가 매번 PDF를 새로 파싱하지 않도록, 영구 저장된 페이지 크기를 읽고/쓰는
+ * 콜백 쌍 — loadBytes와 같은 기존 패턴대로 이 파일은 storage.ts를 직접 import하지 않고
+ * 항상 호출자(routes/*.ts)가 만들어 주입한다. */
+export interface PersistedPageSizes {
+  readonly load: () => Promise<readonly PageSize[] | null>;
+  readonly save: (sizes: readonly PageSize[]) => Promise<void>;
 }
 
 /** 페이지당 렌더링 픽셀 상한 — 초대형 시트/도면에서 메모리 폭주를 막는다. */
@@ -107,17 +115,18 @@ async function openDocument(
   return cached.doc;
 }
 
-function getPageSizes(docId: string, loadBytes: BytesProvider): Promise<readonly PageSize[]> {
+function getPageSizes(
+  docId: string,
+  loadBytes: BytesProvider,
+  persisted: PersistedPageSizes,
+): Promise<readonly PageSize[]> {
   return pageSizeCache.getOrLoad(docId, async () => {
+    const existing = await persisted.load();
+    if (existing) return existing;
     const bytes = await loadBytes();
-    const doc = await PDFDocument.load(toOwnedBytes(bytes), {
-      ignoreEncryption: true,
-      updateMetadata: false,
-    });
-    return doc.getPages().map((page) => {
-      const { width, height } = page.getSize();
-      return { width, height };
-    });
+    const { sizes } = await getPdfPageInfo(bytes);
+    await persisted.save(sizes);
+    return sizes;
   });
 }
 
@@ -125,17 +134,32 @@ function getPageSizes(docId: string, loadBytes: BytesProvider): Promise<readonly
 export async function getPageDimensions(
   docId: string,
   loadBytes: BytesProvider,
+  persisted: PersistedPageSizes,
 ): Promise<ReadonlyArray<{ w: number; h: number }>> {
-  const sizes = await getPageSizes(docId, loadBytes);
+  const sizes = await getPageSizes(docId, loadBytes, persisted);
   return sizes.map((size) => ({ w: Math.round(size.width), h: Math.round(size.height) }));
 }
 
-export async function getPageCountFromBytes(pdfBytes: Buffer): Promise<number> {
+export interface PdfPageInfo {
+  readonly pageCount: number;
+  readonly sizes: readonly PageSize[];
+}
+
+/**
+ * PDF 바이트를 한 번만 파싱해 페이지 수와 페이지별 크기를 함께 얻는다. 변환 직후(업로드,
+ * 동시편집 저장 후 재변환) routes/documents.ts의 convertToPdf가 이 함수로 페이지 수를 얻는
+ * 김에 페이지 크기도 함께 영구 저장해 두면, 조회 시점(getPageSizes)엔 다시 파싱할 필요가 없다.
+ */
+export async function getPdfPageInfo(pdfBytes: Buffer): Promise<PdfPageInfo> {
   const doc = await PDFDocument.load(toOwnedBytes(pdfBytes), {
     ignoreEncryption: true,
     updateMetadata: false,
   });
-  return doc.getPageCount();
+  const sizes = doc.getPages().map((page) => {
+    const { width, height } = page.getSize();
+    return { width, height };
+  });
+  return { pageCount: doc.getPageCount(), sizes };
 }
 
 /**
@@ -167,8 +191,9 @@ export async function renderPage(
   pageNumber: number,
   requestedScale: number,
   loadBytes: BytesProvider,
+  persisted: PersistedPageSizes,
 ): Promise<Buffer> {
-  const sizes = await getPageSizes(docId, loadBytes);
+  const sizes = await getPageSizes(docId, loadBytes, persisted);
   if (pageNumber < 1 || pageNumber > sizes.length) {
     throw new PageOutOfRangeError(pageNumber, sizes.length);
   }
