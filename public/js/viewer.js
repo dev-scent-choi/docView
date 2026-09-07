@@ -337,6 +337,14 @@ function buildPages() {
     label.textContent = String(page);
     frame.append(canvas, label);
     frames.push(frame);
+    if (page === 1) {
+      // 나머지 프레임을 다 만들 때까지 기다리지 않고 1페이지 이미지 요청을 먼저 흘려보낸다 —
+      // IntersectionObserver 콜백은 이 함수가 끝나고 다음 틱에야 배달되므로, 그대로 두면
+      // "전체 프레임 구성"이 "1페이지 요청"보다 항상 먼저 끝나야 하는 불필요한 직렬 의존이
+      // 생긴다. ensureLoaded는 이미 requestedScale 가드가 있어(loadPageInto가 그 값을
+      // 동기적으로 세팅) 잠시 뒤 옵저버가 같은 캔버스에 대해 또 호출해도 중복 요청은 없다.
+      ensureLoaded(canvas);
+    }
     observer.observe(frame);
   }
   pagesContainer.replaceChildren(...frames);
