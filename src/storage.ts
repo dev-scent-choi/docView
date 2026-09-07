@@ -8,7 +8,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const EXT_PATTERN = /^[a-z0-9]{1,10}$/;
 
 /** 변환 산출물 종류: pdf(페이지 뷰·출력용) / grid(스프레드시트 그리드 뷰 JSON) / markup(리뷰 코멘트 JSON) */
-export type DerivedKind = 'pdf' | 'grid' | 'markup';
+export type DerivedKind = 'pdf' | 'grid' | 'markup' | 'pagesizes' | 'gridindex';
 
 /**
  * 문서 저장 계층 추상화. disk(기본)와 memory 두 구현을 DOCVIEW_STORAGE로 선택한다.
@@ -58,7 +58,12 @@ export class DiskStore implements DocumentStore {
 
   private derivedPath(id: string, kind: DerivedKind): string {
     assertValidId(id);
-    const suffix = kind === 'pdf' ? 'pdf' : kind === 'grid' ? 'grid.json' : 'markup.json';
+    const suffix =
+      kind === 'pdf' ? 'pdf'
+      : kind === 'grid' ? 'grid.json'
+      : kind === 'markup' ? 'markup.json'
+      : kind === 'pagesizes' ? 'pagesizes.json'
+      : 'gridindex.json';
     return path.join(config.convertedDir, `${id}.${suffix}`);
   }
 
@@ -137,6 +142,8 @@ export class DiskStore implements DocumentStore {
       fs.rm(this.derivedPath(id, 'pdf'), { force: true }),
       fs.rm(this.derivedPath(id, 'grid'), { force: true }),
       fs.rm(this.derivedPath(id, 'markup'), { force: true }),
+      fs.rm(this.derivedPath(id, 'pagesizes'), { force: true }),
+      fs.rm(this.derivedPath(id, 'gridindex'), { force: true }),
       fs.rm(this.metaPath(id), { force: true }),
     ]);
   }
@@ -175,6 +182,8 @@ export class MemoryStore implements DocumentStore {
       this.derived.delete(`${oldest.id}#pdf`);
       this.derived.delete(`${oldest.id}#grid`);
       this.derived.delete(`${oldest.id}#markup`);
+      this.derived.delete(`${oldest.id}#pagesizes`);
+      this.derived.delete(`${oldest.id}#gridindex`);
       this.metas.delete(oldest.id);
       console.warn(`메모리 예산 초과로 오래된 문서를 제거했습니다: ${oldest.name} (${oldest.id})`);
     }
@@ -227,6 +236,8 @@ export class MemoryStore implements DocumentStore {
     this.derived.delete(`${id}#pdf`);
     this.derived.delete(`${id}#grid`);
     this.derived.delete(`${id}#markup`);
+    this.derived.delete(`${id}#pagesizes`);
+    this.derived.delete(`${id}#gridindex`);
     this.metas.delete(id);
   }
 }
