@@ -92,3 +92,33 @@ describe('storage: pagesizes/gridindex derived kinds', () => {
     expect(await store.hasDerived(id, 'gridindex')).toBe(false);
   });
 });
+
+describe('storage: MemoryStore derived-kind cleanup is generic (no per-kind hardcoding)', () => {
+  afterEach(() => {
+    delete process.env.DOCVIEW_STORAGE;
+    vi.resetModules();
+  });
+
+  test('deleteDocument removes every derived kind for that id via a prefix sweep, including newly-added kinds', async () => {
+    vi.resetModules();
+    process.env.DOCVIEW_STORAGE = 'memory';
+    const { store, newDocumentId } = await import('../src/storage.js');
+    const id = newDocumentId();
+    await store.writeMeta({
+      id,
+      name: 'a.pdf',
+      ext: 'pdf',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+    });
+    const kinds = ['pdf', 'grid', 'markup', 'pagesizes', 'gridindex'] as const;
+    for (const kind of kinds) {
+      await store.saveDerived(id, kind, Buffer.from(`data-for-${kind}`, 'utf8'));
+    }
+    await store.deleteDocument(id);
+    for (const kind of kinds) {
+      expect(await store.hasDerived(id, kind)).toBe(false);
+    }
+  });
+});

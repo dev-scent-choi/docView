@@ -95,8 +95,9 @@ const pdfTextCache = new SizedLruCache<PageText[]>({
 });
 
 /**
- * docx 동시편집 저장(src/collab/room.ts)이 문서를 새 PDF로 재변환한 뒤 호출한다.
- * 이전 PDF 기준으로 추출된 텍스트 레이어가 검색 결과에 남지 않도록 지운다.
+ * 동시편집 저장(src/collab/room.ts)이 문서를 다시 생성한 뒤 호출한다. docx/pptx는 새 PDF로
+ * 재변환된 뒤 이전 텍스트 레이어가 검색 결과에 남지 않도록, xlsx는 그리드(+gridindex)가 다시
+ * 저장된 뒤 이전 LoadedGrid가 캐시에 남아 낡은 내용을 서빙하지 않도록 각각 무효화한다.
  */
 export function invalidateViewCaches(docId: string): void {
   pdfTextCache.invalidate(docId);
@@ -119,12 +120,32 @@ function indexGrid(buffer: Buffer): LoadedGrid {
   return buildLoadedGridFromOffsets(buffer, computeLineOffsets(buffer));
 }
 
+/**
+ * 영구 저장된 gridindex가 구조적으로 말이 되는지 값싸게(오프셋 배열만 훑고, 버퍼 바이트는
+ * 건드리지 않는다) 검사한다 — 실제 스캔 결과와 바이트 단위로 똑같은지까지는 확인하지 않는다
+ * (그러면 인덱스를 신뢰하는 의미가 없어진다). 이 검사의 목적은 딱 하나: Task 6에서 실제로
+ * 겪은 버그 클래스 — 마지막 오프셋이 버퍼 길이를 넘어서 Buffer.toString이 end를 조용히
+ * clamp해 여러 줄이 뒤섞인 문자열을 반환하고 JSON.parse가 깨지는 것 — 을 막는다.
+ */
+function offsetsLookValid(buffer: Buffer, lineOffsets: readonly number[]): boolean {
+  if (lineOffsets.length === 0 || lineOffsets[0] !== 0) return false;
+  for (let i = 1; i < lineOffsets.length; i += 1) {
+    if (lineOffsets[i] <= lineOffsets[i - 1]) return false;
+  }
+  return lineOffsets[lineOffsets.length - 1] <= buffer.length;
+}
+
 async function loadGridUncached(docId: string): Promise<LoadedGrid> {
   const buffer = await store.readDerived(docId, 'grid');
-  if (await store.hasDerived(docId, 'gridindex')) {
+  try {
     const raw = await store.readDerived(docId, 'gridindex');
     const { lineOffsets } = JSON.parse(raw.toString('utf8')) as { lineOffsets: number[] };
-    return buildLoadedGridFromOffsets(buffer, lineOffsets);
+    if (offsetsLookValid(buffer, lineOffsets)) {
+      return buildLoadedGridFromOffsets(buffer, lineOffsets);
+    }
+  } catch {
+    // gridindex가 없거나(정상 — 최초 조회), 손상됐거나, 구조적으로 말이 안 되면(offsetsLookValid
+    // 실패) 여기로 떨어진다 — 아래에서 다시 스캔해 올바른 값으로 덮어써 자가치유한다.
   }
   const grid = indexGrid(buffer);
   await store.saveDerived(
@@ -148,9 +169,13 @@ export function loadGrid(docId: string): Promise<LoadedGrid> {
 export function pageSizePersistence(docId: string): PersistedPageSizes {
   return {
     load: async () => {
-      if (!(await store.hasDerived(docId, 'pagesizes'))) return null;
-      const raw = await store.readDerived(docId, 'pagesizes');
-      return JSON.parse(raw.toString('utf8')) as readonly PageSize[];
+      try {
+        const raw = await store.readDerived(docId, 'pagesizes');
+        const sizes = JSON.parse(raw.toString('utf8')) as unknown;
+        return Array.isArray(sizes) ? (sizes as readonly PageSize[]) : null;
+      } catch {
+        return null; // 없음/손상 모두 캐시 미스로 취급 — getPageSizes가 다시 계산해 덮어써 자가치유한다.
+      }
     },
     save: async (sizes) => {
       await store.saveDerived(docId, 'pagesizes', Buffer.from(JSON.stringify(sizes)));

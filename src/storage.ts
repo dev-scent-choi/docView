@@ -7,8 +7,20 @@ import type { DocumentMeta } from './types.js';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const EXT_PATTERN = /^[a-z0-9]{1,10}$/;
 
-/** 변환 산출물 종류: pdf(페이지 뷰·출력용) / grid(스프레드시트 그리드 뷰 JSON) / markup(리뷰 코멘트 JSON) */
+/** 변환 산출물 종류: pdf(페이지 뷰·출력용) / grid(스프레드시트 그리드 뷰 JSON) / markup(리뷰 코멘트 JSON)
+ * / pagesizes(PDF 페이지 크기 배열, 뷰어 첫 화면 속도용) / gridindex(그리드 JSONL 줄 오프셋, 동일 목적) */
 export type DerivedKind = 'pdf' | 'grid' | 'markup' | 'pagesizes' | 'gridindex';
+
+/** kind별 파일 확장자 매핑 — 한 곳에서만 관리해, 새 kind를 추가하고 여기 추가하지 않으면
+ * (derivedPath의 옛 삼항 체인처럼 조용히 엉뚱한 파일에 매핑되는 대신) 타입 오류로 바로 드러난다. */
+const DERIVED_SUFFIX: Record<DerivedKind, string> = {
+  pdf: 'pdf',
+  grid: 'grid.json',
+  markup: 'markup.json',
+  pagesizes: 'pagesizes.json',
+  gridindex: 'gridindex.json',
+};
+const DERIVED_KINDS = Object.keys(DERIVED_SUFFIX) as readonly DerivedKind[];
 
 /**
  * 문서 저장 계층 추상화. disk(기본)와 memory 두 구현을 DOCVIEW_STORAGE로 선택한다.
@@ -58,13 +70,7 @@ export class DiskStore implements DocumentStore {
 
   private derivedPath(id: string, kind: DerivedKind): string {
     assertValidId(id);
-    const suffix =
-      kind === 'pdf' ? 'pdf'
-      : kind === 'grid' ? 'grid.json'
-      : kind === 'markup' ? 'markup.json'
-      : kind === 'pagesizes' ? 'pagesizes.json'
-      : 'gridindex.json';
-    return path.join(config.convertedDir, `${id}.${suffix}`);
+    return path.join(config.convertedDir, `${id}.${DERIVED_SUFFIX[kind]}`);
   }
 
   private metaPath(id: string): string {
@@ -139,11 +145,7 @@ export class DiskStore implements DocumentStore {
     if (!meta) return;
     await Promise.allSettled([
       fs.rm(this.originalPath(id, meta.ext), { force: true }),
-      fs.rm(this.derivedPath(id, 'pdf'), { force: true }),
-      fs.rm(this.derivedPath(id, 'grid'), { force: true }),
-      fs.rm(this.derivedPath(id, 'markup'), { force: true }),
-      fs.rm(this.derivedPath(id, 'pagesizes'), { force: true }),
-      fs.rm(this.derivedPath(id, 'gridindex'), { force: true }),
+      ...DERIVED_KINDS.map((kind) => fs.rm(this.derivedPath(id, kind), { force: true })),
       fs.rm(this.metaPath(id), { force: true }),
     ]);
   }
@@ -171,6 +173,15 @@ export class MemoryStore implements DocumentStore {
     return total;
   }
 
+  /** id로 시작하는 모든 파생 산출물을 kind를 하나하나 나열하지 않고 한 번에 지운다 — 새
+   * DerivedKind를 추가하고 여기 추가를 깜빡해도 orphan 데이터가 남지 않는다. */
+  private deleteDerivedFor(id: string): void {
+    const prefix = `${id}#`;
+    for (const key of this.derived.keys()) {
+      if (key.startsWith(prefix)) this.derived.delete(key);
+    }
+  }
+
   /** 예산 초과 시 보호 대상(protectedId)을 제외하고 가장 오래된 문서부터 제거한다. */
   private enforceBudget(protectedId: string): void {
     while (this.totalBytes() > this.budgetBytes) {
@@ -179,11 +190,7 @@ export class MemoryStore implements DocumentStore {
         .find((meta) => meta.id !== protectedId);
       if (!oldest) return;
       this.originals.delete(oldest.id);
-      this.derived.delete(`${oldest.id}#pdf`);
-      this.derived.delete(`${oldest.id}#grid`);
-      this.derived.delete(`${oldest.id}#markup`);
-      this.derived.delete(`${oldest.id}#pagesizes`);
-      this.derived.delete(`${oldest.id}#gridindex`);
+      this.deleteDerivedFor(oldest.id);
       this.metas.delete(oldest.id);
       console.warn(`메모리 예산 초과로 오래된 문서를 제거했습니다: ${oldest.name} (${oldest.id})`);
     }
@@ -233,11 +240,7 @@ export class MemoryStore implements DocumentStore {
 
   async deleteDocument(id: string): Promise<void> {
     this.originals.delete(id);
-    this.derived.delete(`${id}#pdf`);
-    this.derived.delete(`${id}#grid`);
-    this.derived.delete(`${id}#markup`);
-    this.derived.delete(`${id}#pagesizes`);
-    this.derived.delete(`${id}#gridindex`);
+    this.deleteDerivedFor(id);
     this.metas.delete(id);
   }
 }
