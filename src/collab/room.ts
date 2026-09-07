@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { WebSocket } from 'ws';
 import * as decoding from 'lib0/decoding';
@@ -149,8 +150,37 @@ async function flushToStore(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<
     }
   } else if (kind === 'pptx') {
     const original = await store.readOriginal(docId, meta.ext);
-    const newPptxBytes = exportPptxFromSlides(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
+    const { bytes: newPptxBytes, finalParts } = exportPptxFromSlides(
+      original,
+      ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY),
+    );
     await store.saveOriginal(docId, meta.ext, Buffer.from(newPptxBytes));
+
+    // 저장이 끝난 직후, Yjs 배열을 "방금 디스크에 쓴 내용"과 다시 일치시킨다: 모든 항목을
+    // finalParts 순서의 'original' 항목으로 재구성한다. 이렇게 하지 않으면 (1) duplicate 항목이
+    // sourcePageNumber: null인 채로 남아 썸네일이 계속 깨진 채고, (2) 그 duplicate가 가리키던
+    // sourceSlidePart를 이후에 원본 쪽에서 삭제하면 다음 저장이 그 항목을 조용히 떨어뜨리거나
+    // (필터로 막긴 했지만) 의도와 다른 결과를 낳으며, (3) 매 저장마다 새 slideN.xml 번호가 계속
+    // 새로 발급되어 파트 번호가 무한정 커진다. 저장 직후 배열을 "디스크 = 배열"로 리셋해 두면
+    // 두 번째 저장은 완전히 멱등이고, 복제된 슬라이드도 다음 렌더부터 진짜 썸네일을 가진다.
+    //
+    // 주의: 이건 "마지막 쓰기가 이긴다"는 재작성이다 — export를 위해 배열을 읽은 시점과 이
+    // transact 사이의 아주 짧은 틈(동기적인 zip 조작 시간만큼, 보통 수 ms)에 다른 클라이언트가
+    // 편집을 넣으면 그 편집이 이 리셋으로 덮어써질 수 있다. 이론적으로는 있지만, 정확한
+    // 병합-인식 재작성은 훨씬 복잡해서 이번 v1에서는 받아들이기로 한 트레이드오프다.
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    ydoc.transact(() => {
+      slidesArray.delete(0, slidesArray.length);
+      slidesArray.insert(
+        0,
+        finalParts.map((part, index) => ({
+          id: randomUUID(),
+          kind: 'original' as const,
+          sourceSlidePart: part,
+          sourcePageNumber: index + 1,
+        })),
+      );
+    });
 
     const converter = findConverter(meta.ext);
     if (converter) {
@@ -221,7 +251,9 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
     return exportXlsxFromGrid(original, room.ydoc);
   }
   if (room.kind === 'pptx') {
-    return exportPptxFromSlides(original, room.ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
+    // 읽기 전용 헬퍼라 Yjs 배열은 절대 건드리지 않는다 — flushToStore의 저장-후 배열 재작성과
+    // 달리, 여기서는 바이트만 필요하다.
+    return exportPptxFromSlides(original, room.ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY)).bytes;
   }
   const fragment = room.ydoc.getXmlFragment(XML_FRAGMENT_NAME);
   const pmDoc = yXmlFragmentToProseMirrorRootNode(fragment, docxSchema);
@@ -232,7 +264,13 @@ function scheduleAutosave(room: Room): void {
   if (room.autosaveTimer) clearTimeout(room.autosaveTimer);
   room.autosaveTimer = setTimeout(() => {
     room.autosaveTimer = null;
-    void flushToStore(room.docId, room.kind, room.ydoc);
+    // flushToStore가 던지면(예: 저장 도중 발견한 데이터 이상) .catch() 없이 그냥 버려진 Promise의
+    // reject는 Node에서 unhandledRejection이 되어 프로세스 전체를 죽인다 — 그러면 이 문서만이
+    // 아니라 그 순간 다른 모든 문서(docx/xlsx 포함)를 편집 중이던 세션까지 함께 끊긴다. 반드시
+    // 여기서 잡아 로그만 남긴다.
+    flushToStore(room.docId, room.kind, room.ydoc).catch((error) => {
+      console.error(`유휴 자동저장 실패 (문서 ${room.docId}):`, error);
+    });
   }, AUTOSAVE_IDLE_MS);
 }
 

@@ -111,13 +111,56 @@ function firstSlideLayoutTarget(
   return match[1];
 }
 
+/** 슬라이드 파트 이름의 유일하게 허용되는 형태 — 정확히 'slideN.xml'(N은 숫자)만 통과시킨다.
+ * 클라이언트(또는 그 사이 어떤 버그)가 만든 SlideEntry.sourceSlidePart를 그대로 XML 문자열
+ * 접합(Relationship Target=, Override PartName= 등)에 쓰기 전에 반드시 이 검증을 거쳐야 한다 —
+ * 그렇지 않으면 `slide1.xml" TargetMode="External" Target="http://evil` 같은 값이 저장되는
+ * pptx의 실제 관계/콘텐츠 타입 XML에 임의 속성을 주입할 수 있다(패키지 인젝션). */
+const SLIDE_PART_RE = /^slide\d+\.xml$/;
+
+/**
+ * 저장 가능한 항목만 남긴다: 'blank'는 항상 통과, 'original'/'duplicate'는 sourceSlidePart가
+ * 정확히 'slideN.xml' 형태이고 실제로 zip 안에 그 파트가 존재할 때만 통과시킨다. 그 외
+ * (kind가 알 수 없거나, 형식이 이상하거나, 참조하는 원본 파트가 이미 사라진 경우 — 예: 직전
+ * 저장에서 원본이 삭제됐는데 그 이전에 만든 duplicate 항목이 여전히 그 원본을 가리키는 stale
+ * 상태)는 조용히 걸러낸다(throw하지 않는다) — 그런 상태는 "더 이상 유효하지 않은 편집 의도"로
+ * 보고 안전하게 무시하는 게, 전체 저장을 실패시켜 다음 자동저장마다 계속 크래시하는 것보다 낫다.
+ */
+function filterValidEntries(
+  rawEntryList: readonly SlideEntry[],
+  zipEntries: Record<string, Uint8Array>,
+): SlideEntry[] {
+  return rawEntryList.filter((entry) => {
+    if (entry.kind === 'blank') return true;
+    if (entry.kind !== 'original' && entry.kind !== 'duplicate') return false;
+    return (
+      typeof entry.sourceSlidePart === 'string' &&
+      SLIDE_PART_RE.test(entry.sourceSlidePart) &&
+      zipEntries[`ppt/slides/${entry.sourceSlidePart}`] !== undefined
+    );
+  });
+}
+
+/** exportPptxFromSlides의 결과 — 저장할 바이트뿐 아니라, 그 바이트가 실제로 담고 있는 최종
+ * 슬라이드 파트 순서도 함께 돌려준다. room.ts의 flushToStore는 이 finalParts로 Yjs 배열 자체를
+ * "방금 디스크에 쓴 내용"과 다시 일치시켜, 두 번째 저장이 stale한 duplicate/sourcePageNumber
+ * 때문에 깨지지 않게 한다. */
+export interface ExportedPptx {
+  readonly bytes: Uint8Array;
+  readonly finalParts: readonly string[];
+}
+
 /**
  * 현재 슬라이드 배열 상태 + 원본 pptx bytes로 새 pptx를 조립한다
  * (room.ts의 flushToStore/getCurrentBytes에서 호출).
  */
-export function exportPptxFromSlides(pptxBytes: Uint8Array, slidesArray: Y.Array<SlideEntry>): Uint8Array {
+export function exportPptxFromSlides(pptxBytes: Uint8Array, slidesArray: Y.Array<SlideEntry>): ExportedPptx {
   const zipEntries = { ...unzipSync(pptxBytes) };
-  const entryList = slidesArray.toArray();
+  const rawEntryList = slidesArray.toArray();
+  const entryList = filterValidEntries(rawEntryList, zipEntries);
+  if (entryList.length === 0) {
+    throw new Error('슬라이드가 하나도 남지 않아 저장할 수 없습니다.');
+  }
 
   const originalRelsXml = strFromU8(zipEntries['ppt/_rels/presentation.xml.rels']);
   const originalPresentationXml = strFromU8(zipEntries['ppt/presentation.xml']);
@@ -239,5 +282,5 @@ export function exportPptxFromSlides(pptxBytes: Uint8Array, slidesArray: Y.Array
   contentTypesXml = contentTypesXml.replace('</Types>', `${missingOverrides.join('')}</Types>`);
   zipEntries['[Content_Types].xml'] = strToU8(contentTypesXml);
 
-  return zipSync(zipEntries);
+  return { bytes: zipSync(zipEntries), finalParts };
 }
