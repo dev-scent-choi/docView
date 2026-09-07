@@ -1020,6 +1020,11 @@ function renderGridViewport() {
   const cols = `<colgroup><col style="width:${GRID_ROWNUM_W}px">${Array.from({ length: colCount }, (_, i) =>
     `<col style="width:${colWidthAt(sheet, i + 1)}px">`,
   ).join('')}</colgroup>`;
+  // 크롬은 table-layout:fixed + <colgroup>이어도 테이블 자체 width가 auto인 채로 열이 많으면(대략
+  // 12~15개 이상) 개별 <col> 폭을 조용히 무시하고 자체적으로 재분배해버린다(grid-editor.ts의 같은
+  // 문제와 동일 — 그쪽에서 이미 확인된 크롬 버그). 테이블에 명시적 width를 주면 이 경로를 피한다.
+  let totalColWidthPx = GRID_ROWNUM_W;
+  for (let i = 1; i <= colCount; i += 1) totalColWidthPx += colWidthAt(sheet, i);
 
   const rowsHtml = [];
   for (let r = firstVisible; r <= lastVisible; r += 1) {
@@ -1028,27 +1033,38 @@ function renderGridViewport() {
       if (gridState.mergeCovered.has(`${r}:${c}`)) continue;
       const merge = gridState.mergeStarts.get(`${r}:${c}`);
       const cell = cellAt(gridState.active, r, c - 1);
+      const isEmpty = !cell || cell === 0;
       const classes = [];
-      if (cell && cell !== 0 && cell.s !== undefined) classes.push(`gs${cell.s}`);
+      if (!isEmpty && cell.s !== undefined) classes.push(`gs${cell.s}`);
       const hitKey = `${gridState.active}:${r}:${c}`;
       const isHit = gridSearchHits.has(hitKey);
       if (isHit) classes.push('g-hit');
       if (hitKey === gridCurrentHit) classes.push('g-hit-current');
-      const value =
-        cell && cell !== 0
-          ? isHit
-            ? markMatches(cell.v, searchState.lastQuery)
-            : escapeHtml(cell.v)
-          : '';
+      const value = isEmpty ? '' : isHit ? markMatches(cell.v, searchState.lastQuery) : escapeHtml(cell.v);
       const cls = classes.length > 0 ? ` class="${classes.join(' ')}"` : '';
       const span = merge ? ` colspan="${merge.cs}"${merge.rs > 1 ? ` rowspan="${merge.rs}"` : ''}` : '';
-      cells.push(`<td${cls}${span}>${value}</td>`);
+      // 실제 엑셀처럼 — 오른쪽으로 빈 칸이 이어지는 만큼 이 칸의 내용이 넘쳐 보이게 허용한다
+      // (병합 칸이나 값 있는 칸을 만나면 거기서 멈춘다).
+      let spillStyle = '';
+      if (!isEmpty && !merge) {
+        let spillWidth = colWidthAt(sheet, c);
+        for (let cc = c + 1; cc <= colCount; cc += 1) {
+          if (gridState.mergeCovered.has(`${r}:${cc}`) || gridState.mergeStarts.has(`${r}:${cc}`)) break;
+          const nextCell = cellAt(gridState.active, r, cc - 1);
+          if (nextCell && nextCell !== 0) break;
+          spillWidth += colWidthAt(sheet, cc);
+        }
+        if (spillWidth > colWidthAt(sheet, c)) spillStyle = ` style="width:${spillWidth}px"`;
+      }
+      const content = value ? `<span class="g-cell-spill"${spillStyle}>${value}</span>` : '';
+      cells.push(`<td${cls}${span}>${content}</td>`);
     }
     rowsHtml.push(`<tr style="height:${GRID_ROW_H}px">${cells.join('')}</tr>`);
   }
 
   const table = document.getElementById('grid-table');
   table.innerHTML = cols + rowsHtml.join('');
+  table.style.width = `${totalColWidthPx}px`;
   table.style.transform = `translateY(${(firstVisible - 1) * GRID_ROW_H}px)`;
 
   if (pageJumpTotal) {

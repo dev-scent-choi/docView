@@ -405,17 +405,73 @@ async function main(): Promise<void> {
   function renderCellDisplay(td: HTMLTableCellElement, key: string): void {
     const raw = cells.get(key) ?? '';
     if (editingKey === key) {
-      td.textContent = raw; // 편집 중에는 계산 결과가 아니라 실제 입력한 수식이 보여야 한다
+      // 편집 중에는 계산 결과가 아니라 실제 입력한 수식이 보여야 한다 — contentEditable 커서/선택
+      // 범위가 span으로 감싸면 꼬일 수 있어 이 모드에서는 스필 span을 쓰지 않고 그대로 넣는다.
+      td.replaceChildren();
+      td.textContent = raw;
       return;
     }
     const style = styles.get(key);
-    if (!raw.startsWith('=')) {
-      td.textContent = formatNumberForDisplay(raw, style);
-      return;
+    const text = !raw.startsWith('=')
+      ? formatNumberForDisplay(raw, style)
+      : formatNumberForDisplay(
+          formatComputedValue(
+            (() => {
+              const parsed = parseGridCellKey(key);
+              return parsed ? computeCellDisplay(parsed.sheetIdx, parsed.row, parsed.col) : raw;
+            })(),
+          ),
+          style,
+        );
+    applySpillDisplay(td, key, text);
+  }
+
+  /** 실제 엑셀처럼 — 오른쪽 이웃 칸이 비어 있으면 이 칸의 표시 내용이 그 위로 넘쳐 보이게 한다
+   * (값 있는 칸이나 병합 칸을 만나면 거기서 멈춘다). td.textContent를 직접 쓰지 않고 안쪽
+   * span(.g-cell-spill)의 너비만 늘려야 td 경계 밖으로 시각적으로 넘칠 수 있다(CSS 쪽 참고). */
+  function applySpillDisplay(td: HTMLTableCellElement, key: string, text: string): void {
+    let span = td.querySelector<HTMLSpanElement>(':scope > .g-cell-spill');
+    if (!span) {
+      span = document.createElement('span');
+      span.className = 'g-cell-spill';
+      td.replaceChildren(span);
     }
+    span.textContent = text;
+    span.style.width = '';
+    if (!text.trim() || td.colSpan > 1) return; // 병합 칸은 이미 colspan으로 넓어져 있어 스필이 필요 없다
     const parsed = parseGridCellKey(key);
-    const computed = parsed ? formatComputedValue(computeCellDisplay(parsed.sheetIdx, parsed.row, parsed.col)) : raw;
-    td.textContent = formatNumberForDisplay(computed, style);
+    if (!parsed) return;
+    const { sheetIdx, row, col } = parsed;
+    const sheet = structure.get(String(sheetIdx));
+    if (!sheet) return;
+    const colWidthOf = (c: number) => sheet.colWidths?.[c] ?? DEFAULT_COL_WIDTH_PX;
+    const colCount = renderCountsFor(sheet).cols;
+    const { anchors, covered } = buildMergeLookup(sheetIdx);
+    let width = colWidthOf(col);
+    for (let cc = col + 1; cc < colCount; cc += 1) {
+      if (covered.has(`${row}:${cc}`) || anchors.has(`${row}:${cc}`)) break;
+      if ((cells.get(gridCellKey(sheetIdx, row, cc)) ?? '').trim() !== '') break;
+      width += colWidthOf(cc);
+    }
+    if (width > colWidthOf(col)) span.style.width = `${width}px`;
+  }
+
+  /** key가 가리키는 칸이 바뀌면, 그 칸 자신뿐 아니라 왼쪽에서 그 칸으로 넘쳐 들어오고 있었을 수
+   * 있는 가장 가까운 "값 있는" 칸도 스필 폭을 다시 계산해야 한다(그 칸이 비었다가 채워지면 왼쪽
+   * 칸의 넘침이 줄어들어야 하고, 반대로 비면 다시 늘어나야 한다). */
+  function refreshSpillNeighbor(key: string): void {
+    const parsed = parseGridCellKey(key);
+    if (!parsed) return;
+    const { sheetIdx, row, col } = parsed;
+    const { covered } = buildMergeLookup(sheetIdx);
+    for (let cc = col - 1; cc >= 0; cc -= 1) {
+      if (covered.has(`${row}:${cc}`)) continue;
+      const leftKey = gridCellKey(sheetIdx, row, cc);
+      if ((cells.get(leftKey) ?? '').trim() === '') continue;
+      const leftTd = tdFor(row, cc);
+      if (leftTd && editingKey !== leftKey) renderCellDisplay(leftTd, leftKey);
+      break;
+    }
   }
 
   /** 어떤 셀이든 값이 바뀌면, 그 값을 참조할 수 있는 다른 수식 셀들도 다시 계산해 보여준다
@@ -1852,6 +1908,9 @@ async function main(): Promise<void> {
       renderCellDisplay(td, key);
       applyStyleToTd(td, styles.get(key));
       if (key === activeCellKey && document.activeElement !== formulaInputEl) formulaInputEl.value = value;
+      // 이 칸이 비었다/채워졌다가 바뀌면, 왼쪽에서 이 칸으로 넘쳐 들어오고 있었을 스필 폭도
+      // 다시 계산해야 한다(엑셀처럼 — 옆 칸이 채워지면 넘침이 줄고, 비면 다시 늘어난다).
+      refreshSpillNeighbor(key);
     }
     recalcFormulaCells(); // 바뀐 셀을 참조하는 다른 수식 셀들도 다시 계산
   });

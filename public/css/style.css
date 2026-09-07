@@ -1131,11 +1131,28 @@ h2 {
 .grid-table td {
   border: 1px dotted #9aa0ab;
   padding: 2px 6px;
-  overflow: hidden;
+  /* 실제 엑셀은 오른쪽 이웃 칸이 비어 있으면 내용을 그 위로 넘쳐 보이게 하고, 값이 있는 칸을
+     만나야만 거기서 자른다 — td 자체를 무조건 ellipsis로 잘라버리면 그 "넘침" 표현이 아예
+     불가능해진다. 실제 자르기/넘침은 안의 .g-cell-spill(renderGridViewport가 값이 있을 때만
+     만든다)이 각 칸마다 필요한 폭을 계산해서 처리한다. */
+  overflow: visible;
   white-space: nowrap;
-  text-overflow: ellipsis;
   vertical-align: middle;
   background-clip: padding-box;
+}
+
+/* 값이 있는 칸의 실제 내용은 이 안에 들어간다 — 기본은 자기 칸 폭 그대로(block이 부모 폭을
+   채움) 안에서 잘리지만(overflow:hidden), 오른쪽에 빈 칸이 이어지면 JS가 그만큼의 폭을 인라인
+   style="width:..."로 얹어서 그 칸들 위로 넘쳐 보이게 한다. position+z-index로 뒤(오른쪽,
+   DOM 순서상 나중) td의 배경 위에 그려지게 한다 — 안 주면 나중에 그려지는 그 td가 넘친 글자를
+   덮어버린다. */
+.g-cell-spill {
+  display: block;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+  position: relative;
+  z-index: 1;
 }
 
 .grid-table .g-rownum {
@@ -1355,8 +1372,10 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   outline: none;
   cursor: cell;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* 실제 엑셀처럼 오른쪽 이웃 칸이 비어 있으면 내용이 그 위로 넘쳐 보여야 한다 — td 자체를
+     hidden으로 잘라버리면 그 표현이 불가능하다. 실제 자르기/넘침은 .g-cell-spill(위 .grid-table
+     td와 같은 클래스, applySpillDisplay가 폭을 계산해 인라인 style로 얹는다)이 담당한다. */
+  overflow: visible;
   transition: box-shadow var(--duration-fast) ease;
 }
 /* 셀 마우스 호버 배경도 행/열 머리글을 클릭해 선택했을 때와 같은 회색(#e0e0e0)을 쓴다 —
