@@ -68,7 +68,14 @@ export class DiskStore implements DocumentStore {
   }
 
   async saveOriginal(id: string, ext: string, data: Buffer): Promise<void> {
-    await fs.writeFile(this.originalPath(id, ext), data);
+    // 원자적 쓰기: 같은 디렉터리에 임시 파일로 먼저 쓰고 rename으로 최종 경로에 옮긴다. rename은
+    // 같은 파일시스템 안에서 원자적이라, 이 저장과 동시에 그 파일을 읽는(예: 다운로드 요청이 이
+    // 파일을 unzip) 다른 요청은 항상 "이전의 완전한 파일" 또는 "새로운 완전한 파일"만 보게 되고,
+    // 절대 쓰다 만 반쪽짜리 파일을 보지 않는다.
+    const targetPath = this.originalPath(id, ext);
+    const tempPath = `${targetPath}.tmp-${randomUUID()}`;
+    await fs.writeFile(tempPath, data);
+    await fs.rename(tempPath, targetPath);
   }
 
   async readOriginal(id: string, ext: string): Promise<Buffer> {
