@@ -7,9 +7,9 @@ import { recordAudit } from '../audit.js';
 import { config } from '../config.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
 import { ConversionError, type Converter } from '../converters/types.js';
-import { getPageCountFromBytes, invalidateRenderCache } from '../rendering.js';
+import { getPdfPageInfo, invalidateRenderCache } from '../rendering.js';
 import { issueViewToken } from '../security.js';
-import { parseCsvToGrid, parseXlsxToGrid, serializeGrid, type GridDocument } from '../spreadsheet.js';
+import { parseCsvToGrid, parseXlsxToGrid, saveGridDerived, type GridDocument } from '../spreadsheet.js';
 import { newDocumentId, store } from '../storage.js';
 import type { DocumentMeta } from '../types.js';
 import { invalidateViewCaches } from './viewer.js';
@@ -70,7 +70,7 @@ async function runGridExtraction(app: FastifyInstance, meta: DocumentMeta): Prom
     if (grid.sheets.length === 0) {
       throw new ConversionError('표시할 시트가 없습니다. 파일이 비어 있거나 지원되지 않는 내용입니다.');
     }
-    await store.saveDerived(meta.id, 'grid', serializeGrid(grid));
+    await saveGridDerived(store, meta.id, grid);
     await store.writeMeta({
       ...meta,
       status: 'ready',
@@ -110,7 +110,8 @@ export async function convertToPdf(
     await converter.convert(sourcePath, targetPdfPath, meta.name);
     const pdfBytes = await fs.readFile(targetPdfPath);
     await store.saveDerived(meta.id, 'pdf', pdfBytes);
-    const pageCount = await getPageCountFromBytes(pdfBytes);
+    const { pageCount, sizes } = await getPdfPageInfo(pdfBytes);
+    await store.saveDerived(meta.id, 'pagesizes', Buffer.from(JSON.stringify(sizes)));
     return { pdfBytes, pageCount };
   } finally {
     await fs.rm(workDir, { recursive: true, force: true });
