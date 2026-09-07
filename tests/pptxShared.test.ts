@@ -17,7 +17,9 @@ describe('makeSamplePptx', () => {
     const bytes = makeSamplePptx(['A', 'B']);
     const entries = unzipSync(bytes);
     const presentationXml = strFromU8(entries['ppt/presentation.xml']);
-    const rIds = [...presentationXml.matchAll(/r:id="(rId\d+)"/g)].map((m) => m[1]);
-    expect(rIds).toEqual(['rId2', 'rId3']); // rId1은 slideMaster
+    const sldIdLstMatch = /<p:sldIdLst>([\s\S]*?)<\/p:sldIdLst>/.exec(presentationXml);
+    expect(sldIdLstMatch).not.toBeNull();
+    const rIds = [...sldIdLstMatch![1].matchAll(/r:id="(rId\d+)"/g)].map((m) => m[1]);
+    expect(rIds).toEqual(['rId2', 'rId3']);
   });
 });
