@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import type { DocumentStore } from './storage.js';
 
 /** 그리드 뷰 데이터 모델 — 원본 파일 대신 표시용 값·스타일만 담는다. */
 export interface GridCell {
@@ -87,6 +88,41 @@ export function serializeGrid(grid: GridDocument): Buffer {
     }
   }
   return Buffer.from(parts.join('\n'), 'utf8');
+}
+
+/**
+ * JSONL 버퍼에서 각 줄이 시작하는 바이트 오프셋 배열을 만든다(0번째는 항상 0 = 헤더 시작줄).
+ * src/routes/viewer.ts의 그리드 조회(sliceRows/searchGrid)가 필요한 범위만 파싱할 수 있게
+ * 해주는 인덱스 — 수십만 행이면 이 스캔 자체가 O(파일 크기)라, 그리드를 만드는 시점에 미리
+ * 계산해 saveGridDerived로 함께 저장해 두면 조회 시점에 매번 다시 스캔하지 않아도 된다.
+ */
+export function computeLineOffsets(buffer: Buffer): readonly number[] {
+  const lineOffsets: number[] = [0];
+  for (let i = buffer.indexOf(10); i !== -1; i = buffer.indexOf(10, i + 1)) {
+    lineOffsets.push(i + 1);
+  }
+  return lineOffsets;
+}
+
+/**
+ * 그리드를 JSONL로 직렬화해 저장하고(derived kind 'grid'), 같은 바이트로 만든 줄 오프셋
+ * 인덱스도 함께 저장한다(derived kind 'gridindex'). 업로드 시 최초 추출
+ * (routes/documents.ts의 runGridExtraction)과 동시편집 저장 후 재생성(collab/room.ts)
+ * 양쪽에서 재사용해, 그리드 내용이 바뀔 때마다 인덱스가 항상 최신 상태로 유지되게 한다
+ * (그리드가 바뀌지 않는 한 인덱스도 따로 무효화할 필요가 없다).
+ */
+export async function saveGridDerived(
+  store: Pick<DocumentStore, 'saveDerived'>,
+  docId: string,
+  grid: GridDocument,
+): Promise<void> {
+  const serialized = serializeGrid(grid);
+  await store.saveDerived(docId, 'grid', serialized);
+  await store.saveDerived(
+    docId,
+    'gridindex',
+    Buffer.from(JSON.stringify({ lineOffsets: computeLineOffsets(serialized) })),
+  );
 }
 
 const MAX_ROWS = 300_000;
