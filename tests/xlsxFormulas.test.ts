@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { computeGridCellDisplay, formatComputedValueForStorage } from '../src/xlsx/formulas.js';
 import type { GridDocument } from '../src/spreadsheet.js';
+import { EDIT_SOFT_ROW_LIMIT, EDIT_SOFT_COL_LIMIT } from '../src/collab/gridShared.js';
 
 function makeGrid(rows: Array<Array<{ v: string } | 0>>): GridDocument {
   return {
@@ -54,6 +55,37 @@ describe('xlsx/formulas.ts: computeGridCellDisplay', () => {
   test('MAX (a fast-formula-parser stub overridden in formulaOverrides) works correctly', () => {
     const grid = makeGrid([[{ v: '3' }, { v: '7' }, { v: '=MAX(A1:B1)' }]]);
     expect(computeGridCellDisplay(grid, 0, 0, 2)).toBe(7);
+  });
+
+  test('a range formula whose cell count exceeds EDIT_SOFT_ROW_LIMIT * EDIT_SOFT_COL_LIMIT returns #REF! without iterating the range', () => {
+    // 범위가 (EDIT_SOFT_ROW_LIMIT + 1)행 x EDIT_SOFT_COL_LIMIT열 = 30060칸으로 상한(30000)을
+    // 넘는다. 그리드 자체는 아주 작게(빈 셀 1개) 둬서, 상한 체크가 실제로 범위를 순회하기 전에
+    // 걸린다는 것을 확인한다 — 큰 픽스처를 만들 필요가 없다는 게 핵심.
+    // 엑셀 열 문자는 26진법(A-Z)이라 60번째 열은 한 글자로 안 끝난다(A=1..Z=26, AA=27..BH=60).
+    function colToLetters(n: number): string {
+      let result = '';
+      let x = n;
+      while (x > 0) {
+        const rem = (x - 1) % 26;
+        result = String.fromCharCode(65 + rem) + result;
+        x = Math.floor((x - 1) / 26);
+      }
+      return result;
+    }
+    const lastCol = colToLetters(EDIT_SOFT_COL_LIMIT); // 60번째 열 = "BH"
+    const formula = `=SUM(A1:${lastCol}${EDIT_SOFT_ROW_LIMIT + 1})`;
+    const gridWithFormula = makeGrid([[{ v: formula }]]);
+    expect(computeGridCellDisplay(gridWithFormula, 0, 0, 0)).toBe('#REF!');
+  });
+
+  test('a range formula just under the cap still computes normally (regression guard)', () => {
+    // 50행 x 10열 = 500칸, 상한(30000)에 한참 못 미침 — 정상적으로 계산돼야 한다.
+    const rows: Array<Array<{ v: string } | 0>> = Array.from({ length: 50 }, () =>
+      Array.from({ length: 10 }, () => ({ v: '1' })),
+    );
+    rows.push([{ v: '=SUM(A1:J50)' }]);
+    const grid = makeGrid(rows);
+    expect(computeGridCellDisplay(grid, 0, 50, 0)).toBe(500);
   });
 });
 
