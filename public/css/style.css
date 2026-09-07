@@ -1956,7 +1956,7 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 }
 .conn-status[data-status="disconnected"] { background: rgba(255, 107, 87, 0.18); color: #ff8b76; }
 
-/* Office 365 스타일 "저장 중… / 저장됨" 표시 — 아이콘 두 개를 겹쳐두고 data-status로 하나만 보인다. */
+/* Office 365 스타일 "저장 중… / 저장됨 / 저장 실패" 표시 — 아이콘 세 개를 겹쳐두고 data-status로 하나만 보인다. */
 .save-status {
   display: inline-flex;
   align-items: center;
@@ -1968,6 +1968,8 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 .save-status[data-status="saving"] .save-status-icon-saving { display: block; animation: save-status-spin 0.9s linear infinite; }
 .save-status[data-status="saved"] .save-status-icon-saved { display: block; color: var(--v-accent); }
 .save-status[data-status="saved"] .save-status-text { color: var(--v-accent); }
+.save-status[data-status="error"] .save-status-icon-error { display: block; color: #c0392b; }
+.save-status[data-status="error"] .save-status-text { color: #c0392b; }
 @keyframes save-status-spin { to { transform: rotate(360deg); } }
 
 /* 오피스 365 스타일 겹침 아바타 스택 — 뒤쪽 아바타일수록 왼쪽으로 겹친다 */

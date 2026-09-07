@@ -4,6 +4,7 @@ import FormulaParser, { FormulaError, type CellRef, type RangeRef } from 'fast-f
 import {
   DOC_META_MAP,
   DOC_META_SAVED_AT_KEY,
+  DOC_META_SAVE_ERROR_AT_KEY,
   EDIT_SOFT_COL_LIMIT,
   EDIT_SOFT_ROW_LIMIT,
   GRID_CELLS_MAP,
@@ -259,11 +260,15 @@ async function main(): Promise<void> {
   const saveStatusEl = document.getElementById('save-status') as HTMLElement | null;
   const saveStatusTextEl = saveStatusEl?.querySelector('.save-status-text') as HTMLElement | null;
   let lastKnownSavedAt = docMeta.get(DOC_META_SAVED_AT_KEY) ?? 0;
-  function setSaveStatus(status: 'saving' | 'saved'): void {
+  let lastKnownSaveErrorAt = docMeta.get(DOC_META_SAVE_ERROR_AT_KEY) ?? 0;
+  function setSaveStatus(status: 'saving' | 'saved' | 'error'): void {
     if (!saveStatusEl) return;
     saveStatusEl.hidden = false;
     saveStatusEl.dataset.status = status;
-    if (saveStatusTextEl) saveStatusTextEl.textContent = status === 'saving' ? '저장 중…' : '모든 변경 내용이 저장됨';
+    if (saveStatusTextEl) {
+      saveStatusTextEl.textContent =
+        status === 'saving' ? '저장 중…' : status === 'saved' ? '모든 변경 내용이 저장됨' : '저장 실패 — 편집을 계속하면 다시 시도합니다';
+    }
   }
   if (canEdit) {
     ydoc.on('afterTransaction', (tx) => {
@@ -271,9 +276,15 @@ async function main(): Promise<void> {
       setSaveStatus('saving');
     });
   }
+  // saveErrorAt이 savedAt보다 최신이면 아직 실패가 해소되지 않은 것 — 서버가 다음 저장에
+  // 성공해 savedAt이 다시 앞서는 순간 별도 정리 없이도 자연스럽게 실패 표시가 사라진다.
   docMeta.observe(() => {
     const savedAt = docMeta.get(DOC_META_SAVED_AT_KEY) ?? 0;
-    if (savedAt > lastKnownSavedAt) {
+    const saveErrorAt = docMeta.get(DOC_META_SAVE_ERROR_AT_KEY) ?? 0;
+    if (saveErrorAt > savedAt && saveErrorAt > lastKnownSaveErrorAt) {
+      lastKnownSaveErrorAt = saveErrorAt;
+      setSaveStatus('error');
+    } else if (savedAt > lastKnownSavedAt) {
       lastKnownSavedAt = savedAt;
       setSaveStatus('saved');
     }

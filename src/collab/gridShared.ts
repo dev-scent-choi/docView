@@ -18,6 +18,13 @@ export const GRID_STRUCTURE_MAP = 'structure';
 export const DOC_META_MAP = 'docMeta';
 export const DOC_META_SAVED_AT_KEY = 'savedAt';
 /**
+ * flushToStore가 저장에 실패했을 때(디스크 쓰기 예외, 내보내기 실패 등) 그 실패 시각(epoch ms)을
+ * 기록하는 키. savedAt과 같은 맵에 두고, 클라이언트는 이 값이 savedAt보다 최신이면 "저장 실패"
+ * 상태로 본다 — 별도 정리(clear) 없이도 다음 저장이 성공해 savedAt이 이 값을 앞지르는 순간
+ * 자연스럽게 실패 표시가 사라진다. 이 값이 없으면(구버전 세션 등) 실패한 적 없는 것으로 본다.
+ */
+export const DOC_META_SAVE_ERROR_AT_KEY = 'saveErrorAt';
+/**
  * 시딩 시점의 셀 값을 그대로 담아두는 불변 스냅샷 — 클라이언트는 절대 쓰지 않는다.
  * 수식 셀은 계산된 결괏값 문자열로 시딩되는데, 저장 시 `cells`에 있는 모든 키를 원본에
  * 그대로 쓰면 사용자가 손대지 않은 수식까지 정적 값으로 덮어써 버린다. `cells`와 이 값을

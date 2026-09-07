@@ -34,7 +34,7 @@ import { parseXlsxToGrid, serializeGrid } from '../spreadsheet.js';
 import { exportXlsxFromGrid, reparseGridForViewer, seedGridFromXlsx } from '../xlsx/collab.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
-import { DOC_META_MAP, DOC_META_SAVED_AT_KEY } from './gridShared.js';
+import { DOC_META_MAP, DOC_META_SAVED_AT_KEY, DOC_META_SAVE_ERROR_AT_KEY } from './gridShared.js';
 import { runSerialized } from './saveSerializer.js';
 
 /**
@@ -250,9 +250,24 @@ async function flushToStore(room: Room): Promise<void> {
 /**
  * 유휴 자동저장 타이머 / Ctrl+S 즉시저장 / 마지막 참여자 퇴장, 이 세 지점이 같은 문서를 저장할 때
  * 서로 겹치지 않도록 docId별로 한 줄로 세운다 — saveSerializer.ts 참고.
+ *
+ * flushToStore가 실패하면(예: pptx가 슬라이드를 전부 지워 내보낼 기준 레이아웃이 없는 경우처럼
+ * 구조적으로 되풀이 실패하는 상태) 그동안은 서버 콘솔에만 로그를 남기고 클라이언트에는 아무
+ * 신호도 가지 않아, "저장 중…" 표시가 영원히 멈춰 있는 것처럼 보였다 — 실패 시각을 docMeta에
+ * 기록해 다른 성공 신호(savedAt)와 같은 방식으로 모든 참여자 화면에 실시간 전파한다.
  */
 function queueFlush(room: Room): Promise<void> {
-  return runSerialized(room.docId, () => flushToStore(room));
+  return runSerialized(room.docId, () =>
+    flushToStore(room).catch((error: unknown) => {
+      room.suppressAutosaveReschedule = true;
+      try {
+        room.ydoc.getMap<number>(DOC_META_MAP).set(DOC_META_SAVE_ERROR_AT_KEY, Date.now());
+      } finally {
+        room.suppressAutosaveReschedule = false;
+      }
+      throw error;
+    }),
+  );
 }
 
 /**
