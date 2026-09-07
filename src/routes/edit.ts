@@ -67,7 +67,7 @@ export async function editRoutes(app: FastifyInstance): Promise<void> {
       // 으로 true인 토큰이 이 방에 잘못 들어오면 collab/room.ts가 문서를 docx로 오인해 원본을
       // 깨뜨릴 수 있어(seedRoom/flushToStore가 ext를 보지 않고 xlsx가 아니면 전부 docx로 취급) canEdit
       // 값과 무관하게 여기서 먼저 확실히 거부한다.
-      if (meta.ext !== 'docx' && meta.ext !== 'xlsx') {
+      if (meta.ext !== 'docx' && meta.ext !== 'xlsx' && meta.ext !== 'pptx') {
         socket.off('message', queueEarly);
         socket.close(4400, '이 문서 형식은 동시편집을 지원하지 않습니다.');
         return;

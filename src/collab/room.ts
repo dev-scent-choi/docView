@@ -31,6 +31,8 @@ import { invalidateViewCaches } from '../routes/viewer.js';
 import { store } from '../storage.js';
 import { parseXlsxToGrid, serializeGrid } from '../spreadsheet.js';
 import { exportXlsxFromGrid, reparseGridForViewer, seedGridFromXlsx } from '../xlsx/collab.js';
+import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
+import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
 import { DOC_META_MAP, DOC_META_SAVED_AT_KEY } from './gridShared.js';
 
 /**
@@ -55,10 +57,12 @@ const AUTOSAVE_IDLE_MS = 8_000;
 const PING_INTERVAL_MS = 30_000;
 
 /** 룸이 다루는 문서 종류 — 시딩·저장 로직만 갈라지고 Yjs 동기화 프로토콜 자체는 공통이다. */
-type DocKind = 'docx' | 'xlsx';
+type DocKind = 'docx' | 'xlsx' | 'pptx';
 
 function kindOfExt(ext: string): DocKind {
-  return ext === 'xlsx' ? 'xlsx' : 'docx';
+  if (ext === 'xlsx') return 'xlsx';
+  if (ext === 'pptx') return 'pptx';
+  return 'docx';
 }
 
 interface Room {
@@ -107,6 +111,8 @@ async function seedRoom(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<void
     if (kind === 'xlsx') {
       const grid = await parseXlsxToGrid(original);
       seedGridFromXlsx(ydoc, grid);
+    } else if (kind === 'pptx') {
+      seedSlidesFromPptx(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
     } else {
       const { doc } = importDocx(original);
       prosemirrorToYXmlFragment(doc, ydoc.getXmlFragment(XML_FRAGMENT_NAME));
@@ -140,6 +146,20 @@ async function flushToStore(docId: string, kind: DocKind, ydoc: Y.Doc): Promise<
       });
     } catch (error) {
       console.error(`동시편집 저장 후 그리드 재생성 실패 (문서 ${docId}):`, error);
+    }
+  } else if (kind === 'pptx') {
+    const original = await store.readOriginal(docId, meta.ext);
+    const newPptxBytes = exportPptxFromSlides(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
+    await store.saveOriginal(docId, meta.ext, Buffer.from(newPptxBytes));
+
+    const converter = findConverter(meta.ext);
+    if (converter) {
+      try {
+        const { pageCount } = await convertToPdf(meta, converter);
+        await store.writeMeta({ ...meta, pageCount, status: 'ready', viewKind: 'pages', progress: 100 });
+      } catch (error) {
+        console.error(`동시편집 저장 후 PDF 재변환 실패 (문서 ${docId}):`, error);
+      }
     }
   } else {
     const fragment = ydoc.getXmlFragment(XML_FRAGMENT_NAME);
@@ -199,6 +219,9 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
   const original = await store.readOriginal(docId, meta.ext);
   if (room.kind === 'xlsx') {
     return exportXlsxFromGrid(original, room.ydoc);
+  }
+  if (room.kind === 'pptx') {
+    return exportPptxFromSlides(original, room.ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
   }
   const fragment = room.ydoc.getXmlFragment(XML_FRAGMENT_NAME);
   const pmDoc = yXmlFragmentToProseMirrorRootNode(fragment, docxSchema);

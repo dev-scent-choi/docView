@@ -42,11 +42,13 @@ const PROGRESS_PDF_DONE = 85;
 /** 그리드 뷰로 여는 스프레드시트 확장자 (PDF는 출력 시점에 지연 생성) */
 const GRID_VIEW_EXTS = new Set(['xlsx', 'csv']);
 
-/** 실시간 동시편집(에디터)을 지원하는 확장자 — docx는 문서 편집기, xlsx는 그리드 편집기로 연결된다 */
-const EDITABLE_EXTS = new Set(['docx', 'xlsx']);
-
-function editorPathFor(ext: string): string {
-  return ext === 'xlsx' ? '/editor-grid.html' : '/editor.html';
+/** 실시간 동시편집(에디터)을 지원하는 확장자 — docx는 문서 편집기, xlsx는 그리드 편집기,
+ * pptx는 슬라이드 구성 편집기로 연결된다 */
+export const EDITABLE_EXTS = new Set(['docx', 'xlsx', 'pptx']);
+export function editorPathFor(ext: string): string {
+  if (ext === 'xlsx') return '/editor-grid.html';
+  if (ext === 'pptx') return '/editor-slides.html';
+  return '/editor.html';
 }
 
 async function buildGrid(meta: DocumentMeta): Promise<GridDocument> {
