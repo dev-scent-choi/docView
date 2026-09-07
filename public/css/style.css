@@ -279,6 +279,10 @@ h2 {
   border: 1px dashed var(--color-line);
   border-radius: var(--radius-lg);
 }
+/* [hidden]과 .empty가 특이도가 같아 author 규칙(.empty)이 나중에 선언돼 항상 이긴다 —
+   그 결과 JS가 hidden을 켜도(el.hidden = true) 화면엔 계속 그리드로 남아 있었다.
+   더 구체적인 선택자로 [hidden]일 때만 확실히 감춘다. */
+.empty[hidden] { display: none; }
 .empty svg { width: 28px; height: 28px; opacity: 0.5; }
 
 /* ---------- 뷰어: 브라우저 기본 PDF 뷰어(Edge/Chrome) 톤 — 옅은 회색 캔버스 위에 흰 종이 ---------- */
