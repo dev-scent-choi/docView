@@ -1,6 +1,5 @@
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
-import FormulaParser, { FormulaError, type CellRef, type RangeRef } from 'fast-formula-parser';
 import {
   DOC_META_MAP,
   DOC_META_SAVED_AT_KEY,
@@ -8,6 +7,7 @@ import {
   EDIT_SOFT_COL_LIMIT,
   EDIT_SOFT_ROW_LIMIT,
   GRID_CELLS_MAP,
+  GRID_COMPUTED_MAP,
   GRID_MERGES_MAP,
   GRID_STRUCTURE_MAP,
   GRID_STYLES_MAP,
@@ -17,7 +17,6 @@ import {
   type GridMergeShape,
   type SheetStructure,
 } from '../collab/gridShared.js';
-import { formulaFunctions, formulaFunctionsNeedContext } from './formulaOverrides.js';
 import { dedupeByName, pickPresenceColorForName, renderPresenceAvatars, type AwarenessUserState } from './presence.js';
 
 interface Permissions {
@@ -199,6 +198,7 @@ async function main(): Promise<void> {
 
   const ydoc = new Y.Doc();
   const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
+  const computed = ydoc.getMap<string>(GRID_COMPUTED_MAP);
   const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
   const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
   const merges = ydoc.getMap<readonly GridMergeShape[]>(GRID_MERGES_MAP);
@@ -338,50 +338,19 @@ async function main(): Promise<void> {
   let selFocusCol = 0;
   let isRangeDragging = false;
 
-  // ---------- 수식 계산 엔진: '='로 시작하는 셀은 실시간으로 계산 결과를 보여준다 ----------
-  // fast-formula-parser(MIT)를 쓴다 — 자체 수식 파서/계산기를 새로 만들면 SUM/IF/VLOOKUP/범위
-  // 참조까지 정확히 구현하기엔 너무 크고 위험한 작업이라, 검증된 라이브러리에 셀 조회만 연결한다.
-  // 이 라이브러리는 VLOOKUP/HLOOKUP/INDEX는 실제로 구현돼 있지만, MAX/MIN/MATCH/CHOOSE/SWITCH/
-  // SUMIFS/AVERAGEIFS를 포함한 일부는 내부적으로 본문이 빈 스텁이라(소스 직접 확인) 자주 쓰는
-  // 것들만 formulaOverrides.ts에서 직접 구현해 덮어썼다. LARGE/SMALL/MEDIAN/TEXTJOIN 등 나머지
-  // 스텁 함수는 v1 스코프 밖으로 남겨둔다.
-  const evalGuard = new Set<string>();
-  // 이 라이브러리는 셀/범위 좌표를 1-based로 주고받는다 — 우리 내부 스킴(0-based)과 여기서만 변환한다.
-  const formulaParser = new FormulaParser({
-    functions: formulaFunctions,
-    functionsNeedContext: formulaFunctionsNeedContext,
-    onCell: (ref: CellRef) => computeCellDisplay(activeSheet, ref.row - 1, ref.col - 1),
-    onRange: (ref: RangeRef) => {
-      const rows: unknown[][] = [];
-      for (let r = ref.from.row; r <= ref.to.row; r += 1) {
-        const row: unknown[] = [];
-        for (let c = ref.from.col; c <= ref.to.col; c += 1) row.push(computeCellDisplay(activeSheet, r - 1, c - 1));
-        rows.push(row);
-      }
-      return rows;
-    },
-  });
-
-  /** 셀 하나의 "표시용" 값을 계산한다 — 수식이면 계산 결과(에러면 FormulaError.name, 예: #DIV/0!),
-   * 아니면 원본 텍스트. 다른 수식이 이 값을 참조할 때는 계산 실패를 빈 값으로 흡수해 전체가
-   * 깨지지 않게 한다(예: SUM 범위 안에 에러 셀이 하나 있어도 나머지는 정상 합산). */
+  /** 셀의 표시용 값을 얻는다 — 수식 셀이면 서버가 계산해 둔 값(computed 맵)을, 아니면 원본
+   * 텍스트(cells 맵)를 그대로 쓴다. 클라이언트는 더 이상 수식을 직접 계산하지 않는다(서버가
+   * canonical 전체 데이터 기준으로 계산해야 화면 밖 참조도 정확하기 때문 — 설계 문서의 핵심
+   * 결정 참고). */
   function computeCellDisplay(sheetIdx: number, row: number, col: number): unknown {
     const key = gridCellKey(sheetIdx, row, col);
+    const computedValue = computed.get(key);
+    if (computedValue !== undefined) return computedValue;
     const raw = cells.get(key) ?? '';
-    if (!raw.startsWith('=')) {
-      if (raw.trim() === '') return '';
-      const num = Number(raw);
-      return Number.isFinite(num) ? num : raw;
-    }
-    if (evalGuard.has(key)) return FormulaError.REF.name; // 순환 참조
-    evalGuard.add(key);
-    try {
-      return formulaParser.parse(raw.slice(1), { row: row + 1, col: col + 1, sheet: 'Sheet1' });
-    } catch (error) {
-      return error instanceof FormulaError ? error.name : '#ERROR!';
-    } finally {
-      evalGuard.delete(key);
-    }
+    if (raw.startsWith('=')) return ''; // 서버 계산이 아직 도착 전(그 페이지가 막 로드된 직후) — 잠시 빈 값
+    if (raw.trim() === '') return '';
+    const num = Number(raw);
+    return Number.isFinite(num) ? num : raw;
   }
 
   function formatComputedValue(value: unknown): string {
