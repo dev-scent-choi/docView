@@ -1080,17 +1080,37 @@ async function main(): Promise<void> {
   }
 
   /** 전체 행만큼 <tr>을 만들던 예전 renderTable()을 대체한다 — 시트가 아무리 커도 실제 DOM에는
-   * "지금 보이는 범위 + 여유분(OVERSCAN_ROWS)"만큼의 행만 만든다. 스크롤 가능한 전체 높이는
-   * tbody에 직접 준 height로 확보해 두고(뷰어의 translateY 트릭과 같은 원리), 그 안에서 실제로
-   * 그려지는 행만 position:absolute + top으로 제자리에 놓는다. 틀 고정된 위쪽 행(freezeRows)만은
-   * 예외로, 스크롤 위치와 무관하게 항상 정상 흐름(position:relative)으로 그려서 계속 보이게 하고
-   * (applyFreezePanes가 그 안의 셀들을 다시 position:sticky로 만든다), 그 외의 열/셀 생성·이벤트
-   * 바인딩 로직은 예전 renderTable과 완전히 동일하다. */
+   * "지금 보이는 범위 + 여유분(OVERSCAN_ROWS)"만큼의 행만 만든다.
+   *
+   * (이전 시도였던 position:absolute + top 방식은 실제 브라우저에서 깨진다는 게 리뷰에서 밝혀졌다
+   * — position:absolute인 <tr>은 계산된 display가 표준상 block으로 바뀌어 그 자손 <td>가 표의 열
+   * 그리드(<colgroup>/table-layout:fixed)에서 완전히 떨어져 나가고, 브라우저가 그 <td>들을 별도의
+   * 익명 미니 테이블로 감싸 table-layout:auto로 재배치한다 — 그 안의 인라인 width는 "힌트"일 뿐
+   * 강제되지 않아, 실제 데이터가 있는 마지막 열이 내용 크기 기준으로 크게 부풀고 그 뒤 열들이
+   * 화면 밖으로 밀려났다. 셀마다 인라인 width를 주는 우회책은 근본 원인을 가리지 못했다.)
+   *
+   * 지금 방식(스페이서 행): 보이는 행(<tr>)은 전부 정상 흐름(position 지정 없음)으로 그려서
+   * <colgroup>/table-layout:fixed 열 정렬을 그대로 받는다(틀 고정 행이 이미 하던 방식과 동일).
+   * 화면에 없는 위/아래 구간은 실제 <tr>을 만드는 대신, 그 구간 전체 높이(안 그린 행 수 ×
+   * ROW_HEIGHT_PX)를 가진 "스페이서" <tr> 하나씩으로 대신한다(buildSpacerRow). 그러면 표의 자연스러운
+   * 문서 흐름만으로 전체 스크롤 높이(틀 고정 행 + 위 스페이서 + 보이는 행 + 아래 스페이서 =
+   * 전체 시트 높이)가 정확히 나오고, 보이는 행들은 정상 흐름 안에서 실제로 그렸을 때와 똑같은
+   * 자리에 놓인다 — 수동으로 top을 계산해 줄 필요가 없다. */
   function renderTableVirtualized(): void {
     renderGeneration += 1;
     // 다시 그리면 이전 <td>들은 전부 버려지므로, 그 순간 실제로 "편집 중"이던 칸도 이제 없다 —
     // blur가 안전하게 안 오는 경우에도(과거 stale-blur 버그) 여기서 확실히 리셋해 둔다.
     editingKey = null;
+    // tableEl.replaceChildren()으로 표 내용을 통째로 비우면 그 순간 스크롤 가능한 실제 높이가
+    // (다시 채우기 전까지) 뷰포트 높이 수준으로 줄어들어, 브라우저가 scrollHostEl.scrollTop을
+    // 그 시점의 최댓값(사실상 0)으로 즉시 clamp해 버린다 — 실측 확인됨(Playwright로
+    // replaceChildren() 전/후 scrollTop을 직접 비교: 67500 → 0, 표를 되돌려도 0에 머묾). 표를
+    // 비우기 "전에" 지금 스크롤 위치를 미리 읽어 둬야, 아래에서 이 값으로 가상 스크롤 범위를
+    // 계산할 때 방금 clamp된 값이 아니라 실제 스크롤 위치를 쓰게 된다 — 그렇지 않으면 스크롤이
+    // 일어날 때마다(이 함수가 스크롤 리스너에서 다시 불릴 때마다) 화면이 맨 위로 튕겨 돌아가
+    // 사실상 스크롤이 전혀 안 되는 것처럼 보인다.
+    const scrollTopSnapshot = scrollHostEl.scrollTop;
+    const viewportHeightSnapshot = scrollHostEl.clientHeight;
     const sheet = structure.get(String(activeSheet));
     tableEl.replaceChildren();
     if (!sheet) return;
@@ -1108,13 +1128,9 @@ async function main(): Promise<void> {
     // 엑셀 열이 아니라 에디터가 그리는 것이라 colWidths에 대응하는 값이 없다.
     const colgroup = document.createElement('colgroup');
     colgroup.appendChild(document.createElement('col'));
-    // 가상 스크롤로 그려지는(position:absolute) 행의 <td>는 <colgroup>의 영향을 받지 못한다(아래
-    // buildRow 주석 참고) — 그 행의 셀에 직접 지정할 열 너비를 여기서 같이 기록해 둔다.
-    const colWidthsPx: number[] = [];
     let totalColWidthPx = ROWNUM_COL_WIDTH_PX;
     for (let c = 0; c < renderColCount; c += 1) {
       const width = sheet.colWidths?.[c] ?? DEFAULT_COL_WIDTH_PX;
-      colWidthsPx.push(width);
       const col = document.createElement('col');
       col.style.width = `${width}px`;
       colgroup.appendChild(col);
@@ -1154,8 +1170,10 @@ async function main(): Promise<void> {
     tableEl.appendChild(thead);
 
     // ---------- 가상 스크롤 범위 계산 ----------
-    const scrollTop = scrollHostEl.scrollTop;
-    const viewportHeight = scrollHostEl.clientHeight;
+    // (함수 맨 위에서 표를 비우기 전에 미리 읽어 둔 스냅샷을 쓴다 — 지금 다시 읽으면 방금
+    // replaceChildren()이 clamp한 값(0)이 나온다.)
+    const scrollTop = scrollTopSnapshot;
+    const viewportHeight = viewportHeightSnapshot;
     const firstVisible = Math.max(freezeRows, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN_ROWS);
     const lastVisible = Math.min(
       renderRowCount - 1,
@@ -1163,38 +1181,44 @@ async function main(): Promise<void> {
     );
 
     const tbody = document.createElement('tbody');
-    // <tbody>를 위치 기준(포함 블록)으로 삼아, 그 안의 position:absolute 행들의 top이 "표 안에서
-    // 이 행이 있어야 할 실제 위치"를 그대로 가리키게 한다(틀 고정 행이 정상 흐름으로 차지하는
-    // 높이만큼 자동으로 그 아래에 이어진다 — 별도로 헤더/틀고정 높이를 더할 필요가 없다).
-    tbody.style.position = 'relative';
-    tbody.style.height = `${renderRowCount * ROW_HEIGHT_PX}px`;
 
-    /** 행 하나(<tr>)를 만든다 — 셀 생성·서식·이벤트 바인딩은 예전 renderTable과 동일하다.
-     * isVirtualized(가상 스크롤로 배치되는 행)면 (1) position:absolute + top으로 스크롤 위치와
-     * 무관하게 제자리에 놓고, (2) <colgroup>이 더 이상 적용되지 않으므로(position:absolute인
-     * <tr>은 계산된 display가 표준상 block으로 바뀌어 그 자손 <td>가 표의 열 그리드에서 떨어져
-     * 나간다 — 실측 확인된 동작) 각 셀에 열 너비를 직접 인라인으로 지정해 틀고정 행과 정확히 같은
-     * 자리에 맞춘다. */
-    const buildRow = (r: number, isVirtualized: boolean): HTMLTableRowElement => {
+    /** 스크롤 범위 밖이라 실제로 그리지 않는 구간(위/아래) 전체를 대신 차지하는 "안 보이는" <tr>
+     * 하나. 진짜 데이터 행이 하나도 없으니 렌더 비용은 사실상 없고, 정상 흐름의 <tr>이라 표의
+     * 전체 스크롤 높이에 이 구간만큼을 정확히 더해 준다. rowCount<=0(그릴 게 없는 구간, 예: 이미
+     * 맨 위/맨 아래까지 다 보이는 경우)이면 아예 만들지 않는다. */
+    const buildSpacerRow = (rowCount: number): HTMLTableRowElement | null => {
+      if (rowCount <= 0) return null;
+      const heightPx = `${rowCount * ROW_HEIGHT_PX}px`;
+      const tr = document.createElement('tr');
+      tr.setAttribute('aria-hidden', 'true');
+      tr.style.height = heightPx;
+      const td = document.createElement('td');
+      td.colSpan = renderColCount + 1; // 행번호 열까지 포함해 표 전체 폭을 덮는다
+      // .grid-edit-table th/td에 공통으로 걸린 height:1.7rem(고정 행 높이용)을 인라인 스타일로
+      // 덮어써야 스페이서가 의도한 실제 높이(수천 px일 수 있음)로 그려진다 — 인라인 스타일이
+      // 클래스 규칙보다 항상 이긴다.
+      td.style.height = heightPx;
+      td.style.padding = '0';
+      td.style.border = 'none';
+      tr.appendChild(td);
+      return tr;
+    };
+
+    /** 행 하나(<tr>)를 만든다 — 셀 생성·서식·이벤트 바인딩은 예전 renderTable과 동일하다. 이제는
+     * 틀 고정 행이든 스크롤 윈도우 안의 행이든 항상 정상 흐름(<colgroup>이 적용되는 진짜 표 행)으로
+     * 그린다 — 화면에 없는 구간은 이 함수가 아니라 buildSpacerRow가 대신 높이를 차지한다. */
+    const buildRow = (r: number): HTMLTableRowElement => {
       const tr = document.createElement('tr');
       // Chromium은 서로 다른 <tr> 소속인 position:sticky 셀들 사이의 z-index 비교를 신뢰할 수 없게
       // 처리한다(고정된 행의 배경보다 스크롤된 다른 행의 셀이 위로 그려지는 버그) — 각 행을
       // position+z-index로 그 자체의 스태킹 컨텍스트로 격리하면, 셀별 z-index는 그 행 안에서만
       // 비교되고 행 간 우열은 이 tr의 z-index로만 결정되어 늘 정확하다.
-      if (isVirtualized) {
-        tr.style.position = 'absolute';
-        tr.style.top = `${r * ROW_HEIGHT_PX}px`;
-        tr.style.left = '0';
-        tr.style.right = '0';
-      } else {
-        tr.style.position = 'relative';
-      }
+      tr.style.position = 'relative';
       tr.style.zIndex = r < freezeRows ? '2' : '1';
       const rowHead = document.createElement('th');
       rowHead.className = 'g-edit-rownum';
       rowHead.textContent = String(r + 1);
       rowHead.dataset.row = String(r);
-      if (isVirtualized) rowHead.style.width = `${ROWNUM_COL_WIDTH_PX}px`;
       rowHead.addEventListener('click', () => selectRow(r));
       if (canEdit) {
         rowHead.addEventListener('contextmenu', (event) => {
@@ -1211,14 +1235,6 @@ async function main(): Promise<void> {
         if (span) {
           if (span.rs > 1) td.rowSpan = span.rs;
           if (span.cs > 1) td.colSpan = span.cs;
-        }
-        if (isVirtualized) {
-          // 병합 셀은 여러 열을 한 번에 차지하므로, 걸치는 열들의 너비를 모두 합산해야 정상 흐름
-          // 행의 같은 칸과 폭이 일치한다.
-          const cs = span?.cs ?? 1;
-          let width = 0;
-          for (let cc = c; cc < c + cs && cc < renderColCount; cc += 1) width += colWidthsPx[cc];
-          td.style.width = `${width}px`;
         }
         const isLocked = styles.get(key)?.lk === 1;
         const canEditThisCell = !isLocked && canEdit;
@@ -1347,11 +1363,22 @@ async function main(): Promise<void> {
       return tr;
     };
 
-    // 틀 고정된 위쪽 행은 항상 정상 흐름으로(스크롤 위치와 무관하게 계속 보이도록), 나머지는
-    // 지금 화면에 보이는 범위(+여유분)만 가상 스크롤 배치로 그린다.
-    for (let r = 0; r < freezeRows; r += 1) tbody.appendChild(buildRow(r, false));
-    for (let r = Math.max(firstVisible, freezeRows); r <= lastVisible; r += 1) tbody.appendChild(buildRow(r, true));
+    // 틀 고정된 위쪽 행은 항상 정상 흐름으로(스크롤 위치와 무관하게 계속 보이도록) 그린다. 그
+    // 아래, 화면 밖(위쪽)에 있는 안 그리는 구간은 스페이서 행 하나로 대신하고, 실제로 보이는
+    // 범위(+여유분)만 진짜 행으로 그린 뒤, 화면 밖(아래쪽) 나머지 구간도 스페이서 행 하나로
+    // 마무리한다. firstVisible은 이미 freezeRows 이상으로 보정돼 있다.
+    for (let r = 0; r < freezeRows; r += 1) tbody.appendChild(buildRow(r));
+    const topSpacer = buildSpacerRow(firstVisible - freezeRows);
+    if (topSpacer) tbody.appendChild(topSpacer);
+    for (let r = firstVisible; r <= lastVisible; r += 1) tbody.appendChild(buildRow(r));
+    const bottomSpacer = buildSpacerRow(renderRowCount - 1 - lastVisible);
+    if (bottomSpacer) tbody.appendChild(bottomSpacer);
     tableEl.appendChild(tbody);
+    // 표 내용이 다시 채워져 스크롤 가능한 실제 높이가 복구된 지금(스페이서 행 포함), 함수 맨 위의
+    // clamp(스크롤 위치가 0으로 튕겨나간 것)를 되돌린다 — 이 시점 이후로는 (스페이서 덕분에) 그
+    // 위치가 실제로 유효한 범위 안이라 clamp되지 않고 그대로 반영된다. 이미 같은 값이면 실제
+    // 스크롤 이벤트가 다시 발생하지 않도록(불필요한 재렌더 방지) 값이 다를 때만 대입한다.
+    if (scrollHostEl.scrollTop !== scrollTopSnapshot) scrollHostEl.scrollTop = scrollTopSnapshot;
     applyFreezePanes(freezeRows, freezeCols);
     renderRemoteCellHighlights();
     if (activeCellKey) {
