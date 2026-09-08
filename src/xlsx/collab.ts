@@ -349,6 +349,89 @@ export async function seedGridStylesFromXlsx(ydoc: Y.Doc, grid: GridDocument): P
 }
 
 /**
+ * 행/열 삽입·삭제가 만드는 Yjs 트랜잭션에 붙이는 origin 표식.
+ *
+ * GRID_WINDOW_SEED_ORIGIN과 같은 취지("서버 자신이 쓴 것이니 관찰자가 사용자 편집으로 오해하면
+ * 안 된다")지만 **자동저장 면제 대상은 아니다** — 창을 채우고 비우는 것과 달리 행/열 삽입은
+ * canonicalGrid를 실제로 바꾸므로 반드시 저장돼야 한다. 그래서 isAutosaveExemptOrigin에는 넣지
+ * 않고, room.ts의 관찰자들만 이 표식을 보고 canonical 되반영을 건너뛴다(canonical은 이미
+ * gridShift.ts가 직접 옮겨 놓은 상태라, 관찰자가 또 반영하면 같은 이동이 두 번 적용된다).
+ */
+export const GRID_STRUCTURE_SHIFT_ORIGIN = 'structure-shift';
+
+/**
+ * 행/열 삽입·삭제에 맞춰 **Yjs 서식 맵(GRID_STYLES_MAP)의 키를 다시 매긴다.**
+ *
+ * 왜 이것만 따로 필요한가: 셀 값(cells/baseline/computed)은 구독 페이지를 통째로 비우고
+ * canonical에서 다시 채우면 되지만(room.ts의 페이지 재시딩), **서식 맵은 윈도잉 대상이 아니라**
+ * 룸을 열 때 워크북 전량이 한 번 채워지고 그 뒤 어떤 unseed 경로에서도 지워지지 않는다
+ * (seedGridStylesFromXlsx 주석). 그래서 페이지 재시딩만으로는 서식 키가 옛 좌표에 그대로 남아
+ * 값과 서식이 한 칸씩 어긋난다("굵게가 엉뚱한 행에 남는" 증상).
+ *
+ * canonical에서 다시 만드는 대신 **기존 키를 옮기는** 이유는 비용이다: 서식 맵은 값이 있는
+ * 칸보다도 희소해서(대개 머리글·합계 줄) 옮길 항목 수가 곧 이 연산의 크기다 — 시트 전체
+ * (최대 30만 행)를 훑는 것보다 훨씬 싸다. 그래도 항목 수 자체가 클 수 있으므로 청크마다 실제로
+ * 이벤트 루프에 양보한다.
+ *
+ * 좌표가 상한(rowLimit/colLimit) 밖으로 밀려나는 항목은 그냥 버린다 — 그 자리는 canonical도,
+ * 저장될 파일도 표현할 수 없는 영역이다.
+ *
+ * GRID_STYLES_BASELINE_MAP은 **일부러 건드리지 않는다**: 저장 기준선은 Task 3 이후
+ * room.baselineGrid이고 이 맵을 읽는 코드는 서버·클라이언트 어디에도 남아 있지 않다(계획의
+ * "죽은 baseline/stylesBaseline 맵" 정리 항목).
+ */
+export async function shiftGridStyleKeys(
+  ydoc: Y.Doc,
+  sheetIdx: number,
+  axis: 'row' | 'col',
+  at: number,
+  count: number,
+  insert: boolean,
+  rowLimit: number,
+  colLimit: number,
+): Promise<void> {
+  const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
+  const limit = axis === 'row' ? rowLimit : colLimit;
+
+  // 1) 먼저 **전체 스냅샷**을 뜬다 — 옮기는 도중에 맵을 읽으면 이미 옮겨 놓은 항목을 다시 원본으로
+  //    보게 되어(목적지가 다른 항목의 원본이 되는 연쇄) 값이 복제되거나 사라진다.
+  const staleKeys: string[] = [];
+  const writes: Array<{ key: string; attrs: CellStyleAttrs }> = [];
+  for (const [key, attrs] of styles.entries()) {
+    const parsed = parseGridCellKey(key);
+    if (!parsed || parsed.sheetIdx !== sheetIdx) continue;
+    const index = axis === 'row' ? parsed.row : parsed.col;
+    if (index < at) continue; // 삽입/삭제 지점 앞은 움직이지 않는다 — 키를 그대로 둔다
+    staleKeys.push(key);
+    if (!insert && index < at + count) continue; // 삭제된 행/열의 서식 — 목적지가 없다
+    const moved = insert ? index + count : index - count;
+    if (moved >= limit) continue; // 상한 밖으로 밀려난 서식은 버린다
+    const nextKey =
+      axis === 'row' ? gridCellKey(sheetIdx, moved, parsed.col) : gridCellKey(sheetIdx, parsed.row, moved);
+    writes.push({ key: nextKey, attrs });
+  }
+  if (staleKeys.length === 0 && writes.length === 0) return;
+
+  // 2) 옛 자리를 먼저 전부 비우고 나서 새 자리를 쓴다 — 순서를 섞으면 아직 안 옮긴 항목의 원본을
+  //    새로 쓴 값이 덮어쓸 수 있다. 옮기지 않는 항목(index < at)은 애초에 목적지 범위와 겹치지
+  //    않으므로 이 통째 재작성에 영향을 받지 않는다.
+  for (let start = 0; start < staleKeys.length; start += YIELD_EVERY_N_ROWS) {
+    const end = Math.min(start + YIELD_EVERY_N_ROWS, staleKeys.length);
+    ydoc.transact(() => {
+      for (let i = start; i < end; i += 1) styles.delete(staleKeys[i]);
+    }, GRID_STRUCTURE_SHIFT_ORIGIN);
+    await yieldToEventLoop();
+  }
+  for (let start = 0; start < writes.length; start += YIELD_EVERY_N_ROWS) {
+    const end = Math.min(start + YIELD_EVERY_N_ROWS, writes.length);
+    ydoc.transact(() => {
+      for (let i = start; i < end; i += 1) styles.set(writes[i].key, writes[i].attrs);
+    }, GRID_STRUCTURE_SHIFT_ORIGIN);
+    await yieldToEventLoop();
+  }
+}
+
+/**
  * 페이지 하나를 Yjs에서 지운다 — canonical 그리드에는 아무 영향도 없다(그쪽이 항상 진실이고,
  * 저장·다운로드·수식 계산은 모두 canonical만 본다). 지워진 키는 그 페이지를 아무도 보고 있지
  * 않다는 뜻이므로, 클라이언트 쪽 메모리도 같은 sync 프로토콜을 타고 함께 줄어든다.

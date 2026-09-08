@@ -50,10 +50,18 @@ import {
   seedGridPageFromXlsx,
   seedGridStructureOnly,
   seedGridStylesFromXlsx,
+  shiftGridStyleKeys,
   unseedGridPageFromXlsx,
   GRID_COMPUTED_WRITE_ORIGIN,
+  GRID_STRUCTURE_SHIFT_ORIGIN,
   GRID_WINDOW_SEED_ORIGIN,
 } from '../xlsx/collab.js';
+import {
+  deleteCanonicalCols,
+  deleteCanonicalRows,
+  insertCanonicalCols,
+  insertCanonicalRows,
+} from '../xlsx/gridShift.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { computeGridCellDisplay, formatComputedValueForStorage } from '../xlsx/formulas.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
@@ -63,12 +71,14 @@ import {
   DOC_META_SAVE_ERROR_AT_KEY,
   GRID_CELLS_MAP,
   GRID_COMPUTED_MAP,
+  GRID_MERGES_MAP,
   GRID_STRUCTURE_MAP,
   GRID_STYLES_MAP,
   gridCellKey,
   parseGridCellKey,
   PAGE_SIZE_ROWS,
   type CellStyleAttrs,
+  type GridMergeShape,
   type SheetStructure,
 } from './gridShared.js';
 import { runSerialized } from './saveSerializer.js';
@@ -91,6 +101,20 @@ export const XML_FRAGMENT_NAME = 'prosemirror';
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const MESSAGE_PAGE_SUBSCRIBE = 2;
+/**
+ * 행/열 삽입·삭제를 **명시적인 연산으로** 알리는 메시지 — 클라이언트가 Yjs 셀 키를 직접 옮기는
+ * 대신 "이 시트의 이 자리에 행 N개를 넣어 달라"만 보내고, 실제 이동은 서버가 시트 전체를 담고
+ * 있는 canonical 그리드에서 수행한다(gridShift.ts / applyGridStructureOp).
+ *
+ * **왜 3이 아니라 4인가**: 0~3은 y-websocket의 표준 프로토콜이 이미 쓰고 있다
+ * (messageSync=0, messageAwareness=1, messageAuth=2, messageQueryAwareness=3 —
+ * node_modules/y-websocket/src/y-websocket.js). 특히 3(messageQueryAwareness)은 클라이언트가
+ * 접속 직후 **실제로 서버에 보내는** 메시지라, 3을 쓰면 그 메시지가 이 분기로 흘러들어와 JSON
+ * 파싱 오류 로그만 쌓인다. 기존 MESSAGE_PAGE_SUBSCRIBE=2가 messageAuth와 값이 겹치는 것은
+ * messageAuth가 서버→클라이언트 전용이라 실무상 무해해서 그대로 뒀지만(계획에 기록된 알려진
+ * 항목), 새로 추가하는 값은 그 범위를 아예 벗어나게 둔다.
+ */
+const MESSAGE_GRID_STRUCTURE_OP = 4;
 
 const AUTOSAVE_IDLE_MS = 8_000;
 const PING_INTERVAL_MS = 30_000;
@@ -264,8 +288,8 @@ type MutableGridRow = Array<GridCell | 0>;
  *
  * **왜 관찰자 안에서 즉석으로 넓히는가 (C2의 핵심)**: 클라이언트는 원본 범위 밖 칸에 입력할 때
  * `cells.set(...)`과 `structure.set(...)`(rowCount/colCount 확장)을 **한 트랜잭션 안에서** 하는데,
- * Yjs는 그 트랜잭션의 관찰자를 "그 트랜잭션에서 먼저 건드려진 타입" 순서로 부른다. commitCell도
- * 행/열 삽입(shiftRowsAndMerges)도 셀 맵을 먼저 건드리므로 **cells.observe가 structure.observe보다
+ * Yjs는 그 트랜잭션의 관찰자를 "그 트랜잭션에서 먼저 건드려진 타입" 순서로 부른다. commitCell은
+ * 셀 맵을 먼저 건드리므로 **cells.observe가 structure.observe보다
  * 먼저** 불린다 — 즉 "구조가 먼저 넓어지기를 기다린다"는 설계는 항상 한 박자 늦어 그 편집을
  * 통째로 놓친다(이번 리뷰가 잡아낸 바로 그 조용한 데이터 손실). 그래서 순서에 기대지 않고
  * 셀·서식 관찰자가 각자 필요한 만큼 직접 넓힌다.
@@ -320,10 +344,19 @@ async function widenCanonicalRows(sheet: MutableGridSheet, targetColCount: numbe
   }
 }
 
-/** 성장 작업 하나를 룸의 백그라운드 체인 끝에 이어 붙인다(Room.canonicalGrowth 주석 참고). */
+/**
+ * canonical 그리드를 크게 건드리는 작업 하나를 룸의 백그라운드 체인 끝에 이어 붙인다
+ * (Room.canonicalGrowth 주석 참고).
+ *
+ * 배열 패딩(성장)뿐 아니라 **행/열 삽입·삭제(applyGridStructureOp)도 반드시 이 체인을 탄다.**
+ * 열 방향 연산은 청크마다 이벤트 루프에 양보하므로, 두 연산이 겹치면 한쪽이 아직 밀지 않은 행을
+ * 다른 쪽이 밀어 데이터가 어긋난다. 행 방향 연산 자체는 동기지만, 진행 중인 열 연산이 행 배열을
+ * 인덱스로 순회하는 중간에 splice로 행을 끼워 넣으면 같은 문제가 생긴다 — 그래서 네 연산과 패딩
+ * 전부를 한 줄로 세운다.
+ */
 function enqueueCanonicalGrowth(room: Room, work: () => Promise<void>): void {
   room.canonicalGrowth = room.canonicalGrowth.then(work).catch((error: unknown) => {
-    console.error(`canonical 그리드 확장 실패 (문서 ${room.docId}):`, error);
+    console.error(`canonical 그리드 갱신 실패 (문서 ${room.docId}):`, error);
   });
 }
 
@@ -413,9 +446,11 @@ function ensureCanonicalSheetSlot(
  * canonicalGrid를 재배치하지 않고 room의 별도 집합/맵에 모아 뒀다가 내보내기 시점에
  * XlsxExportOptions로 넘긴다(인덱스 = 시트 식별자라 배열을 건드릴 수 없다 — 그쪽 주석 참고).
  *
- * 행/열 **데이터의 이동**(행 삽입 시 아래로 밀기 등)은 여기서 하지 않는다: 클라이언트가 이미
- * shiftRowsAndMerges/shiftColsAndMerges로 셀·서식 키 자체를 옮기고 그게 cells/styles 관찰자를
- * 통해 canonical에 그대로 반영되기 때문이다. 여기서 또 옮기면 같은 이동이 두 번 적용된다.
+ * 행/열 **데이터의 이동**(행 삽입 시 아래로 밀기 등)은 여기서 하지 않는다 — 그건 별도의
+ * MESSAGE_GRID_STRUCTURE_OP 메시지와 applyGridStructureOp가 canonical에서 직접 처리한다.
+ * 이 함수가 받는 rowCount/colCount 변경은 "사용자가 시트 끝을 넘겨 입력해서 시트가 넓어졌다"
+ * (commitCell / 툴바의 행·열 추가 버튼)에 해당하는 **순수한 확장**뿐이고, 기존 데이터의 자리는
+ * 그대로다. 두 경로는 서로 겹치지 않는다: 확장은 여기서, 자리를 옮기는 삽입·삭제는 저기서.
  */
 function applyStructureChangeToCanonical(
   room: Room,
@@ -596,6 +631,208 @@ function recomputeSubscribedPagesInBackground(room: Room, sheetIndices: Iterable
   });
 }
 
+type GridStructureOpKind = 'insertRows' | 'deleteRows' | 'insertCols' | 'deleteCols';
+
+/** MESSAGE_GRID_STRUCTURE_OP의 페이로드 — "이 시트의 at 자리에 행/열 count개를 넣거나 뺀다". */
+interface GridStructureOp {
+  readonly sheet: number;
+  readonly kind: GridStructureOpKind;
+  readonly at: number;
+  readonly count: number;
+}
+
+const GRID_STRUCTURE_OP_KINDS: readonly string[] = ['insertRows', 'deleteRows', 'insertCols', 'deleteCols'];
+
+/**
+ * 한 메시지가 한 번에 요구할 수 있는 행/열 개수 상한.
+ *
+ * 상한이 **반드시** 필요하다: count는 신뢰할 수 없는 입력이고, 삽입 경로는 그 수만큼 새 행 배열을
+ * 동기로 만든다 — count에 1e9가 들어오면 메시지 한 통으로 서버 메모리를 통째로 날릴 수 있다
+ * (이 프로젝트가 MESSAGE_PAGE_SUBSCRIBE에서 이미 한 번 막은 것과 같은 클래스의 창구).
+ * 실제 UI는 항상 1을 보내고(우클릭 "위에 행 삽입"), 여러 행이 필요하면 여러 번 부르면 된다.
+ */
+const MAX_STRUCTURE_OP_COUNT = 500;
+
+/**
+ * MESSAGE_GRID_STRUCTURE_OP 페이로드 검증 — MESSAGE_PAGE_SUBSCRIBE(isValidPageSubscription)와
+ * 완전히 같은 원칙이다: **신뢰할 수 없는 입력**이고, 여기서 통과한 숫자가 그대로 canonical 그리드
+ * splice의 인자와 배열 할당 크기가 된다. 하나라도 어긋나면 메시지 전체를 거부한다(보정하지 않는다 —
+ * 보정하면 클라이언트가 요청한 것과 서버가 한 것이 조용히 달라진다).
+ *
+ * 여기서는 **페이로드 자체의 형식**만 본다. `at`이 시트 안쪽인지 같은 룸 상태에 달린 검사는
+ * applyGridStructureOp가 실제로 적용하기 직전에 한다 — 이 연산들은 하나의 백그라운드 체인에
+ * 줄을 서므로(enqueueCanonicalGrowth) 메시지가 도착한 시점의 rowCount로 검사해 두면 앞선
+ * 연산이 그 값을 바꿔 놓은 뒤에 적용될 수 있다.
+ */
+function isValidGridStructureOp(parsed: unknown): parsed is GridStructureOp {
+  if (!parsed || typeof parsed !== 'object') return false;
+  const { sheet, kind, at, count } = parsed as { sheet?: unknown; kind?: unknown; at?: unknown; count?: unknown };
+  if (typeof kind !== 'string' || !GRID_STRUCTURE_OP_KINDS.includes(kind)) return false;
+  // Number.isInteger는 NaN·Infinity·비정수·문자열을 한 번에 걸러 준다.
+  if (!Number.isInteger(sheet) || (sheet as number) < 0 || (sheet as number) >= MAX_CANONICAL_SHEETS) return false;
+  if (!Number.isInteger(at) || (at as number) < 0) return false;
+  if (!Number.isInteger(count) || (count as number) < 1 || (count as number) > MAX_STRUCTURE_OP_COUNT) return false;
+  return true;
+}
+
+/** 지금 실제로 Yjs에 셀이 올라와 있는 페이지 번호 집합(그 시트에 대해). */
+function seededPagesInYdoc(room: Room, sheetIdx: number): Set<number> {
+  const pages = new Set<number>();
+  for (const key of room.ydoc.getMap<string>(GRID_CELLS_MAP).keys()) {
+    const parsed = parseGridCellKey(key);
+    if (parsed && parsed.sheetIdx === sheetIdx) pages.add(Math.floor(parsed.row / PAGE_SIZE_ROWS));
+  }
+  return pages;
+}
+
+/**
+ * canonical이 밀린 뒤, Yjs에 올라와 있는 그 시트의 페이지들을 **새 canonical 기준으로 다시** 채운다.
+ *
+ * 왜 통째로 다시 채우는가: 행이 하나 끼워지면 그 아래 **모든** 행의 내용이 한 칸씩 달라지고,
+ * 열이 끼워지면 모든 페이지의 모든 행이 달라진다 — 어떤 키가 어떻게 바뀌었는지 따로 계산하는 것보다
+ * "이 페이지를 비우고 새 진실에서 다시 채운다"가 훨씬 단순하고 어긋날 여지가 없다. 비우기·채우기·
+ * 재계산 세 원시 연산은 모두 Task 7이 이미 쓰고 있는 것 그대로이고, 각자 내부에서 이벤트 루프에
+ * 양보한다.
+ *
+ * 대상은 "구독 중인 페이지"만이 아니라 **지금 Yjs에 올라와 있는 모든 페이지**다: 구독에서 빠졌지만
+ * 아직 유예 시간(PAGE_UNSEED_GRACE_MS) 안이라 남아 있는 페이지도 옛 데이터를 들고 있으므로,
+ * 그대로 두면 클라이언트가 유예 시간 안에 그 페이지로 되돌아갔을 때 밀리기 전 내용을 본다.
+ * 그런 페이지는 지금 비우기만 하고 다시 채우지 않는다(아무도 안 보고 있으므로 — 다시 구독되는
+ * 순간 reconcilePageSubscriptions가 새 canonical에서 채운다).
+ */
+async function refreshSeededPagesAfterShift(
+  room: Room,
+  sheetIdx: number,
+  rowExtentBefore: number,
+): Promise<void> {
+  const grid = room.canonicalGrid;
+  if (!grid) return;
+  const sheet = grid.sheets[sheetIdx];
+  if (!sheet) return;
+  const subscribed = getSubscribedPageUnion(room, sheetIdx);
+  const pages = [...new Set<number>([...subscribed, ...seededPagesInYdoc(room, sheetIdx)])].sort((a, b) => a - b);
+  // 비울 행 범위는 삽입·삭제 **전후 중 더 넓은 쪽**까지 잡아야 한다 — 삭제로 시트가 짧아진 경우
+  // 새 길이로 자르면 옛 꼬리 행의 키가 Yjs에 남아, 이제 존재하지 않는 행이 화면에 계속 보인다.
+  const rowExtent = Math.max(rowExtentBefore, sheet.rows.length, sheet.rowCount);
+
+  for (const page of pages) {
+    await unseedGridPageFromXlsx(room.ydoc, sheetIdx, page, rowExtent);
+    if (rooms.get(room.docId) !== room) return;
+    if (!subscribed.has(page)) {
+      // 방금 비웠으니 예약돼 있던 지연 제거는 할 일이 없다 — 파괴된 Y.Doc을 건드리는 타이머를
+      // 남기지 않도록 취소한다(cancelPendingUnseeds와 같은 취지).
+      cancelPendingUnseed(room.docId, sheetIdx, page);
+      continue;
+    }
+    await seedGridPageFromXlsx(room.ydoc, grid, sheetIdx, page);
+    await recomputeFormulasForPage(room, sheetIdx, page);
+    if (rooms.get(room.docId) !== room) return;
+  }
+}
+
+/**
+ * 행/열 삽입·삭제를 canonical 그리드에 적용하고, 그 결과를 Yjs에도 반영한다 — 이 함수가 이번
+ * 재설계의 핵심이다.
+ *
+ * 순서에 의도가 있다: **구조 메타데이터(rowCount/colCount)를 맨 마지막에** 쓴다. 클라이언트의
+ * structure.observe는 표를 통째로 다시 그리므로, 그걸 먼저 보내면 "행 수는 늘었는데 데이터는 아직
+ * 옛 자리"인 상태가 한 번 화면에 보인다. 셀·서식·병합을 먼저 맞춰 두고 마지막에 구조를 알리면
+ * 그 재렌더가 곧 완성된 상태의 재렌더가 된다.
+ *
+ * 자동저장은 별도로 예약하지 않는다 — GRID_STRUCTURE_SHIFT_ORIGIN은 (창 시딩과 달리)
+ * isAutosaveExemptOrigin에 들어 있지 않으므로, 위 쓰기들이 그대로 ydoc 'update'를 타고
+ * scheduleAutosave를 건다.
+ */
+async function applyGridStructureOp(room: Room, op: GridStructureOp): Promise<void> {
+  if (rooms.get(room.docId) !== room) return; // 룸이 이미 닫혔다(체인에 줄 서 있는 동안)
+  const grid = room.canonicalGrid;
+  if (!grid) return;
+  const sheet = grid.sheets[op.sheet];
+  if (!sheet) return;
+  if (room.removedSheetIndices.has(op.sheet)) return; // 협업 중 삭제된 시트 자리
+
+  const onRows = op.kind === 'insertRows' || op.kind === 'deleteRows';
+  const insert = op.kind === 'insertRows' || op.kind === 'insertCols';
+  const extent = onRows ? sheet.rowCount : sheet.colCount;
+  const limit = onRows ? MAX_CANONICAL_ROWS : MAX_CANONICAL_COLS;
+
+  if (insert) {
+    // at === extent(시트 맨 끝에 붙이기)는 허용한다 — 그보다 뒤는 정상 클라이언트가 보낼 수 없다.
+    if (op.at > extent) return;
+    // 상한을 넘기면서 **마지막 행/열의 데이터를 조용히 떨어뜨리는** 대신 연산 자체를 거부한다.
+    // (열 상한 MAX_CANONICAL_COLS는 파서의 MAX_COLS=120과 같은 값이라, 정확히 120열까지 꽉 찬
+    //  시트에서는 열 삽입이 거부된다 — 그 너머는 저장해도 다음 파싱에서 잘려 나가는 영역이다.)
+    if (extent + op.count > limit) return;
+  } else {
+    if (op.at >= extent) return;
+    if (op.at + op.count > extent) return;
+    if (extent - op.count < 1) return; // 마지막 남은 행/열은 지울 수 없다(클라이언트 가드와 동일)
+  }
+
+  const rowExtentBefore = Math.max(sheet.rows.length, sheet.rowCount);
+
+  switch (op.kind) {
+    case 'insertRows':
+      insertCanonicalRows(sheet, op.at, op.count);
+      break;
+    case 'deleteRows':
+      deleteCanonicalRows(sheet, op.at, op.count);
+      break;
+    case 'insertCols':
+      await insertCanonicalCols(sheet, op.at, op.count);
+      break;
+    case 'deleteCols':
+      await deleteCanonicalCols(sheet, op.at, op.count);
+      break;
+  }
+  // 열 방향은 청크마다 양보하므로 그 사이에 룸이 닫혔을 수 있다.
+  if (rooms.get(room.docId) !== room) return;
+
+  // 1) 병합 — canonical 쪽은 gridShift가 이미 보정했고, 클라이언트가 렌더링에 쓰는 Yjs 맵도
+  //    같은 값으로 맞춘다(이 맵은 윈도잉 대상이 아니라 항상 전체가 들어 있다).
+  const mergesMap = room.ydoc.getMap<readonly GridMergeShape[]>(GRID_MERGES_MAP);
+  const mergesKey = String(op.sheet);
+  room.ydoc.transact(() => {
+    if (sheet.merges.length > 0) mergesMap.set(mergesKey, sheet.merges);
+    else if (mergesMap.has(mergesKey)) mergesMap.delete(mergesKey);
+  }, GRID_STRUCTURE_SHIFT_ORIGIN);
+
+  // 2) 서식 키 재매핑 — 서식 맵은 윈도잉하지 않으므로 페이지 재시딩으로는 옮겨지지 않는다.
+  await shiftGridStyleKeys(
+    room.ydoc,
+    op.sheet,
+    onRows ? 'row' : 'col',
+    op.at,
+    op.count,
+    insert,
+    MAX_CANONICAL_ROWS,
+    MAX_CANONICAL_COLS,
+  );
+  if (rooms.get(room.docId) !== room) return;
+
+  // 3) 셀 값·계산값 — Yjs에 올라와 있는 페이지를 새 canonical 기준으로 다시 채운다.
+  await refreshSeededPagesAfterShift(room, op.sheet, rowExtentBefore);
+  if (rooms.get(room.docId) !== room) return;
+
+  // 4) 구조 메타데이터(맨 마지막 — 위 주석 참고). 기존 항목을 펼쳐 이름·틀고정·탭 순서를 보존하고
+  //    이 연산이 실제로 바꾼 것(행/열 수, 열 너비)만 덮어쓴다.
+  const structure = room.ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
+  const previous = structure.get(mergesKey);
+  const next: SheetStructure = {
+    ...(previous ?? {
+      name: sheet.name,
+      freezeRows: sheet.freezeRows,
+      freezeCols: sheet.freezeCols,
+    }),
+    rowCount: sheet.rowCount,
+    colCount: sheet.colCount,
+    colWidths: sheet.colWidths,
+  };
+  room.ydoc.transact(() => {
+    structure.set(mergesKey, next);
+  }, GRID_STRUCTURE_SHIFT_ORIGIN);
+}
+
 async function seedRoom(room: Room): Promise<void> {
   const { docId, kind, ydoc } = room;
   try {
@@ -657,11 +894,18 @@ async function seedRoom(room: Room): Promise<void> {
       const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
       styles.observe((event) => {
         if (event.transaction.origin === GRID_WINDOW_SEED_ORIGIN) return;
+        // 행/열 삽입이 서식 키를 다시 매긴 것도 되반영하지 않는다 — canonical의 서식은 셀 객체
+        // 안의 인덱스(GridCell.s)라 행/열을 옮기면 이미 함께 따라온 상태다. 여기서 또 반영하면
+        // 같은 이동이 두 번 적용된다(shiftGridStyleKeys / GRID_STRUCTURE_SHIFT_ORIGIN 주석 참고).
+        if (event.transaction.origin === GRID_STRUCTURE_SHIFT_ORIGIN) return;
         applyStylesChangeToCanonical(grid, styles, event);
       });
       const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
       structure.observe((event) => {
         if (event.transaction.origin === GRID_WINDOW_SEED_ORIGIN) return;
+        // 위와 같은 이유 — 행/열 삽입의 rowCount/colCount는 applyGridStructureOp가 canonical에
+        // 직접 쓴 값을 그대로 클라이언트에 알리는 것뿐이므로 되반영할 것이 없다.
+        if (event.transaction.origin === GRID_STRUCTURE_SHIFT_ORIGIN) return;
         applyStructureChangeToCanonical(room, structure, event);
       });
       // 예전에는 여기서 모든 시트를 한 번 통째로 재계산했다 — 윈도잉 이후에는 그 시점에 구독
@@ -1110,6 +1354,31 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
         }
         break;
       }
+      case MESSAGE_GRID_STRUCTURE_OP: {
+        try {
+          const payload = decoding.readVarString(decoder);
+          if (room.readOnlyConns.has(conn)) {
+            // 행/열 삽입·삭제는 **쓰기**다 — 읽기 전용으로 들어온 연결이 보낸 것은 버린다.
+            // (페이지 구독 메시지는 "지금 여기를 보고 있다"는 읽기 요청이라 읽기 전용도 허용하는
+            //  것과 의도적으로 다르다. 클라이언트가 편집 UI를 숨기는 것과 별개로 서버가 직접 막는다.)
+            // 페이로드는 로그에 남기지 않는다 — 조작된 연결이 로그를 불릴 수 있는 창구를 줄인다.
+            console.error('행/열 구조 변경 메시지 거부(읽기 전용 연결)');
+          } else {
+            const parsed: unknown = JSON.parse(payload);
+            if (!isValidGridStructureOp(parsed)) {
+              // 구독 메시지와 같은 원칙 — 형식이 어긋나면 통째로 버린다(보정하지 않는다).
+              console.error('행/열 구조 변경 메시지 거부(형식/범위 오류):', payload.slice(0, 200));
+            } else {
+              // 실제 적용은 canonical 갱신 체인에서 순서대로 돈다(enqueueCanonicalGrowth 주석) —
+              // 여기서 await하면 소켓 메시지 처리 자체가 막힌다.
+              enqueueCanonicalGrowth(room, () => applyGridStructureOp(room, parsed));
+            }
+          }
+        } catch (error) {
+          console.error('행/열 구조 변경 메시지 처리 오류:', error);
+        }
+        break;
+      }
       default:
         break;
     }
@@ -1361,13 +1630,8 @@ export function getSubscribedPageUnionForTest(docId: string, sheet: number): Set
  */
 export function getSeededPagesForTest(docId: string, sheet: number): Set<number> {
   const room = rooms.get(docId);
-  const pages = new Set<number>();
-  if (!room) return pages;
-  for (const key of room.ydoc.getMap<string>(GRID_CELLS_MAP).keys()) {
-    const parsed = parseGridCellKey(key);
-    if (parsed && parsed.sheetIdx === sheet) pages.add(Math.floor(parsed.row / PAGE_SIZE_ROWS));
-  }
-  return pages;
+  if (!room) return new Set();
+  return seededPagesInYdoc(room, sheet);
 }
 
 /** 테스트 전용 — 룸의 canonical 그리드를 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */
