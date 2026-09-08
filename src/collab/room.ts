@@ -35,10 +35,14 @@ import {
   saveGridDerived,
   yieldToEventLoop,
   YIELD_EVERY_N_ROWS,
+  type GridCell,
   type GridDocument,
+  type GridSheet,
 } from '../spreadsheet.js';
 import {
   exportXlsxFromGrid,
+  findOrAddGridStyleIndex,
+  fromCellStyleAttrs,
   isAutosaveExemptOrigin,
   reparseGridForViewer,
   seedGridPageFromXlsx,
@@ -57,9 +61,13 @@ import {
   DOC_META_SAVE_ERROR_AT_KEY,
   GRID_CELLS_MAP,
   GRID_COMPUTED_MAP,
+  GRID_STRUCTURE_MAP,
+  GRID_STYLES_MAP,
   gridCellKey,
   parseGridCellKey,
   PAGE_SIZE_ROWS,
+  type CellStyleAttrs,
+  type SheetStructure,
 } from './gridShared.js';
 import { runSerialized } from './saveSerializer.js';
 
@@ -130,6 +138,26 @@ interface Room {
    * 않는다 — exportXlsxFromGrid가 "한 번도 편집되지 않은 셀(수식 셀 포함)"을 가려내는 기준선
    * 으로 쓴다(예전 Yjs baseline/stylesBaseline 맵과 같은 역할). docx/pptx 룸에서는 항상 null. */
   baselineGrid: GridDocument | null;
+  /**
+   * xlsx 룸에서만 쓰인다 — 룸을 처음 열 때 읽은 **원본 바이트 그대로**. 이후 모든 내보내기
+   * (자동저장·다운로드)는 디스크의 현재 파일이 아니라 항상 이 바이트를 기준으로 한다.
+   *
+   * **왜 매번 store.readOriginal을 다시 읽으면 안 되는가**: baselineGrid(= 이 바이트를 파싱한
+   * 결과)와 removedSheetIndices/sheetDisplayOrder는 전부 "룸이 열린 시점의 원본"을 기준으로 한
+   * 상대적 표현이다. 자동저장이 한 번 돌고 나면 디스크의 파일은 이미 그 변경이 반영된 상태라,
+   * 다음 저장에서 같은 removedSheetIndices를 다시 적용하면 **이미 지워진 시트 대신 그 뒤의
+   * 멀쩡한 시트를 지운다**(두 번째 저장에서 데이터가 조용히 사라지는 버그). 항상 같은 원본에서
+   * 같은 diff를 다시 적용하면 몇 번을 저장해도 결과가 동일하다(멱등).
+   */
+  originalXlsxBytes: Uint8Array | null;
+  /**
+   * xlsx 룸에서만 쓰인다 — 협업 중 삭제된 시트의 "자리 번호"(canonicalGrid.sheets의 인덱스).
+   * canonicalGrid.sheets에서 splice하지 않는 이유는 XlsxExportOptions의 주석 참고(인덱스가 곧
+   * Yjs 셀 키의 시트 번호라 밀리면 셀 데이터 전체가 다른 시트를 가리킨다).
+   */
+  readonly removedSheetIndices: Set<number>;
+  /** xlsx 룸에서만 쓰인다 — 시트 자리 번호 → 탭 표시 순서(SheetStructure.order). */
+  readonly sheetDisplayOrder: Map<number, number>;
   /** xlsx 룸에서만 쓰인다 — 연결별로 "지금 이 시트의 이 페이지들을 보고 있다"를 추적한다.
    * 연결이 끊기면(closeConn) 이 맵에서 즉시 제거한다. */
   readonly pageSubscriptions: Map<WebSocket, { sheet: number; pages: readonly number[] }>;
@@ -174,19 +202,212 @@ function applyCellsChangeToCanonical(
     if (!parsed) continue;
     const { sheetIdx, row, col } = parsed;
     const sheet = canonicalGrid.sheets[sheetIdx];
-    if (!sheet || row >= sheet.rows.length || col >= sheet.colCount) continue;
-    const rowArray = sheet.rows[row] as Array<{ v: string; s?: number } | 0>;
+    if (!sheet) continue;
     if (change.action === 'delete') {
-      rowArray[col] = 0;
+      // 삭제는 절대 시트를 넓히지 않는다 — 원래 없던 칸이 지워졌다는 건 아무 일도 아니다.
+      if (row >= sheet.rows.length || col >= sheet.rows[row].length) continue;
+      (sheet.rows[row] as MutableGridRow)[col] = 0;
       continue;
     }
+    if (!ensureCanonicalCellSlot(sheet, row, col)) continue;
+    const rowArray = sheet.rows[row] as MutableGridRow;
     const value = cells.get(key) ?? '';
     const currentCell = rowArray[col];
-    rowArray[col] =
-      value === ''
-        ? 0
-        : { v: value, ...(currentCell !== 0 && currentCell.s !== undefined ? { s: currentCell.s } : {}) };
+    const keptStyle = currentCell !== 0 && currentCell !== undefined ? currentCell.s : undefined;
+    rowArray[col] = value === '' ? 0 : { v: value, ...(keptStyle !== undefined ? { s: keptStyle } : {}) };
   }
+}
+
+/**
+ * canonical 그리드가 스스로 넓어질 수 있는 상한. 클라이언트가 보내는 셀 키는 신뢰할 수 없는
+ * 입력이므로(조작된 소켓 메시지로 "3:99999999:99999999" 같은 키를 보낼 수 있다), 아래 성장
+ * 로직에 반드시 상한이 필요하다 — 없으면 키 하나로 수억 칸짜리 배열을 만들어 서버 메모리를
+ * 통째로 날릴 수 있다. 값은 spreadsheet.ts의 파싱 상한(MAX_ROWS=300_000)과 같은 수준으로 두고,
+ * 열은 클라이언트의 행/열 이동 루프 상한(1000)보다 넉넉하게 잡는다.
+ */
+const MAX_CANONICAL_ROWS = 300_000;
+const MAX_CANONICAL_COLS = 1_024;
+/** 한 워크북이 가질 수 있는 시트 자리 수 상한 — 위와 같은 이유(구조 맵 키도 클라이언트 입력이다). */
+const MAX_CANONICAL_SHEETS = 512;
+
+type MutableGridSheet = { -readonly [K in keyof GridSheet]: GridSheet[K] };
+type MutableGridRow = Array<GridCell | 0>;
+
+/**
+ * canonical 시트가 (row, col) 칸을 담을 수 있도록 행 배열·열 수를 필요한 만큼 넓힌다.
+ * 상한을 넘어서는 좌표에는 false를 돌려주고 아무것도 바꾸지 않는다(호출부는 그 변경을 버린다).
+ *
+ * **왜 관찰자 안에서 즉석으로 넓히는가 (C2의 핵심)**: 클라이언트는 원본 범위 밖 칸에 입력할 때
+ * `cells.set(...)`과 `structure.set(...)`(rowCount/colCount 확장)을 **한 트랜잭션 안에서** 하는데,
+ * Yjs는 그 트랜잭션의 관찰자를 "그 트랜잭션에서 먼저 건드려진 타입" 순서로 부른다. commitCell도
+ * 행/열 삽입(shiftRowsAndMerges)도 셀 맵을 먼저 건드리므로 **cells.observe가 structure.observe보다
+ * 먼저** 불린다 — 즉 "구조가 먼저 넓어지기를 기다린다"는 설계는 항상 한 박자 늦어 그 편집을
+ * 통째로 놓친다(이번 리뷰가 잡아낸 바로 그 조용한 데이터 손실). 그래서 순서에 기대지 않고
+ * 셀·서식 관찰자가 각자 필요한 만큼 직접 넓힌다.
+ */
+function ensureCanonicalCellSlot(sheet: GridSheet, row: number, col: number): boolean {
+  if (!Number.isInteger(row) || !Number.isInteger(col)) return false;
+  if (row < 0 || col < 0 || row >= MAX_CANONICAL_ROWS || col >= MAX_CANONICAL_COLS) return false;
+  const mutable = sheet as MutableGridSheet;
+  const rows = mutable.rows as MutableGridRow[];
+  const colCount = Math.max(mutable.colCount, col + 1);
+  mutable.colCount = colCount;
+  while (rows.length <= row) rows.push(new Array<GridCell | 0>(colCount).fill(0));
+  const rowArray = rows[row];
+  while (rowArray.length < colCount) rowArray.push(0);
+  if (row + 1 > mutable.rowCount) mutable.rowCount = row + 1;
+  return true;
+}
+
+/**
+ * GRID_STYLES_MAP(서식 레이어)의 변화를 canonical 그리드에 반영한다 — 리뷰 지적 C1.
+ *
+ * 이게 없으면 **값을 한 글자도 바꾸지 않고 서식만 바꾼 편집**(굵게·색·표시 형식)이 Yjs에만 남고
+ * canonical에는 전혀 도달하지 않아, 저장된 파일에서 조용히 사라진다(다른 참여자 화면에는 보이므로
+ * 사용자는 저장됐다고 믿는다 — 가장 나쁜 종류의 손실).
+ *
+ * canonical의 셀은 서식 객체가 아니라 공용 팔레트(grid.styles)의 **인덱스**만 들고 있으므로
+ * (GridCell.s), 들어온 CellStyleAttrs를 GridStyle로 변환한 뒤 팔레트에서 같은 서식을 찾거나 새로
+ * 추가해 그 인덱스를 셀에 심는다. 이 함수는 순수 JS 객체(canonicalGrid)만 건드리고 Yjs에는 아무것도
+ * 쓰지 않으므로 origin 태깅을 신경 쓸 필요가 없다(cells.observe와 동일).
+ */
+function applyStylesChangeToCanonical(
+  canonicalGrid: GridDocument,
+  styles: Y.Map<CellStyleAttrs>,
+  event: Y.YMapEvent<CellStyleAttrs>,
+): void {
+  for (const [key, change] of event.changes.keys) {
+    const parsed = parseGridCellKey(key);
+    if (!parsed) continue;
+    const { sheetIdx, row, col } = parsed;
+    const sheet = canonicalGrid.sheets[sheetIdx];
+    if (!sheet) continue;
+    const attrs = change.action === 'delete' ? undefined : styles.get(key);
+    // 서식이 지워졌을 때(또는 빈 서식이 들어왔을 때)는 **값은 그대로 두고 서식 참조만 뗀다** —
+    // cells.observe의 삭제가 칸을 통째로 0으로 되돌리는 것과 의도적으로 다르다. 저기서는 "내용을
+    // 지웠다"지만 여기서는 "서식만 지웠다"이므로, 칸을 0으로 만들면 멀쩡한 텍스트까지 날아간다.
+    // 값도 원래 비어 있던 칸(서식만 있던 칸)만 완전한 빈 칸(0)으로 되돌린다.
+    if (!attrs || typeof attrs !== 'object' || Object.keys(attrs).length === 0) {
+      if (row >= sheet.rows.length || col >= sheet.rows[row].length) continue;
+      const rowArray = sheet.rows[row] as MutableGridRow;
+      const cell = rowArray[col];
+      if (cell === 0 || cell === undefined) continue;
+      rowArray[col] = cell.v === '' ? 0 : { v: cell.v };
+      continue;
+    }
+    if (!ensureCanonicalCellSlot(sheet, row, col)) continue;
+    const rowArray = sheet.rows[row] as MutableGridRow;
+    const cell = rowArray[col];
+    const styleIndex = findOrAddGridStyleIndex(canonicalGrid, fromCellStyleAttrs(attrs));
+    rowArray[col] = { v: cell === 0 || cell === undefined ? '' : cell.v, s: styleIndex };
+  }
+}
+
+/** 새로 추가된 시트 자리를 채우는 최소한의 빈 GridSheet. */
+function makeEmptyCanonicalSheet(name: string): GridSheet {
+  return {
+    name,
+    rowCount: 1,
+    colCount: 1,
+    colWidths: [],
+    merges: [],
+    freezeRows: 0,
+    freezeCols: 0,
+    rows: [[0]],
+  };
+}
+
+/**
+ * canonicalGrid.sheets가 sheetIdx 자리를 갖도록 (필요하면 중간 구멍까지) 늘린다.
+ * 구멍(구조 맵에 대응하는 키가 없는 중간 자리)은 "삭제된 자리"로 표시해 내보내기에서 빠지게 한다 —
+ * 배열에서 splice하면 그 뒤 시트 번호가 전부 밀려 Yjs 셀 키가 다른 시트를 가리키기 때문이다.
+ */
+function ensureCanonicalSheetSlot(
+  room: Room,
+  structure: Y.Map<SheetStructure>,
+  sheetIdx: number,
+): MutableGridSheet | null {
+  const grid = room.canonicalGrid;
+  if (!grid || sheetIdx < 0 || sheetIdx >= MAX_CANONICAL_SHEETS) return null;
+  const sheets = grid.sheets as GridSheet[];
+  while (sheets.length <= sheetIdx) {
+    const idx = sheets.length;
+    sheets.push(makeEmptyCanonicalSheet(`Sheet${idx + 1}`));
+    if (idx !== sheetIdx && !structure.has(String(idx))) room.removedSheetIndices.add(idx);
+  }
+  return sheets[sheetIdx] as MutableGridSheet;
+}
+
+/**
+ * GRID_STRUCTURE_MAP(시트 구조)의 변화를 canonical 그리드에 반영한다 — 리뷰 지적 C2.
+ *
+ * 시트 이름 변경·추가·삭제·순서 변경과 행/열 수 증감을 모두 여기서 받는다. 삭제와 순서는
+ * canonicalGrid를 재배치하지 않고 room의 별도 집합/맵에 모아 뒀다가 내보내기 시점에
+ * XlsxExportOptions로 넘긴다(인덱스 = 시트 식별자라 배열을 건드릴 수 없다 — 그쪽 주석 참고).
+ *
+ * 행/열 **데이터의 이동**(행 삽입 시 아래로 밀기 등)은 여기서 하지 않는다: 클라이언트가 이미
+ * shiftRowsAndMerges/shiftColsAndMerges로 셀·서식 키 자체를 옮기고 그게 cells/styles 관찰자를
+ * 통해 canonical에 그대로 반영되기 때문이다. 여기서 또 옮기면 같은 이동이 두 번 적용된다.
+ */
+function applyStructureChangeToCanonical(
+  room: Room,
+  structure: Y.Map<SheetStructure>,
+  event: Y.YMapEvent<SheetStructure>,
+): void {
+  if (!room.canonicalGrid) return;
+  for (const [key, change] of event.changes.keys) {
+    const sheetIdx = Number(key);
+    if (!Number.isInteger(sheetIdx) || sheetIdx < 0 || sheetIdx >= MAX_CANONICAL_SHEETS) continue;
+    if (change.action === 'delete') {
+      if (sheetIdx < room.canonicalGrid.sheets.length) room.removedSheetIndices.add(sheetIdx);
+      continue;
+    }
+    const value = structure.get(key);
+    if (!value || typeof value !== 'object') continue;
+    // 지웠던 자리를 다시 쓰면(되돌리기 등) 삭제 표시를 거둔다.
+    room.removedSheetIndices.delete(sheetIdx);
+    const sheet = ensureCanonicalSheetSlot(room, structure, sheetIdx);
+    if (!sheet) continue;
+    if (typeof value.name === 'string' && value.name.trim() !== '') sheet.name = value.name;
+    if (Number.isInteger(value.rowCount) && value.rowCount > 0) {
+      const rowCount = Math.min(value.rowCount, MAX_CANONICAL_ROWS);
+      // 행이 늘어난 경우에만 배열을 채운다 — 줄어든 경우엔 rowCount만 낮춘다(내보내기가 그 뒤를
+      // 무시하고 ExcelJS 쪽 꼬리 행도 잘라낸다). 배열을 실제로 자르면 그 사이 도착한 편집을 잃는다.
+      sheet.rowCount = rowCount;
+      const rows = sheet.rows as MutableGridRow[];
+      while (rows.length < rowCount) rows.push(new Array<GridCell | 0>(sheet.colCount).fill(0));
+    }
+    if (Number.isInteger(value.colCount) && value.colCount > 0) {
+      const colCount = Math.min(value.colCount, MAX_CANONICAL_COLS);
+      sheet.colCount = colCount;
+      for (const row of sheet.rows as MutableGridRow[]) {
+        while (row.length < colCount) row.push(0);
+      }
+    }
+    if (Number.isInteger(value.freezeRows)) sheet.freezeRows = value.freezeRows as number;
+    if (Number.isInteger(value.freezeCols)) sheet.freezeCols = value.freezeCols as number;
+  }
+  rebuildSheetDisplayOrder(room, structure);
+}
+
+/** 구조 맵의 order 필드를 모아 "시트 자리 번호 → 탭 순서" 맵을 다시 만든다 — 시트 수가 많아야
+ * 수십 개라 변경 하나마다 전부 다시 만들어도 싸고, 부분 갱신보다 어긋날 여지가 없다. */
+function rebuildSheetDisplayOrder(room: Room, structure: Y.Map<SheetStructure>): void {
+  room.sheetDisplayOrder.clear();
+  for (const [key, value] of structure.entries()) {
+    const sheetIdx = Number(key);
+    if (!Number.isInteger(sheetIdx) || sheetIdx < 0) continue;
+    const order = value?.order;
+    if (typeof order === 'number' && Number.isFinite(order)) room.sheetDisplayOrder.set(sheetIdx, order);
+  }
+}
+
+/** 지금 룸 상태로 xlsx를 내보낼 때 함께 넘길 구조 변경 정보(시트 삭제/탭 순서). */
+function exportOptionsFor(room: Room) {
+  return {
+    removedSheetIndices: room.removedSheetIndices,
+    sheetDisplayOrder: room.sheetDisplayOrder,
+  };
 }
 
 /**
@@ -219,6 +440,18 @@ function applyCellsChangeToCanonical(
  * 반대로 "안전하게" 감쌌다가는 재계산이 진행되는 동안 도착한 진짜 편집의 자동저장 예약을
  * 놓치는 별개의 버그를 새로 만든다).
  */
+/**
+ * 페이지 하나를 재계산할 때 쓰는 양보 간격 — 리뷰 지적 I3.
+ *
+ * 이 루프에 YIELD_EVERY_N_ROWS(2000)를 그대로 쓰면 페이지 크기(500)가 그보다 작아 **한 페이지 =
+ * 양보 한 번 없는 500행짜리 단일 동기 블록**이 된다. 페이지 사이의 양보(Task 7에서 이미 고친 것)는
+ * 페이지를 여러 개 구독했을 때만 의미가 있고, 페이지 하나만 구독한 클라이언트가 넓은 범위를
+ * 참조하는 수식이 가득한 500행을 편집하면 그 계산이 끝날 때까지 서버 전체가 그대로 멈춘다.
+ * 페이지 크기의 1/4로 잘라 페이지 **안에서도** 반드시 몇 번은 쉬게 한다. YIELD_EVERY_N_ROWS와
+ * min을 취하는 이유는 두 상수 중 어느 쪽이 나중에 바뀌어도 "더 촘촘한 쪽"이 이기게 하기 위함이다.
+ */
+const RECOMPUTE_YIELD_EVERY_N_ROWS = Math.max(1, Math.min(YIELD_EVERY_N_ROWS, Math.ceil(PAGE_SIZE_ROWS / 4)));
+
 async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: number): Promise<void> {
   if (!room.canonicalGrid) return;
   const sheet = room.canonicalGrid.sheets[sheetIdx];
@@ -226,8 +459,8 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
   const computed = room.ydoc.getMap<string>(GRID_COMPUTED_MAP);
   const pageStart = page * PAGE_SIZE_ROWS;
   const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, sheet.rows.length);
-  for (let start = pageStart; start < pageEnd; start += YIELD_EVERY_N_ROWS) {
-    const end = Math.min(start + YIELD_EVERY_N_ROWS, pageEnd);
+  for (let start = pageStart; start < pageEnd; start += RECOMPUTE_YIELD_EVERY_N_ROWS) {
+    const end = Math.min(start + RECOMPUTE_YIELD_EVERY_N_ROWS, pageEnd);
     room.ydoc.transact(() => {
       for (let r = start; r < end; r += 1) {
         const row = sheet.rows[r];
@@ -295,6 +528,8 @@ async function seedRoom(room: Room): Promise<void> {
     if (kind === 'xlsx') {
       const grid = await parseXlsxToGrid(original);
       room.canonicalGrid = grid;
+      // 이후 모든 내보내기의 기준 원본 — 왜 매번 디스크를 다시 읽지 않는지는 Room.originalXlsxBytes 주석 참고.
+      room.originalXlsxBytes = new Uint8Array(original);
       // Node 20+(package.json engines)이라 내장 structuredClone을 그대로 쓴다 — GridDocument는
       // 함수·순환참조·Map/Set이 전혀 없는 순수 JSON 모양 데이터라 깊은 복사에 안전하다.
       room.baselineGrid = structuredClone(grid);
@@ -337,6 +572,21 @@ async function seedRoom(room: Room): Promise<void> {
         // (recomputeSubscribedPagesInBackground 주석 참고).
         recomputeSubscribedPagesInBackground(room, touchedSheets);
       });
+      // 서식(C1)과 구조(C2)도 셀 값과 똑같이 canonical에 되반영한다 — 셀 값만 관찰하던 것이
+      // "서식만 바꾼 편집"과 "원본 범위 밖 편집·모든 구조 변경"이 저장된 파일에서 조용히 사라지던
+      // 원인이었다. 최초 전량 시딩(seedGridStructureOnly/seedGridStylesFromXlsx)은 이미 위에서
+      // 끝났고 그 트랜잭션에는 GRID_WINDOW_SEED_ORIGIN이 붙어 있으므로, 등록 시점과 origin 양쪽
+      // 으로 "서버 자신의 시딩"을 사용자 편집으로 오해할 일이 없다(cells.observe와 동일한 방어).
+      const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
+      styles.observe((event) => {
+        if (event.transaction.origin === GRID_WINDOW_SEED_ORIGIN) return;
+        applyStylesChangeToCanonical(grid, styles, event);
+      });
+      const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
+      structure.observe((event) => {
+        if (event.transaction.origin === GRID_WINDOW_SEED_ORIGIN) return;
+        applyStructureChangeToCanonical(room, structure, event);
+      });
       // 예전에는 여기서 모든 시트를 한 번 통째로 재계산했다 — 윈도잉 이후에는 그 시점에 구독
       // 중인 페이지가 하나도 없어(=Yjs에 아무 셀도 없어) 계산해 둘 곳도, 그걸 볼 사람도 없다.
       // 원본 파일에 이미 있던 수식의 최초 계산값은 그 페이지가 처음 구독되는 순간
@@ -362,11 +612,18 @@ async function flushToStore(room: Room): Promise<void> {
   if (!meta) return;
 
   if (kind === 'xlsx') {
-    const original = await store.readOriginal(docId, meta.ext);
+    // 디스크의 현재 파일이 아니라 룸을 열 때의 원본을 쓴다 — 이유는 Room.originalXlsxBytes 주석 참고
+    // (안 그러면 두 번째 저장부터 시트 삭제가 엉뚱한 시트에 적용된다).
+    const original = room.originalXlsxBytes ?? (await store.readOriginal(docId, meta.ext));
     if (!room.canonicalGrid || !room.baselineGrid) {
       console.error(`동시편집 저장 실패 — canonical 그리드 없음 (문서 ${docId})`);
     } else {
-      const newXlsxBytes = await exportXlsxFromGrid(original, room.canonicalGrid, room.baselineGrid);
+      const newXlsxBytes = await exportXlsxFromGrid(
+        original,
+        room.canonicalGrid,
+        room.baselineGrid,
+        exportOptionsFor(room),
+      );
       await store.saveOriginal(docId, meta.ext, Buffer.from(newXlsxBytes));
       try {
         const grid = await reparseGridForViewer(newXlsxBytes);
@@ -524,7 +781,13 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
   const original = await store.readOriginal(docId, meta.ext);
   if (room.kind === 'xlsx') {
     if (!room.canonicalGrid || !room.baselineGrid) return null;
-    return exportXlsxFromGrid(original, room.canonicalGrid, room.baselineGrid);
+    // flushToStore와 같은 이유로 룸을 열 때의 원본을 기준으로 내보낸다(Room.originalXlsxBytes 주석).
+    return exportXlsxFromGrid(
+      room.originalXlsxBytes ?? original,
+      room.canonicalGrid,
+      room.baselineGrid,
+      exportOptionsFor(room),
+    );
   }
   if (room.kind === 'pptx') {
     // 읽기 전용 헬퍼라 Yjs 배열은 절대 건드리지 않는다 — flushToStore의 저장-후 배열 재작성과
@@ -572,6 +835,9 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     suppressAutosaveReschedule: false,
     canonicalGrid: null,
     baselineGrid: null,
+    originalXlsxBytes: null,
+    removedSheetIndices: new Set<number>(),
+    sheetDisplayOrder: new Map<number, number>(),
     pageSubscriptions: new Map(),
   };
   room.ready = seedRoom(room);
@@ -666,6 +932,41 @@ function closeConn(room: Room, conn: WebSocket): void {
   }
 }
 
+/**
+ * 한 시트가 가질 수 있는 페이지 번호의 상한 — canonical 그리드가 자랄 수 있는 최대 행 수를 페이지
+ * 크기로 나눈 값이다(300_000 / 500 = 600). 두 상수 중 어느 쪽이 나중에 바뀌어도 자동으로 따라오도록
+ * 상수를 직접 쓰지 않고 계산한다. 이 범위 밖 페이지 번호는 채울 데이터가 존재할 수 없으므로 정상
+ * 클라이언트가 보낼 이유가 없다.
+ */
+const MAX_SUBSCRIBABLE_PAGES = Math.ceil(MAX_CANONICAL_ROWS / PAGE_SIZE_ROWS);
+
+/**
+ * 한 연결이 **동시에** 구독할 수 있는 페이지 수의 상한. 구독은 "지금 화면에 보이는 창 + 앞뒤 여유"를
+ * 뜻하므로 실제로는 한 자릿수다 — 32는 그보다 훨씬 넉넉하면서도, 조작된 소켓 메시지 하나로 수천
+ * 페이지 시딩(= 수백만 셀을 Yjs에 밀어 넣는 작업)을 걸어 서버를 묶어 버리는 것은 막는다.
+ */
+const MAX_SUBSCRIBED_PAGES_PER_CONN = 32;
+
+/**
+ * MESSAGE_PAGE_SUBSCRIBE 페이로드 검증 — 리뷰 지적 I2.
+ *
+ * 이 메시지는 **신뢰할 수 없는 입력**이다: 여기서 통과한 숫자가 그대로 페이지 시딩 루프의 행 범위와
+ * getSubscribedPageUnion의 Set 내용이 된다. 예전 검증은 `typeof === 'number'`뿐이라 0.5·-1·1e9·
+ * NaN 같은 값과 길이 5000짜리 배열이 전부 통과했다(비정수 페이지는 행 범위 계산을 깨고, 거대한
+ * 배열은 그 자체로 값싼 DoS다).
+ *
+ * 하나라도 어긋나면 **메시지 전체를 거부**한다 — 잘라내거나 보정하면 클라이언트가 요청한 창과 서버가
+ * 채운 창이 조용히 어긋나, 화면의 빈 칸을 나중에 추적하기가 훨씬 어려워진다.
+ */
+function isValidPageSubscription(parsed: unknown): parsed is { sheet: number; pages: readonly number[] } {
+  if (!parsed || typeof parsed !== 'object') return false;
+  const { sheet, pages } = parsed as { sheet?: unknown; pages?: unknown };
+  // Number.isInteger는 NaN·Infinity·비정수를 한 번에 걸러 준다(typeof === 'number'가 놓치던 것들).
+  if (!Number.isInteger(sheet) || (sheet as number) < 0 || (sheet as number) >= MAX_CANONICAL_SHEETS) return false;
+  if (!Array.isArray(pages) || pages.length > MAX_SUBSCRIBED_PAGES_PER_CONN) return false;
+  return pages.every((page) => Number.isInteger(page) && page >= 0 && page < MAX_SUBSCRIBABLE_PAGES);
+}
+
 function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
   try {
     const encoder = encoding.createEncoder();
@@ -698,12 +999,14 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
       case MESSAGE_PAGE_SUBSCRIBE: {
         try {
           const payload = decoding.readVarString(decoder);
-          const parsed = JSON.parse(payload) as { sheet: number; pages: readonly number[] };
-          if (
-            typeof parsed.sheet === 'number' &&
-            Array.isArray(parsed.pages) &&
-            parsed.pages.every((p) => typeof p === 'number')
-          ) {
+          const parsed: unknown = JSON.parse(payload);
+          if (!isValidPageSubscription(parsed)) {
+            // 잘못된 메시지는 **통째로** 버린다(잘라내거나 보정하지 않는다) — 일부만 받아들이면
+            // 클라이언트는 자기가 요청한 창이 채워졌다고 믿는데 서버는 다른 창을 채우게 되어,
+            // 화면에 빈 칸이 보이는 원인을 추적하기 어려워진다. 형식이 깨진 JSON을 그냥 로그만
+            // 남기고 무시하는 아래 catch와 같은 처리다.
+            console.error('페이지 구독 메시지 거부(형식/범위 오류):', payload.slice(0, 200));
+          } else {
             // 합집합은 이 연결의 구독을 덮어쓰기 "전"과 "후"로 각각 구해야 한다 — 그 차이가
             // 곧 "채울 페이지"와 "비울 페이지"다(reconcilePageSubscriptions).
             //

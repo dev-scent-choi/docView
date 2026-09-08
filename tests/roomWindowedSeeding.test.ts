@@ -156,6 +156,24 @@ async function makeFormulaOnEveryPageXlsx(): Promise<Buffer> {
   return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
 }
 
+/**
+ * **한 페이지(500행) 안에** 수식이 고르게 흩어진 시트 — B열의 1, 126, 251, 376행(1-based)에 수식이
+ * 있다. 페이지 하나를 재계산하는 루프가 페이지 안에서도 실제로 양보하는지(I3)를 관찰하기 위한
+ * 픽스처다: 페이지 하나를 통째로 한 청크로 도는 구현에서는 이 네 수식이 전부 같은 트랜잭션·같은
+ * 이벤트 루프 턴에서 계산되고, 페이지 내부에도 양보 지점이 있는 구현에서는 청크마다 따로 계산된다.
+ */
+async function makeFormulasWithinOnePageXlsx(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  for (let r = 1; r <= 500; r += 1) sheet.getCell(r, 1).value = r;
+  // 계산 결과(result)는 일부러 넣지 않는다 — 넣으면 parseXlsxToGrid가 그 캐시값을 셀 값으로 삼아
+  // "수식 셀"이 아니게 되고 재계산 경로 자체를 검증할 수 없다.
+  for (const row of [1, 126, 251, 376]) {
+    sheet.getCell(row, 2).value = { formula: 'SUM(A1:A100)' } as ExcelJS.CellFormulaValue;
+  }
+  return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+}
+
 /** 1000행(= 페이지 0과 1) 시트 — A1에 원본 파일에서부터 굵게 서식이 걸려 있다. A2에는 아무 서식도 없다. */
 async function makeStyledXlsx(): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
@@ -602,6 +620,42 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
       // 없기 때문이다(서식은 윈도잉 대상이 아니다).
       expect(styles.get(gridCellKey(0, 0, 0))?.b).toBe(1);
       expect(styles.get(gridCellKey(0, 1, 0))?.i).toBe(1);
+    },
+    60_000,
+  );
+
+  test(
+    'recomputing a SINGLE page yields to the event loop partway through it ' +
+      '(PAGE_SIZE_ROWS < YIELD_EVERY_N_ROWS must not mean "one page = one unyielded chunk")',
+    async () => {
+      const { joinEditSession } = await import('../src/collab/room.js');
+      const { GRID_CELLS_MAP, GRID_COMPUTED_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+
+      const docId = randomUUID();
+      await seedDoc(docId, await makeFormulasWithinOnePageXlsx());
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      sendSubscribe(socket, 0, [0]); // 페이지 **하나만** 구독 — 페이지 사이 양보(Task 7)는 여기서 일어날 수 없다
+      await flushEventLoop(200);
+
+      const ticker = startTicker();
+      const ticksAtComputedWrite: number[] = [];
+      socket.mirror.getMap<string>(GRID_COMPUTED_MAP).observe(() => {
+        ticksAtComputedWrite.push(ticker.count());
+      });
+
+      // A1 편집 — 이 한 페이지 안의 수식 네 개가 전부 다시 계산된다.
+      sendMapEdit(socket, GRID_CELLS_MAP, gridCellKey(0, 0, 0), '999');
+      await flushEventLoop(200);
+      ticker.stop();
+
+      // 페이지 하나를 통째로 한 청크로 도는 예전 구현에서는 네 수식이 트랜잭션 하나에 몰려
+      // 이 값이 1이었다 — 즉 500행 전체가 양보 한 번 없는 동기 블록이었다는 직접 증거.
+      expect(ticksAtComputedWrite.length).toBeGreaterThanOrEqual(4);
+
+      // 그 트랜잭션들이 서로 다른 이벤트 루프 턴에서 일어났는지(= 페이지 중간에 실제로 쉬었는지).
+      expect(new Set(ticksAtComputedWrite).size).toBeGreaterThanOrEqual(4);
     },
     60_000,
   );

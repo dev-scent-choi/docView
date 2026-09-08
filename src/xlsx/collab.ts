@@ -43,6 +43,65 @@ function toCellStyleAttrs(style: GridStyle): CellStyleAttrs {
   return attrs;
 }
 
+/**
+ * toCellStyleAttrs의 역방향 — 클라이언트가 GRID_STYLES_MAP에 쓴 서식(CellStyleAttrs)을 canonical
+ * 그리드의 공용 스타일 배열에 담을 모양(GridStyle)으로 바꾼다.
+ *
+ * 두 타입은 사실상 같은 서식을 서로 다른 층(Yjs 저장용 / canonical 저장용)에서 표현한 것이고,
+ * 필드 이름도 하나(`wrap` ↔ `w`)만 빼고 전부 같다 — 그 한 곳이 바로 이 변환이 필요한 이유다.
+ * 키를 항상 **같은 순서로** 넣는 것도 중요하다: findOrAddGridStyleIndex가 JSON 문자열 비교로
+ * 동일한 서식을 찾기 때문에, 같은 서식이 키 순서만 달라 서로 다른 항목으로 중복 등록되면 스타일
+ * 배열이 편집할 때마다 계속 늘어난다.
+ */
+export function fromCellStyleAttrs(attrs: CellStyleAttrs): GridStyle {
+  const style: { -readonly [K in keyof GridStyle]?: GridStyle[K] } = {};
+  if (attrs.b) style.b = 1;
+  if (attrs.i) style.i = 1;
+  if (attrs.u) style.u = 1;
+  if (attrs.st) style.st = 1;
+  if (attrs.fs) style.fs = attrs.fs;
+  if (attrs.ff) style.ff = attrs.ff;
+  if (attrs.col) style.col = attrs.col;
+  if (attrs.bg) style.bg = attrs.bg;
+  if (attrs.a) style.a = attrs.a;
+  if (attrs.va) style.va = attrs.va;
+  if (attrs.wrap) style.w = 1;
+  if (attrs.nf) style.nf = attrs.nf;
+  if (attrs.nd) style.nd = attrs.nd;
+  if (attrs.lk) style.lk = 1;
+  if (attrs.nu) style.nu = 1;
+  if (attrs.bt) style.bt = attrs.bt;
+  if (attrs.br) style.br = attrs.br;
+  if (attrs.bb) style.bb = attrs.bb;
+  if (attrs.bl) style.bl = attrs.bl;
+  return style;
+}
+
+/** 두 GridStyle이 "같은 서식"인지 판정하기 위한 정규화 문자열 — 키 순서에 좌우되지 않도록 정렬한다
+ * (parseXlsxToGrid의 StylePalette가 만든 기존 항목과 우리가 방금 만든 항목의 키 순서가 다를 수 있다). */
+function gridStyleSignature(style: GridStyle): string {
+  const entries = Object.entries(style as Record<string, unknown>).filter(([, v]) => v !== undefined);
+  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return JSON.stringify(entries);
+}
+
+/**
+ * canonical 그리드의 공용 스타일 배열에서 이 서식과 **구조적으로 같은** 항목을 찾아 그 인덱스를
+ * 돌려주고, 없으면 새로 추가한 뒤 그 인덱스를 돌려준다(셀은 서식 객체가 아니라 이 인덱스만 들고
+ * 있다 — GridCell.s).
+ *
+ * 선형 탐색으로 충분하다: 이 배열은 "워크북이 실제로 쓰는 서로 다른 서식의 팔레트"라 보통 수십
+ * 개 수준이고, 여기 오는 호출은 사용자가 서식 버튼을 누르는 빈도(초당 몇 번)에 불과하다.
+ */
+export function findOrAddGridStyleIndex(grid: GridDocument, style: GridStyle): number {
+  const signature = gridStyleSignature(style);
+  for (let i = 0; i < grid.styles.length; i += 1) {
+    if (gridStyleSignature(grid.styles[i]) === signature) return i;
+  }
+  (grid.styles as GridStyle[]).push(style);
+  return grid.styles.length - 1;
+}
+
 /** 병합 범위(1-based, {r,c,rs,cs})에서 "앵커가 아닌, 병합에 덮인" 칸의 (0-based r:c) 키 집합을 만든다.
  * 이런 칸은 ExcelJS가 앵커와 동일한 값을 그대로 돌려주는 것뿐(진짜 값이 아님)이라 시딩에서 제외해야
  * 병합이 "14칸에 같은 제목이 중복 입력된 것"이 아니라 진짜 병합으로 남는다(그리드 에디터가 렌더링
@@ -450,6 +509,24 @@ function cellStyle(cell: GridCell | 0 | undefined, grid: GridDocument): GridStyl
 }
 
 /**
+ * 값·서식 배열만으로는 표현할 수 없는 구조 변경을 exportXlsxFromGrid에 전달하는 통로.
+ *
+ * **왜 canonicalGrid 안에 담지 않는가**: canonicalGrid.sheets의 **인덱스가 곧 시트 식별자**다
+ * (Yjs cells 키 "시트:행:열"의 시트 번호, 수식 계산의 sheetIdx가 전부 이 번호를 쓴다). 그래서
+ * 시트를 지웠다고 배열에서 splice해 버리면 그 뒤 모든 시트의 번호가 밀려 셀 데이터가 통째로 다른
+ * 시트를 가리키게 된다 — 삭제는 배열에서 빼는 대신 "이 자리는 지워졌다"를 따로 알리는 방식으로만
+ * 안전하게 표현할 수 있다. 탭 순서도 같은 이유로 배열 순서와 분리해 둔다.
+ */
+export interface XlsxExportOptions {
+  /** 협업 중 삭제된 시트의 자리 번호(canonicalGrid.sheets의 인덱스). */
+  readonly removedSheetIndices?: ReadonlySet<number>;
+  /** 시트 자리 번호 → 화면(탭) 순서. 주지 않으면 원본 파일의 순서를 그대로 둔다. */
+  readonly sheetDisplayOrder?: ReadonlyMap<number, number>;
+}
+
+const EMPTY_REMOVED_SHEETS: ReadonlySet<number> = new Set<number>();
+
+/**
  * 원본 xlsx(수식·서식 등 우리가 편집하지 않는 모든 것)를 그대로 로드한 뒤,
  * 실제로 사용자가 바꾼 셀(값·서식 각각)만 덮어써 재직렬화한다 — docx export와 같은
  * "바뀐 부분만 교체" 원칙. baselineGrid와 값이 같은 셀(한 번도 편집되지 않은 셀 — 수식 셀 포함)은
@@ -465,11 +542,22 @@ export async function exportXlsxFromGrid(
   originalXlsxBytes: Uint8Array,
   canonicalGrid: GridDocument,
   baselineGrid: GridDocument,
+  options: XlsxExportOptions = {},
 ): Promise<Uint8Array> {
+  const removedSheets = options.removedSheetIndices ?? EMPTY_REMOVED_SHEETS;
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(originalXlsxBytes as unknown as ArrayBuffer);
   const visibleSheets = workbook.worksheets.filter((sheet) => !sheet.state || sheet.state === 'visible');
   const originalSheetCount = visibleSheets.length;
+
+  // 협업 중 삭제된 시트를 **가장 먼저** 워크북에서 제거한다 — 이름 바꾸기/시트 추가가 방금 지운
+  // 시트의 이름을 그대로 재사용할 수 있기 때문이다(먼저 지워두지 않으면 이름이 충돌한다).
+  // visibleSheets 배열 자체는 그대로 둔다: 이 배열의 인덱스가 곧 "원본에서의 시트 자리 번호"이고,
+  // canonicalGrid.sheets의 인덱스(= Yjs cells 키의 시트 번호)와 1:1로 대응하는 유일한 연결고리다.
+  for (const sheetIdx of removedSheets) {
+    const sheet = visibleSheets[sheetIdx];
+    if (sheet) workbook.removeWorksheet(sheet.id);
+  }
 
   // ExcelJS는 시트 보호(sheetProtection)를 읽어오긴 하지만, 아무 것도 안 건드리고 그대로
   // writeBuffer()만 하면 그 정보를 재직렬화하지 않고 조용히 잃어버린다(ExcelJS 자체의 한계로 보임 —
@@ -481,6 +569,7 @@ export async function exportXlsxFromGrid(
   );
 
   for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+    if (removedSheets.has(sheetIdx)) continue;
     const target = canonicalGrid.sheets[sheetIdx];
     // 협업 중 새로 추가된 시트(webviewer 쪽 "+"/삽입 메뉴)는 원본 xlsx에 애초에 없어서
     // visibleSheets에 자리가 없다 — 지금 이름으로 새 워크시트를 만들어 그 자리에 채워 넣는다.
@@ -510,7 +599,11 @@ export async function exportXlsxFromGrid(
     if (sheet) workbook.removeWorksheet(sheet.id);
   }
 
+  // 값 diff 패스 — 이 아래 두 전체 그리드 스캔은 최대 시트 크기에서 각각 초 단위로 이어질 수
+  // 있고(실측 ~2초), 자동저장과 다운로드 **매번** 돈다. 다른 대형 루프와 똑같이
+  // YIELD_EVERY_N_ROWS행마다 실제 이벤트 루프에 양보한다(계획의 Global Constraint #1).
   for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+    if (removedSheets.has(sheetIdx)) continue;
     const currentSheet = canonicalGrid.sheets[sheetIdx];
     const baselineSheet = baselineGrid.sheets[sheetIdx];
     const sheet = visibleSheets[sheetIdx];
@@ -519,19 +612,25 @@ export async function exportXlsxFromGrid(
     for (let r = 0; r < currentSheet.rows.length; r += 1) {
       const currentRow = currentSheet.rows[r];
       const baselineRow = baselineSheet?.rows[r];
-      for (let c = 0; c < currentRow.length; c += 1) {
-        const currentCell = currentRow[c];
+      // 열 상한은 행 배열 길이가 아니라 시트의 colCount다 — 편집으로 열이 늘어난 시트에서는
+      // (원본 시절 만들어진) 기존 행 배열이 새 colCount보다 짧을 수 있고, 그 새 열에 들어온 값이
+      // 행 배열 길이 기준으로 돌면 통째로 빠진다. cellText는 없는 칸(undefined)을 빈 칸으로 본다.
+      for (let c = 0; c < currentSheet.colCount; c += 1) {
+        const currentCell = currentRow?.[c];
         const baselineCell = baselineRow?.[c];
         const currentText = cellText(currentCell);
         const baselineText = cellText(baselineCell);
         if (currentText === baselineText) continue; // 편집되지 않음 (수식 셀 포함) — 원본 그대로 둔다
-        if (r >= currentSheet.rowCount || c >= currentSheet.colCount) continue;
+        if (r >= currentSheet.rowCount) continue;
         sheet.getCell(r + 1, c + 1).value = currentText === '' ? null : coerceCellValue(currentText);
       }
+      if ((r + 1) % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
     }
   }
 
+  // 서식 diff 패스 — 위와 같은 이유로 같은 양보 구조를 쓴다.
   for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+    if (removedSheets.has(sheetIdx)) continue;
     const currentSheet = canonicalGrid.sheets[sheetIdx];
     const baselineSheet = baselineGrid.sheets[sheetIdx];
     const sheet = visibleSheets[sheetIdx];
@@ -540,27 +639,66 @@ export async function exportXlsxFromGrid(
     for (let r = 0; r < currentSheet.rows.length; r += 1) {
       const currentRow = currentSheet.rows[r];
       const baselineRow = baselineSheet?.rows[r];
-      for (let c = 0; c < currentRow.length; c += 1) {
-        const currentCell = currentRow[c];
+      for (let c = 0; c < currentSheet.colCount; c += 1) {
+        const currentCell = currentRow?.[c];
         const baselineCell = baselineRow?.[c];
         const currentStyle = cellStyle(currentCell, canonicalGrid);
         const baselineStyle = cellStyle(baselineCell, baselineGrid);
         if (currentStyle === baselineStyle) continue;
         if (currentStyle && baselineStyle && JSON.stringify(currentStyle) === JSON.stringify(baselineStyle)) continue;
-        if (r >= currentSheet.rowCount || c >= currentSheet.colCount) continue;
+        if (r >= currentSheet.rowCount) continue;
         applyStyleToCell(sheet.getCell(r + 1, c + 1), currentStyle ? toCellStyleAttrs(currentStyle) : undefined);
       }
+      if ((r + 1) % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
     }
   }
 
   for (let i = 0; i < visibleSheets.length; i += 1) {
+    if (removedSheets.has(i)) continue; // 이미 워크북에서 제거된 시트 — 다시 잠글 대상이 아니다
     if (wasProtected[i]) {
       await visibleSheets[i].protect('', {});
     }
   }
 
+  applySheetDisplayOrder(workbook, visibleSheets, canonicalGrid, removedSheets, options.sheetDisplayOrder);
+
   const buffer = await workbook.xlsx.writeBuffer();
   return new Uint8Array(buffer as ArrayBuffer);
+}
+
+/**
+ * 시트 탭 순서 변경(클라이언트의 SheetStructure.order)을 실제 파일의 시트 순서로 옮긴다.
+ *
+ * ExcelJS는 `workbook.worksheets` 게터에서 `orderNo`로 정렬하고 저장 모델도 그 게터를 쓰므로
+ * (node_modules/exceljs/lib/doc/workbook.js), orderNo만 다시 매기면 저장 순서가 바뀐다. 이때
+ * "지금 존재하는 orderNo 값들"을 그대로 재사용해 자리만 서로 바꾼다 — 새 숫자를 임의로 부여하면
+ * 숨겨진 시트(visibleSheets에 없어 우리가 순서를 모르는 시트)와의 상대 위치가 흐트러진다.
+ */
+function applySheetDisplayOrder(
+  workbook: ExcelJS.Workbook,
+  visibleSheets: readonly ExcelJS.Worksheet[],
+  canonicalGrid: GridDocument,
+  removedSheets: ReadonlySet<number>,
+  displayOrder: ReadonlyMap<number, number> | undefined,
+): void {
+  if (!displayOrder || displayOrder.size === 0) return;
+  const survivors: Array<{ sheetIdx: number; worksheet: ExcelJS.Worksheet }> = [];
+  for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+    if (removedSheets.has(sheetIdx)) continue;
+    const worksheet = visibleSheets[sheetIdx];
+    if (worksheet && workbook.getWorksheet(worksheet.id)) survivors.push({ sheetIdx, worksheet });
+  }
+  if (survivors.length < 2) return;
+
+  const slots = survivors
+    .map(({ worksheet }) => (worksheet as unknown as { orderNo: number }).orderNo)
+    .sort((a, b) => a - b);
+  const ordered = [...survivors].sort(
+    (a, b) => (displayOrder.get(a.sheetIdx) ?? a.sheetIdx) - (displayOrder.get(b.sheetIdx) ?? b.sheetIdx),
+  );
+  ordered.forEach(({ worksheet }, i) => {
+    (worksheet as unknown as { orderNo: number }).orderNo = slots[i];
+  });
 }
 
 /** 저장 직후 뷰어용 그리드(읽기전용 열람 캐시)를 새 xlsx 바이트에서 다시 뽑아낸다. */
