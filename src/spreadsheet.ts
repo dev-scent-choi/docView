@@ -137,8 +137,15 @@ export async function saveGridDerived(
   );
 }
 
-const MAX_ROWS = 300_000;
-const MAX_COLS = 120;
+/**
+ * xlsx 파싱이 그리드로 받아들이는 최대 행/열 — 이 코드베이스가 "시트 하나의 현실적인 크기"로
+ * 인정하는 유일한 기준선이다. 동시편집 서버(collab/room.ts)의 canonical 그리드 성장 상한도
+ * 반드시 이 값을 그대로 써야 한다: 파서가 절대 만들어내지 못하는 크기를 canonical만 허용하면,
+ * 조작된 소켓 메시지 하나로 파일에서는 있을 수 없는 크기의 배열을 서버에 할당시킬 수 있다
+ * (YIELD_EVERY_N_ROWS를 여기서 export해 서버/클라이언트가 공유하는 것과 같은 이유).
+ */
+export const MAX_ROWS = 300_000;
+export const MAX_COLS = 120;
 const DEFAULT_COL_WIDTH_PX = 100;
 const CHAR_TO_PX = 7.2;
 

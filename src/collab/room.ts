@@ -34,6 +34,8 @@ import {
   parseXlsxToGrid,
   saveGridDerived,
   yieldToEventLoop,
+  MAX_COLS,
+  MAX_ROWS,
   YIELD_EVERY_N_ROWS,
   type GridCell,
   type GridDocument,
@@ -161,6 +163,20 @@ interface Room {
   /** xlsx 룸에서만 쓰인다 — 연결별로 "지금 이 시트의 이 페이지들을 보고 있다"를 추적한다.
    * 연결이 끊기면(closeConn) 이 맵에서 즉시 제거한다. */
   readonly pageSubscriptions: Map<WebSocket, { sheet: number; pages: readonly number[] }>;
+  /**
+   * xlsx 룸에서만 쓰인다 — canonical 그리드의 **큰 배열 성장**을 순서대로 이어 붙이는 백그라운드
+   * 체인. 구조 변경(rowCount/colCount 확장)이 요구하는 배열 할당은 상한(30만 행)까지 갈 수 있어
+   * 동기로 돌면 이벤트 루프를 통째로 멈춘다 — 이 프로젝트가 이미 여러 번 고친 그 버그 클래스다.
+   *
+   * 관찰자는 **의미상 중요한 스칼라**(rowCount/colCount)만 동기로 반영하고, 배열 패딩은 여기에
+   * 예약한다. 패딩이 늦어져도 안전한 이유: 내보내기는 `rows.length`를 돌며 `row?.[c]`로 읽고
+   * `r >= rowCount`를 걸러내므로, 아직 채워지지 않은 뒤쪽 빈 행은 결과에 아무 영향이 없다.
+   * 그리고 그 사이 실제 편집이 도착하면 ensureCanonicalCellSlot이 그 행만 즉시 만들어 준다.
+   *
+   * 하나의 체인으로 묶는 이유는 recomputeSubscribedPagesInBackground와 같다 — 따로 흘려보내면
+   * 각 호출이 자기 첫 await까지 동기로 실행돼 양보 없는 블록이 연달아 붙는다.
+   */
+  canonicalGrowth: Promise<void>;
 }
 
 const rooms = new Map<string, Room>();
@@ -222,11 +238,20 @@ function applyCellsChangeToCanonical(
  * canonical 그리드가 스스로 넓어질 수 있는 상한. 클라이언트가 보내는 셀 키는 신뢰할 수 없는
  * 입력이므로(조작된 소켓 메시지로 "3:99999999:99999999" 같은 키를 보낼 수 있다), 아래 성장
  * 로직에 반드시 상한이 필요하다 — 없으면 키 하나로 수억 칸짜리 배열을 만들어 서버 메모리를
- * 통째로 날릴 수 있다. 값은 spreadsheet.ts의 파싱 상한(MAX_ROWS=300_000)과 같은 수준으로 두고,
- * 열은 클라이언트의 행/열 이동 루프 상한(1000)보다 넉넉하게 잡는다.
+ * 통째로 날릴 수 있다.
+ *
+ * **두 값 모두 파서의 상한(spreadsheet.ts의 MAX_ROWS/MAX_COLS)을 그대로 쓴다.** 예전에는 열만
+ * 1024로 따로 뒀는데(클라이언트 밀기 루프의 상한 1000을 넉넉히 덮으려는 의도였다), 그건 이
+ * 코드베이스가 실제로 파싱하는 열 수(120)의 8.5배라 조작된 메시지 한 통으로 약 2.4GB를
+ * 할당시킬 수 있는 창구였다(실측: 300k행 × 1024열 = 2.4GB / 1.1초 정지).
+ *
+ * 열 상한을 파서와 맞춰도 잃는 것이 없다: canonical이 120열을 넘겨 들고 있어도 저장 후
+ * reparseGridForViewer와 다음 룸 열기가 모두 MAX_COLS에서 잘라내므로, 120열 너머는 애초에
+ * 편집 세션이 지속적으로 표현할 수 있는 영역이 아니다. 반대로 상한을 파서보다 넉넉히 두면
+ * "파일에서는 절대 나올 수 없는 크기"를 서버 메모리에만 만들어낼 수 있게 된다.
  */
-const MAX_CANONICAL_ROWS = 300_000;
-const MAX_CANONICAL_COLS = 1_024;
+const MAX_CANONICAL_ROWS = MAX_ROWS;
+const MAX_CANONICAL_COLS = MAX_COLS;
 /** 한 워크북이 가질 수 있는 시트 자리 수 상한 — 위와 같은 이유(구조 맵 키도 클라이언트 입력이다). */
 const MAX_CANONICAL_SHEETS = 512;
 
@@ -252,11 +277,54 @@ function ensureCanonicalCellSlot(sheet: GridSheet, row: number, col: number): bo
   const rows = mutable.rows as MutableGridRow[];
   const colCount = Math.max(mutable.colCount, col + 1);
   mutable.colCount = colCount;
-  while (rows.length <= row) rows.push(new Array<GridCell | 0>(colCount).fill(0));
+  // 사이에 낀 행들은 **빈 배열**로 채운다(`new Array(colCount).fill(0)`이 아니다). 이 함수는
+  // 관찰자 안에서 동기로 불려야 하므로(호출부가 바로 다음 줄에서 rows[row]에 값을 쓴다) 여기서는
+  // 이벤트 루프에 양보할 수 없다 — 그래서 애초에 양보가 필요 없을 만큼 싸게 만든다. 조작된 셀 키
+  // 하나로 30만 행을 만들 때, 폭까지 채우면 약 300MB/220ms지만 빈 배열이면 약 20MB/14ms다.
+  //
+  // 폭이 모자란 행은 이 코드베이스 어디서나 이미 정상 상태다: 내보내기는 열 상한으로
+  // `sheet.colCount`를 쓰고 칸은 `row?.[c]`로 읽으며(xlsx/collab.ts의 해당 주석 참고), 아래
+  // applyCellsChangeToCanonical/applyStylesChangeToCanonical의 삭제 경로도 `rows[row].length`로
+  // 거른다. 실제로 값이 들어가는 행(row)만 colCount까지 채우면 충분하다.
+  while (rows.length <= row) rows.push([]);
   const rowArray = rows[row];
   while (rowArray.length < colCount) rowArray.push(0);
   if (row + 1 > mutable.rowCount) mutable.rowCount = row + 1;
   return true;
+}
+
+/**
+ * canonical 시트의 행 배열을 targetRowCount까지 늘린다 — YIELD_EVERY_N_ROWS행마다 실제로 이벤트
+ * 루프에 양보한다. 상한(30만 행)까지 갈 수 있는 유일한 대형 할당이라, 이 코드베이스의 다른 모든
+ * 대형 루프와 똑같은 청크+양보 구조를 쓴다(spreadsheet.ts yieldToEventLoop 주석 참고).
+ */
+async function growCanonicalRows(sheet: MutableGridSheet, targetRowCount: number): Promise<void> {
+  const rows = sheet.rows as MutableGridRow[];
+  while (rows.length < targetRowCount) {
+    const end = Math.min(rows.length + YIELD_EVERY_N_ROWS, targetRowCount);
+    while (rows.length < end) rows.push(new Array<GridCell | 0>(sheet.colCount).fill(0));
+    await yieldToEventLoop();
+  }
+}
+
+/** 위와 같은 이유로 청크+양보로 도는 열 방향 패딩(기존 행들을 targetColCount까지 넓힌다). */
+async function widenCanonicalRows(sheet: MutableGridSheet, targetColCount: number): Promise<void> {
+  const rows = sheet.rows as MutableGridRow[];
+  for (let start = 0; start < rows.length; start += YIELD_EVERY_N_ROWS) {
+    const end = Math.min(start + YIELD_EVERY_N_ROWS, rows.length);
+    for (let r = start; r < end; r += 1) {
+      const row = rows[r];
+      while (row.length < targetColCount) row.push(0);
+    }
+    await yieldToEventLoop();
+  }
+}
+
+/** 성장 작업 하나를 룸의 백그라운드 체인 끝에 이어 붙인다(Room.canonicalGrowth 주석 참고). */
+function enqueueCanonicalGrowth(room: Room, work: () => Promise<void>): void {
+  room.canonicalGrowth = room.canonicalGrowth.then(work).catch((error: unknown) => {
+    console.error(`canonical 그리드 확장 실패 (문서 ${room.docId}):`, error);
+  });
 }
 
 /**
@@ -373,15 +441,24 @@ function applyStructureChangeToCanonical(
       const rowCount = Math.min(value.rowCount, MAX_CANONICAL_ROWS);
       // 행이 늘어난 경우에만 배열을 채운다 — 줄어든 경우엔 rowCount만 낮춘다(내보내기가 그 뒤를
       // 무시하고 ExcelJS 쪽 꼬리 행도 잘라낸다). 배열을 실제로 자르면 그 사이 도착한 편집을 잃는다.
+      //
+      // rowCount(스칼라)는 동기로 반영하고, **배열 패딩만** 백그라운드 체인으로 넘긴다: 이
+      // rowCount는 조작된 구조 메시지 하나로 상한(30만)까지 뛸 수 있어 동기로 할당하면 이벤트
+      // 루프가 통째로 멈춘다. 늦게 채워져도 안전한 이유는 Room.canonicalGrowth 주석 참고.
       sheet.rowCount = rowCount;
-      const rows = sheet.rows as MutableGridRow[];
-      while (rows.length < rowCount) rows.push(new Array<GridCell | 0>(sheet.colCount).fill(0));
+      if ((sheet.rows as MutableGridRow[]).length < rowCount) {
+        enqueueCanonicalGrowth(room, () => growCanonicalRows(sheet, rowCount));
+      }
     }
     if (Number.isInteger(value.colCount) && value.colCount > 0) {
       const colCount = Math.min(value.colCount, MAX_CANONICAL_COLS);
+      const previousColCount = sheet.colCount;
       sheet.colCount = colCount;
-      for (const row of sheet.rows as MutableGridRow[]) {
-        while (row.length < colCount) row.push(0);
+      // 열 패딩은 "행 수 × 늘어난 열 수"라 행 패딩보다도 클 수 있다 — 같은 체인에 얹어
+      // 청크마다 양보하게 한다. 실제로 넓어졌을 때만 예약한다(열이 줄거나 그대로인 구조 변경까지
+      // 30만 행짜리 무의미한 스캔을 예약하지 않도록).
+      if (colCount > previousColCount) {
+        enqueueCanonicalGrowth(room, () => widenCanonicalRows(sheet, colCount));
       }
     }
     if (Number.isInteger(value.freezeRows)) sheet.freezeRows = value.freezeRows as number;
@@ -839,6 +916,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     removedSheetIndices: new Set<number>(),
     sheetDisplayOrder: new Map<number, number>(),
     pageSubscriptions: new Map(),
+    canonicalGrowth: Promise.resolve(),
   };
   room.ready = seedRoom(room);
   rooms.set(docId, room);
@@ -1295,4 +1373,20 @@ export function getSeededPagesForTest(docId: string, sheet: number): Set<number>
 /** 테스트 전용 — 룸의 canonical 그리드를 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */
 export function getRoomCanonicalGridForTest(docId: string): GridDocument | null {
   return rooms.get(docId)?.canonicalGrid ?? null;
+}
+
+/**
+ * 테스트 전용 — 지금 예약돼 있는 canonical 성장 작업이 전부 끝날 때까지 기다린다.
+ * 성장은 이벤트 루프에 양보하며 청크 단위로 도는 백그라운드 체인이라(canonicalGrowth 주석 참고)
+ * 고정된 틱 수를 흘려보내는 것으로는 완료를 보장할 수 없다.
+ */
+export async function awaitCanonicalGrowthForTest(docId: string): Promise<void> {
+  const room = rooms.get(docId);
+  if (!room) return;
+  // 체인이 도는 도중에 새 작업이 덧붙을 수 있으므로, 더 이상 늘어나지 않을 때까지 따라간다.
+  let seen: Promise<void> | null = null;
+  while (seen !== room.canonicalGrowth) {
+    seen = room.canonicalGrowth;
+    await seen;
+  }
 }

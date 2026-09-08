@@ -701,11 +701,17 @@ async function main(): Promise<void> {
           // 없다) 여기서 delete를 빼면, 구멍이 있는 열에서 그 자리에 직전 값이 그대로 남아
           // 데이터가 복제된다 — 목적지 r+1은 이미 자기 값을 r+2로 옮기고 난 뒤이기 때문이다.
           // (아래 delta === -1 쪽은 처음부터 이 처리를 하고 있었다.)
+          //
+          // **단, 그 "이미 옮기고 난 뒤"가 성립하는 목적지만 지워야 한다.** 이 루프의 원본 범위는
+          // [atRow, 999]이므로 목적지 범위는 [atRow+1, 1000]이고, 그중 행 1000은 **한 번도 원본이
+          // 된 적이 없다** — 즉 이 루프가 비워준 자리가 아니라 원래부터 사용자 데이터가 있던 자리다.
+          // 가드 없이 지우면 삽입 지점과 아무 상관 없는 행 1000의 데이터가 통째로 사라진다
+          // (1000행이 넘는 시트에서 행을 삽입하기만 하면 나던 실제 데이터 손실).
           if (val !== undefined) cells.set(toKey, val);
-          else cells.delete(toKey);
+          else if (r + 1 <= 999) cells.delete(toKey);
           const style = styles.get(fromKey);
           if (style) styles.set(toKey, style);
-          else styles.delete(toKey);
+          else if (r + 1 <= 999) styles.delete(toKey);
         }
       }
       for (let c = 0; c < oldColCount; c += 1) {
@@ -756,12 +762,13 @@ async function main(): Promise<void> {
           const fromKey = gridCellKey(sheetIdx, r, c);
           const toKey = gridCellKey(sheetIdx, r, c + 1);
           const val = cells.get(fromKey);
-          // 행 삽입과 같은 이유로 목적지를 반드시 비운다(shiftRowsAndMerges의 주석 참고).
+          // 행 삽입과 같은 이유로 목적지를 비우되, **이 루프가 실제로 비운 자리일 때만** 지운다
+          // (맨 위 경계인 열 1000은 원본이 된 적이 없다 — shiftRowsAndMerges의 주석 참고).
           if (val !== undefined) cells.set(toKey, val);
-          else cells.delete(toKey);
+          else if (c + 1 <= 999) cells.delete(toKey);
           const style = styles.get(fromKey);
           if (style) styles.set(toKey, style);
-          else styles.delete(toKey);
+          else if (c + 1 <= 999) styles.delete(toKey);
         }
       }
       for (let r = 0; r < oldRowCount; r += 1) {
