@@ -326,6 +326,31 @@ async function main(): Promise<void> {
 
   const undoManager = new Y.UndoManager([cells, structure, styles]);
 
+  /**
+   * 시트 자리 번호 → 마지막으로 관찰한 행/열 수. structure.observe가 "행/열 삽입·삭제가 실제로
+   * 일어났다"를 시트 이름 변경·탭 순서 변경 같은 다른 구조 갱신과 구별하는 유일한 기준이다
+   * (리뷰 지적 I-4의 undo 스택 무효화 참고).
+   */
+  const lastSeenSheetExtents = new Map<string, { rowCount: number; colCount: number }>();
+  structure.forEach((s, key) => lastSeenSheetExtents.set(key, { rowCount: s.rowCount, colCount: s.colCount }));
+
+  /**
+   * 이번 structure 이벤트에서 기존 시트의 행/열 **수**가 바뀌었는지 — 확인하면서 기준값을 갱신한다.
+   *
+   * 처음 보는 키(협업 중 새로 추가된 시트)는 "바뀐 것"으로 세지 않는다: 시트는 항상 뒤에 붙고
+   * 자리 번호가 밀리지 않으므로(room.ts의 removedSheetIndices 주석) 기존 셀 키가 가리키는 대상이
+   * 달라지지 않는다.
+   */
+  function consumeSheetExtentChange(): boolean {
+    let changed = false;
+    structure.forEach((s, key) => {
+      const prev = lastSeenSheetExtents.get(key);
+      if (prev && (prev.rowCount !== s.rowCount || prev.colCount !== s.colCount)) changed = true;
+      lastSeenSheetExtents.set(key, { rowCount: s.rowCount, colCount: s.colCount });
+    });
+    return changed;
+  }
+
   let activeSheet = 0;
   /** 마지막으로 선택(focus)된 칸 — 편집 중이 아니어도 계속 유지된다(툴바 서식 버튼이 "마지막
    * 선택 칸"에 적용되어야 하므로). */
@@ -1975,7 +2000,29 @@ async function main(): Promise<void> {
     renderTableVirtualized();
   }
 
-  structure.observe(() => {
+  structure.observe((event) => {
+    /**
+     * 원격에서 온 행/열 삽입·삭제라면 undo 스택을 통째로 버린다 — 리뷰 지적 I-4.
+     *
+     * UndoManager는 이 구조 변경 자체는 추적하지 않는다(서버가 보낸 원격 트랜잭션이라 trackedOrigins
+     * 밖이다 — 위 sendGridStructureOp 주석의 "알려진 대가"). 문제는 **스택에 이미 쌓여 있는 로컬
+     * 셀 편집들**이다: 그것들은 편집 당시의 `sheet:row:col` 키로 되돌리는데, 행/열이 밀린 뒤에는 그
+     * 키가 전혀 다른 행/열을 가리킨다. 그 상태로 Ctrl+Z를 누르면 사용자가 손댄 적 없는 칸에 옛 값이
+     * 조용히 써진다 — 이 프로젝트가 계속 쫓아온 그 손상 클래스와 같은 모양이다.
+     *
+     * 스택 항목을 새 위치로 다시 매핑하는 것이 이상적이지만 훨씬 복잡하다. 되돌릴 수 없게 되는
+     * 것보다 잘못된 칸을 덮어쓰는 것이 훨씬 나쁘므로, 표준적인 완화책대로 스택을 버린다.
+     *
+     * 판정은 두 조건의 곱이다: (1) 로컬 트랜잭션이 아니다(`transaction.local === false` — Yjs가
+     * 원격 업데이트를 적용할 때 쓰는 값), (2) 기존 시트의 행/열 수가 실제로 바뀌었다. 그래서 시트
+     * 이름 변경·탭 순서 변경 같은 원격 갱신이나, 아무 칸도 밀지 않는 로컬 행 추가 버튼
+     * (btn-add-row 등)은 undo를 잃지 않는다. 내가 누른 삽입·삭제도 서버를 돌아 **원격 트랜잭션으로**
+     * 도착하므로 여기서 같이 걸린다(의도한 대로 — 내가 눌렀든 남이 눌렀든 스택 키는 낡는다).
+     */
+    // 기준값 갱신은 **로컬 이벤트에서도 반드시** 해야 한다(&& 단축 평가로 건너뛰면 로컬 행 추가가
+    // 기준값을 낡게 만들어, 이후의 무해한 원격 갱신 하나가 스택을 괜히 날린다).
+    const sheetExtentChanged = consumeSheetExtentChange();
+    if (!event.transaction.local && sheetExtentChanged) undoManager.clear();
     // 편집 중(contentEditable)에 표를 통째로 다시 그리면 그 <td>가 DOM에서 떨어져 나가며 강제
     // blur가 발생하고, 방금 타이핑하던 값이 커밋되지 못한 채 사라진다(위 blur 핸들러의 세대 판정이
     // 그런 blur를 "버림"으로 처리한다) — 스크롤 리스너가 같은 이유로 쓰는 가드와 같은 판정이다.
