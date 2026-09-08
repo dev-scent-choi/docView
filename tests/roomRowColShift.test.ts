@@ -479,6 +479,39 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
     expect(getRoomCanonicalGridForTest(docId)!.sheets[0].rowCount).toBe(rowCountBefore);
   }, 120_000);
 
+  /**
+   * 행/열 삽입이 **유휴 자동저장으로 디스크까지** 도달하는지 — 위 테스트들은 전부
+   * getCurrentBytes(즉시 다운로드) 경로를 보므로 이건 별개의 확인이다.
+   *
+   * 여기가 어긋날 수 있는 지점: 이 연산이 Yjs에 쓰는 트랜잭션에는 GRID_STRUCTURE_SHIFT_ORIGIN이
+   * 붙는데, 창 시딩(GRID_WINDOW_SEED_ORIGIN)이나 계산값 쓰기처럼 **자동저장 면제**로 분류해 버리면
+   * 편집이 화면·다운로드에는 보이지만 자동저장으로는 절대 파일에 반영되지 않는다(이 프로젝트가
+   * 이미 여러 번 겪은 조용한 손실 클래스). 셀 재시딩은 면제 origin을 쓰므로, 면제되지 않는
+   * 구조 메타데이터 쓰기가 맨 마지막에 오는 순서에 실제로 의존한다.
+   */
+  test('a row insert reaches the disk through idle autosave (not just the immediate-download path)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { docId, socket } = await openRoom(await makeTallXlsx(600), [0]);
+    const saveSpy = vi.spyOn(store, 'saveOriginal');
+
+    sendStructureOp(socket, { sheet: 0, kind: 'insertRows', at: 0, count: 1 });
+    await settleStructureOp(docId);
+
+    await vi.advanceTimersByTimeAsync(8_100); // AUTOSAVE_IDLE_MS(8초) + 여유
+    await flushEventLoop();
+    expect(saveSpy).toHaveBeenCalled();
+
+    // 디스크에 실제로 밀린 상태가 저장됐는지 — 저장된 바이트를 다시 열어 확인한다.
+    const savedBytes = await store.readOriginal(docId, 'xlsx');
+    const reopened = new ExcelJS.Workbook();
+    await reopened.xlsx.load(savedBytes as unknown as ArrayBuffer);
+    const sheet = reopened.getWorksheet('Sheet1')!;
+    expect(sheet.getCell('A1').value).toBeFalsy(); // 새로 삽입된 빈 행
+    expect(sheet.getCell('A2').value).toBe('top'); // 0-based 0 → 1
+    expect(sheet.getCell('A502').value).toBe('mid500'); // 0-based 500 → 501
+    saveSpy.mockRestore();
+  }, 120_000);
+
   test('two structure ops in a row compose correctly (the chain serializes them)', async () => {
     const { docId, socket } = await openRoom(await makeTallXlsx(), [0]);
 
