@@ -2290,6 +2290,14 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   cursor: move;
   user-select: none;
 }
+/* xlsx 동시편집기는 지금 스크롤로 보이는 범위(페이지)만 서버에서 채워지므로(윈도잉), 찾기/바꾸기가
+   시트 전체가 아니라 그 범위 안에서만 동작한다는 걸 패널을 열 때마다 알려준다. */
+.search-window-hint {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.72rem;
+  color: var(--v-text-dim);
+  border-bottom: 1px solid var(--v-glass-line);
+}
 .editor-body .search-row,
 .editor-body .search-actions {
   padding: 0.4rem 0.7rem;

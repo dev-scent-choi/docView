@@ -1,5 +1,6 @@
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
+import * as encoding from 'lib0/encoding';
 import {
   DOC_META_MAP,
   DOC_META_SAVED_AT_KEY,
@@ -13,6 +14,7 @@ import {
   GRID_STYLES_MAP,
   gridCellKey,
   parseGridCellKey,
+  PAGE_SIZE_ROWS,
   type CellStyleAttrs,
   type GridMergeShape,
   type SheetStructure,
@@ -48,8 +50,9 @@ const token = params.get('token') ?? '';
  * 칸이 편집 불가여야 한다. main()에서 서버가 내려준 토큰 권한으로 설정된다. */
 let canEdit = true;
 
-/** renderTable()이 다시 그릴 때마다 하나씩 늘어난다. 붙여넣기로 시트 범위가 넓어지면
- * renderTable()이 트랜잭션 도중 동기적으로 표 전체를 다시 그리는데, 이때 포커스가 있던 셀이
+/** renderTableVirtualized()가 다시 그릴 때마다 하나씩 늘어난다. 붙여넣기로 시트 범위가 넓어지거나
+ * 스크롤로 가상 렌더가 다시 그리면 renderTableVirtualized()가 트랜잭션 도중 동기적으로 표 전체를
+ * (또는 화면에 보이는 범위를) 다시 그리는데, 이때 포커스가 있던 셀이
  * DOM에서 떨어져 나가며 브라우저가 blur를 보낸다 — 그 blur 콜백이 실행되는 시점엔 이미 그 요소가
  * 실제로는 못 쓰게 됐어도 `isConnected`가 아직 true로 보이는 타이밍이 브라우저마다 있어(제거
  * 시점과 blur 디스패치 시점이 항상 완전히 동기적이지 않음) 그 값만으로는 안전하게 걸러낼 수 없다.
@@ -227,8 +230,8 @@ async function main(): Promise<void> {
     if (isSynced) {
       statusEl.dataset.status = 'synced';
       renderSheetTabs();
-      renderTable();
-      // 동기화 직후 structure.observe가 한 번 더 renderTable()을 트리거해 폭이 살짝 바뀌는 경우가
+      renderTableVirtualized();
+      // 동기화 직후 structure.observe가 한 번 더 renderTableVirtualized()를 트리거해 폭이 살짝 바뀌는 경우가
       // 있다 — 그 재렌더까지 끝날 시간(두 번의 rAF, 즉 최소 한 번의 페인트)을 준 뒤에야 화면에
       // 드러내, 사용자가 "넓었다가 줄어드는" 깜빡임을 보지 않게 한다.
       requestAnimationFrame(() => {
@@ -505,7 +508,7 @@ async function main(): Promise<void> {
           if (activeSheet === idx) return;
           activeSheet = idx;
           renderSheetTabs();
-          renderTable();
+          renderTableVirtualized();
         });
         tab.addEventListener('dblclick', () => startSheetRename(idx));
         tab.addEventListener('contextmenu', (event) => {
@@ -1027,6 +1030,10 @@ async function main(): Promise<void> {
   /** 실제 렌더된 <td>의 border-box 높이(1.7rem + 위아래 패딩 0.18rem*2, 대략 27~28px)와 맞춘
    * 근사치 — 화면을 채우는 데 필요한 행 수를 계산하는 용도라 1px 오차는 문제 되지 않는다. */
   const ROW_HEIGHT_PX = 27;
+  /** 가상 스크롤(윈도잉 렌더링)이 화면 위아래로 실제 뷰포트보다 더 그려두는 여유 행 수 — 스크롤이
+   * 살짝만 움직여도 매 프레임 다시 그릴 필요 없게 완충 역할을 한다(너무 작으면 빠르게 스크롤할 때
+   * 빈 줄이 잠깐 보이고, 너무 크면 DOM 노드가 늘어나 다시 느려진다). */
+  const OVERSCAN_ROWS = 50;
 
   /** 시트 크기만으로는 "확대율을 낮추면 화면에 빈 칸이 더 많이 보여야 한다"(실제 엑셀은 격자가
    * 사실상 무한이라 화면에 보이는 만큼 항상 그려진다)는 걸 반영 못 한다 — 지금 뷰포트/줌 배율로
@@ -1072,7 +1079,14 @@ async function main(): Promise<void> {
     return { anchors, covered };
   }
 
-  function renderTable(): void {
+  /** 전체 행만큼 <tr>을 만들던 예전 renderTable()을 대체한다 — 시트가 아무리 커도 실제 DOM에는
+   * "지금 보이는 범위 + 여유분(OVERSCAN_ROWS)"만큼의 행만 만든다. 스크롤 가능한 전체 높이는
+   * tbody에 직접 준 height로 확보해 두고(뷰어의 translateY 트릭과 같은 원리), 그 안에서 실제로
+   * 그려지는 행만 position:absolute + top으로 제자리에 놓는다. 틀 고정된 위쪽 행(freezeRows)만은
+   * 예외로, 스크롤 위치와 무관하게 항상 정상 흐름(position:relative)으로 그려서 계속 보이게 하고
+   * (applyFreezePanes가 그 안의 셀들을 다시 position:sticky로 만든다), 그 외의 열/셀 생성·이벤트
+   * 바인딩 로직은 예전 renderTable과 완전히 동일하다. */
+  function renderTableVirtualized(): void {
     renderGeneration += 1;
     // 다시 그리면 이전 <td>들은 전부 버려지므로, 그 순간 실제로 "편집 중"이던 칸도 이제 없다 —
     // blur가 안전하게 안 오는 경우에도(과거 stale-blur 버그) 여기서 확실히 리셋해 둔다.
@@ -1084,7 +1098,8 @@ async function main(): Promise<void> {
     warningEl.hidden = !(sheet.rowCount > EDIT_SOFT_ROW_LIMIT || sheet.colCount > EDIT_SOFT_COL_LIMIT);
     const { rows: renderRowCount, cols: renderColCount } = renderCountsFor(sheet);
     const { anchors, covered } = buildMergeLookup(activeSheet);
-    const freezeRows = sheet.freezeRows ?? 0;
+    // freezeRows는 항상 정상 흐름으로 그려지므로, 실제 렌더 행 수를 넘지 않게 안전하게 자른다.
+    const freezeRows = Math.min(sheet.freezeRows ?? 0, renderRowCount);
     const freezeCols = sheet.freezeCols ?? 0;
 
     // table-layout:fixed에서 열 너비를 정확히 고정하려면 <colgroup>이 가장 확실하다(그 전까진
@@ -1093,9 +1108,13 @@ async function main(): Promise<void> {
     // 엑셀 열이 아니라 에디터가 그리는 것이라 colWidths에 대응하는 값이 없다.
     const colgroup = document.createElement('colgroup');
     colgroup.appendChild(document.createElement('col'));
+    // 가상 스크롤로 그려지는(position:absolute) 행의 <td>는 <colgroup>의 영향을 받지 못한다(아래
+    // buildRow 주석 참고) — 그 행의 셀에 직접 지정할 열 너비를 여기서 같이 기록해 둔다.
+    const colWidthsPx: number[] = [];
     let totalColWidthPx = ROWNUM_COL_WIDTH_PX;
     for (let c = 0; c < renderColCount; c += 1) {
       const width = sheet.colWidths?.[c] ?? DEFAULT_COL_WIDTH_PX;
+      colWidthsPx.push(width);
       const col = document.createElement('col');
       col.style.width = `${width}px`;
       colgroup.appendChild(col);
@@ -1134,19 +1153,48 @@ async function main(): Promise<void> {
     thead.appendChild(headRow);
     tableEl.appendChild(thead);
 
+    // ---------- 가상 스크롤 범위 계산 ----------
+    const scrollTop = scrollHostEl.scrollTop;
+    const viewportHeight = scrollHostEl.clientHeight;
+    const firstVisible = Math.max(freezeRows, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN_ROWS);
+    const lastVisible = Math.min(
+      renderRowCount - 1,
+      Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT_PX) + OVERSCAN_ROWS,
+    );
+
     const tbody = document.createElement('tbody');
-    for (let r = 0; r < renderRowCount; r += 1) {
+    // <tbody>를 위치 기준(포함 블록)으로 삼아, 그 안의 position:absolute 행들의 top이 "표 안에서
+    // 이 행이 있어야 할 실제 위치"를 그대로 가리키게 한다(틀 고정 행이 정상 흐름으로 차지하는
+    // 높이만큼 자동으로 그 아래에 이어진다 — 별도로 헤더/틀고정 높이를 더할 필요가 없다).
+    tbody.style.position = 'relative';
+    tbody.style.height = `${renderRowCount * ROW_HEIGHT_PX}px`;
+
+    /** 행 하나(<tr>)를 만든다 — 셀 생성·서식·이벤트 바인딩은 예전 renderTable과 동일하다.
+     * isVirtualized(가상 스크롤로 배치되는 행)면 (1) position:absolute + top으로 스크롤 위치와
+     * 무관하게 제자리에 놓고, (2) <colgroup>이 더 이상 적용되지 않으므로(position:absolute인
+     * <tr>은 계산된 display가 표준상 block으로 바뀌어 그 자손 <td>가 표의 열 그리드에서 떨어져
+     * 나간다 — 실측 확인된 동작) 각 셀에 열 너비를 직접 인라인으로 지정해 틀고정 행과 정확히 같은
+     * 자리에 맞춘다. */
+    const buildRow = (r: number, isVirtualized: boolean): HTMLTableRowElement => {
       const tr = document.createElement('tr');
       // Chromium은 서로 다른 <tr> 소속인 position:sticky 셀들 사이의 z-index 비교를 신뢰할 수 없게
       // 처리한다(고정된 행의 배경보다 스크롤된 다른 행의 셀이 위로 그려지는 버그) — 각 행을
       // position+z-index로 그 자체의 스태킹 컨텍스트로 격리하면, 셀별 z-index는 그 행 안에서만
       // 비교되고 행 간 우열은 이 tr의 z-index로만 결정되어 늘 정확하다.
-      tr.style.position = 'relative';
+      if (isVirtualized) {
+        tr.style.position = 'absolute';
+        tr.style.top = `${r * ROW_HEIGHT_PX}px`;
+        tr.style.left = '0';
+        tr.style.right = '0';
+      } else {
+        tr.style.position = 'relative';
+      }
       tr.style.zIndex = r < freezeRows ? '2' : '1';
       const rowHead = document.createElement('th');
       rowHead.className = 'g-edit-rownum';
       rowHead.textContent = String(r + 1);
       rowHead.dataset.row = String(r);
+      if (isVirtualized) rowHead.style.width = `${ROWNUM_COL_WIDTH_PX}px`;
       rowHead.addEventListener('click', () => selectRow(r));
       if (canEdit) {
         rowHead.addEventListener('contextmenu', (event) => {
@@ -1163,6 +1211,14 @@ async function main(): Promise<void> {
         if (span) {
           if (span.rs > 1) td.rowSpan = span.rs;
           if (span.cs > 1) td.colSpan = span.cs;
+        }
+        if (isVirtualized) {
+          // 병합 셀은 여러 열을 한 번에 차지하므로, 걸치는 열들의 너비를 모두 합산해야 정상 흐름
+          // 행의 같은 칸과 폭이 일치한다.
+          const cs = span?.cs ?? 1;
+          let width = 0;
+          for (let cc = c; cc < c + cs && cc < renderColCount; cc += 1) width += colWidthsPx[cc];
+          td.style.width = `${width}px`;
         }
         const isLocked = styles.get(key)?.lk === 1;
         const canEditThisCell = !isLocked && canEdit;
@@ -1251,12 +1307,12 @@ async function main(): Promise<void> {
         });
         td.addEventListener('blur', () => {
           if (editingKey !== key) return; // 편집 중이 아니었으면(그냥 선택만) 커밋할 것이 없다
-          // 붙여넣기/자동채우기로 시트 범위(rowCount/colCount)가 늘어나면 renderTable()이 트랜잭션
-          // 도중 동기적으로 표 전체를 다시 그리며 이 <td>를 DOM에서 떼어내는데, 포커스가 있던 칸이
-          // 떨어져 나가면 브라우저가 blur를 보낸다 — 그 시점의 td.textContent는 그 작업 "전" 값이라,
-          // 그대로 commitCell을 부르면 방금 쓴 값을 덮어써 버린다. 제거 시점과 blur 디스패치 시점이
-          // 완전히 동기적이진 않아 isConnected만으로는 못 거르므로, "이 칸이 만들어진 세대"가 지금도
-          // 최신인지로 판정한다.
+          // 붙여넣기/자동채우기로 시트 범위(rowCount/colCount)가 늘어나거나 스크롤로 가상 렌더가
+          // 다시 그리면 renderTableVirtualized()가 트랜잭션 도중 동기적으로 표 전체를 다시 그리며
+          // 이 <td>를 DOM에서 떼어내는데, 포커스가 있던 칸이 떨어져 나가면 브라우저가 blur를
+          // 보낸다 — 그 시점의 td.textContent는 그 작업 "전" 값이라, 그대로 commitCell을 부르면
+          // 방금 쓴 값을 덮어써 버린다. 제거 시점과 blur 디스패치 시점이 완전히 동기적이진 않아
+          // isConnected만으로는 못 거르므로, "이 칸이 만들어진 세대"가 지금도 최신인지로 판정한다.
           if (cellGeneration !== renderGeneration) {
             editingKey = null;
             provider.awareness.setLocalStateField('cell', null);
@@ -1288,21 +1344,31 @@ async function main(): Promise<void> {
         td.addEventListener('keydown', (event) => handleCellKeydown(event, td, r, c, key, canEditThisCell));
         tr.appendChild(td);
       }
-      tbody.appendChild(tr);
-    }
+      return tr;
+    };
+
+    // 틀 고정된 위쪽 행은 항상 정상 흐름으로(스크롤 위치와 무관하게 계속 보이도록), 나머지는
+    // 지금 화면에 보이는 범위(+여유분)만 가상 스크롤 배치로 그린다.
+    for (let r = 0; r < freezeRows; r += 1) tbody.appendChild(buildRow(r, false));
+    for (let r = Math.max(firstVisible, freezeRows); r <= lastVisible; r += 1) tbody.appendChild(buildRow(r, true));
     tableEl.appendChild(tbody);
     applyFreezePanes(freezeRows, freezeCols);
     renderRemoteCellHighlights();
     if (activeCellKey) {
       const parsed = parseGridCellKey(activeCellKey);
       // 실제 DOM 포커스를 같은 칸의 새 <td>로 되돌린다 — focus 이벤트가 setActiveHeaders/채우기
-      // 핸들 위치 재계산까지 같이 해 준다. 재렌더로 그 칸이 더 이상 없으면(시트 전환 등) 그냥 둔다.
+      // 핸들 위치 재계산까지 같이 해 준다. 재렌더로 그 칸이 더 이상 없으면(시트 전환, 또는 가상
+      // 스크롤 범위 밖으로 밀려남 등) 그냥 둔다.
       if (parsed && parsed.sheetIdx === activeSheet) tdFor(parsed.row, parsed.col)?.focus({ preventScroll: true });
     }
     updateHScrollbar();
     document
       .getElementById('btn-freeze-panes')
       ?.setAttribute('aria-pressed', String(freezeRows > 0 || freezeCols > 0));
+    // 지금 화면에 필요한 페이지(서버가 Yjs에 채워 둬야 하는 500행 단위 구간)를 서버에 알린다 —
+    // 시트 전환·구조 변경·스크롤로 인한 재렌더 등 renderTableVirtualized가 불리는 모든 경로를
+    // 여기 한 곳에서 커버한다(각 호출부에 일일이 추가하는 것보다 누락 위험이 적다).
+    scheduleSubscriptionUpdate();
   }
 
   // ---------- 셀 선택 vs 편집모드, 방향키 이동 (엑셀과 동일하게) ----------
@@ -1410,7 +1476,7 @@ async function main(): Promise<void> {
       if (nextRow === row && nextCol === col) return; // 끝에 닿아 더 못 감
       row = nextRow;
       col = nextCol;
-      const targetTd = tdFor(row, col);
+      const targetTd = tdForEnsureRendered(row, col);
       if (targetTd) {
         targetTd.focus();
         scrollCellIntoView(targetTd);
@@ -1453,7 +1519,7 @@ async function main(): Promise<void> {
     }
     // 병합에 덮인 칸이라 실제 <td>가 없으면(moveSelection과 동일한 보정) 같은 방향으로 한 칸 더 간다.
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      const targetTd = tdFor(row, col);
+      const targetTd = tdForEnsureRendered(row, col);
       if (targetTd) {
         targetTd.focus();
         scrollCellIntoView(targetTd);
@@ -1850,6 +1916,20 @@ async function main(): Promise<void> {
     return tableEl.querySelector<HTMLTableCellElement>(`td[data-row="${row}"][data-col="${col}"]`);
   }
 
+  /** 가상 스크롤 때문에 지금 화면 창(뷰포트+여유분) 밖의 행은 <td>가 DOM에 없을 수 있다 — 키보드로
+   * 먼 칸으로 바로 이동하거나(Ctrl+방향키) 검색 결과로 점프할 때처럼, 화면 밖 칸으로 곧장 이동해야
+   * 하면 그 행이 보이도록 스크롤 위치를 옮기고 즉시 다시 그린 뒤 다시 찾는다. 병합에 덮인 칸처럼
+   * 애초에 <td>가 존재할 수 없는 경우엔 다시 그려도 여전히 null이며, 호출부의 기존 재시도 루프가
+   * 그 경우를 처리한다. */
+  function tdForEnsureRendered(row: number, col: number): HTMLTableCellElement | null {
+    const existing = tdFor(row, col);
+    if (existing) return existing;
+    const viewportHeight = scrollHostEl.clientHeight;
+    scrollHostEl.scrollTop = Math.max(0, row * ROW_HEIGHT_PX - viewportHeight / 2);
+    renderTableVirtualized();
+    return tdFor(row, col);
+  }
+
   interface RemoteCellState extends AwarenessUserState {
     readonly cell?: { readonly sheetIdx: number; readonly row: number; readonly col: number };
   }
@@ -1907,7 +1987,7 @@ async function main(): Promise<void> {
 
   structure.observe(() => {
     renderSheetTabs();
-    renderTable();
+    renderTableVirtualized();
   });
 
   function currentStructure(): SheetStructure {
@@ -2238,20 +2318,17 @@ async function main(): Promise<void> {
   const ZOOM_MAX = 2;
   let zoom = 1;
   // 확대율이 낮아질수록 화면에 보이는 실제 영역이 넓어지므로, 그 영역을 채우기에 지금 그려둔
-  // 행/열 수로 충분한지 다시 확인한다(rAF로 묶어서 슬라이더를 드래그하는 동안 매 프레임 전체
-  // 재렌더가 도는 걸 막는다).
+  // 열 수(가상 스크롤 대상이 아님)와 가상 스크롤 범위(뷰포트 높이 기준)가 여전히 맞는지 다시
+  // 확인한다(rAF로 묶어서 슬라이더를 드래그하는 동안 매 프레임 전체 재렌더가 도는 걸 막는다).
+  // renderTableVirtualized()는 이제 화면에 보이는 범위만 그리므로(시트 전체 크기와 무관하게
+  // 항상 가볍다), 예전처럼 "이미 충분히 그려져 있는지" 미리 비교할 필요 없이 그냥 다시 부른다.
   let viewportRefitScheduled = false;
   function scheduleViewportRefit(): void {
     if (viewportRefitScheduled) return;
     viewportRefitScheduled = true;
     requestAnimationFrame(() => {
       viewportRefitScheduled = false;
-      const sheet = structure.get(String(activeSheet));
-      if (!sheet) return;
-      const { rows, cols } = renderCountsFor(sheet);
-      const currentRows = tableEl.tBodies[0]?.rows.length ?? 0;
-      const currentCols = (tableEl.tHead?.rows[0]?.cells.length ?? 1) - 1;
-      if (rows > currentRows || cols > currentCols) renderTable();
+      renderTableVirtualized();
     });
   }
   function applyZoom(): void {
@@ -2322,6 +2399,72 @@ async function main(): Promise<void> {
   }
   scrollHostEl.addEventListener('scroll', updateHScrollbar);
   window.addEventListener('resize', updateHScrollbar);
+
+  // ---------- 가상 스크롤 재렌더 + 페이지 구독 전송(윈도잉) ----------
+  // 서버는 이제 클라이언트가 MESSAGE_PAGE_SUBSCRIBE로 알려준 500행 단위 "페이지"만 Yjs에 채운다
+  // (room.ts 참고) — 스크롤로 보이는 범위가 바뀔 때마다 그 범위를 포함하는 페이지 번호를 계산해
+  // 서버에 알려야, 스크롤해서 새로 보이는 행에도 실제 데이터가 채워진다.
+  const MESSAGE_PAGE_SUBSCRIBE = 2;
+  let subscriptionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** room.ts가 받는 그대로의 형식(varUint 메시지 타입 + varString JSON 페이로드)으로 같은 WebSocket
+   * 연결에 얹어 보낸다. y-websocket의 WebsocketProvider는 이 커스텀 메시지 타입을 몰라 자기
+   * messageHandlers로 처리하지 못하지만, 그건 수신 쪽 얘기고(서버는 room.ts에서 messageType으로
+   * 직접 분기해 처리한다) — 전송은 provider가 이미 들고 있는 실제 WebSocket 인스턴스
+   * (node_modules/y-websocket/src/y-websocket.js 확인: `provider.ws`가 `WebSocket | null`이고,
+   * 라이브러리 자신도 내부적으로 `this.ws.send(encoding.toUint8Array(encoder))`로 syncStep1을
+   * 보낸다 — 같은 패턴을 그대로 따른다)를 통해 그대로 내보내면 된다. */
+  function sendPageSubscription(sheetIdx: number, pages: readonly number[]): void {
+    if (!provider.ws || provider.ws.readyState !== WebSocket.OPEN) return;
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MESSAGE_PAGE_SUBSCRIBE);
+    encoding.writeVarString(encoder, JSON.stringify({ sheet: sheetIdx, pages }));
+    provider.ws.send(encoding.toUint8Array(encoder));
+  }
+
+  /** 지금 스크롤 위치(+여유분) 기준으로 필요한 페이지 번호를 계산해 서버에 알린다. 스크롤 중
+   * 매 프레임 보낼 필요는 없으므로(서버가 그때마다 페이지를 채우고 비우는 건 낭비다) 200ms
+   * 디바운스한다 — renderTableVirtualized()가 호출되는 모든 경로(스크롤, 시트 전환, 구조 변경,
+   * 최초 동기화)에서 공통으로 이 함수가 불린다. */
+  function scheduleSubscriptionUpdate(): void {
+    if (subscriptionDebounceTimer) clearTimeout(subscriptionDebounceTimer);
+    subscriptionDebounceTimer = setTimeout(() => {
+      subscriptionDebounceTimer = null;
+      const scrollTop = scrollHostEl.scrollTop;
+      const viewportHeight = scrollHostEl.clientHeight;
+      const firstRow = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN_ROWS);
+      const lastRow = Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT_PX) + OVERSCAN_ROWS;
+      const firstPage = Math.floor(firstRow / PAGE_SIZE_ROWS);
+      const lastPage = Math.floor(lastRow / PAGE_SIZE_ROWS);
+      const pages = new Set<number>();
+      for (let p = firstPage; p <= lastPage; p += 1) pages.add(p);
+      // 틀 고정된 위쪽 행은 스크롤 위치와 무관하게 항상 화면에 그려지므로(renderTableVirtualized),
+      // 그 데이터가 담긴 페이지(freezeRows는 항상 시트 맨 위부터라 언제나 0번 페이지)도 항상 같이
+      // 구독해 둔다 — 안 그러면 멀리 스크롤했을 때 고정된 헤더 행이 빈 칸으로 보일 수 있다.
+      const freezeRows = structure.get(String(activeSheet))?.freezeRows ?? 0;
+      if (freezeRows > 0) pages.add(0);
+      sendPageSubscription(activeSheet, [...pages].sort((a, b) => a - b));
+    }, 200);
+  }
+
+  // 세로 스크롤 때마다 화면에 보이는 범위만 다시 그린다(rAF로 묶어 스크롤 중 매 프레임 다시
+  // 그리는 걸 막는다) — 기존 커스텀 가로 스크롤바 리스너(updateHScrollbar)는 그대로 두고 이
+  // 리스너는 추가로 붙는다(대체 아님). 편집 중(contentEditable)에는 재렌더가 그 <td>를 DOM에서
+  // 떼어내며 강제로 blur를 발생시켜 방금 타이핑한 값을 잃을 수 있어(위 블러 핸들러의 세대 판정이
+  // 그런 blur를 "커밋하지 않고 버림" 처리한다) 재렌더 자체를 건너뛴다 — 스크롤은 계속되고, 편집이
+  // 끝나면(다음 스크롤이나 다른 재렌더 트리거에서) 화면이 다시 맞춰진다.
+  let scrollRenderScheduled = false;
+  scrollHostEl.addEventListener('scroll', () => {
+    scheduleSubscriptionUpdate();
+    if (editingKey !== null) return;
+    if (scrollRenderScheduled) return;
+    scrollRenderScheduled = true;
+    requestAnimationFrame(() => {
+      scrollRenderScheduled = false;
+      if (editingKey !== null) return;
+      renderTableVirtualized();
+    });
+  });
   document.getElementById('hscroll-left')?.addEventListener('click', () => {
     scrollHostEl.scrollBy({ left: -100 });
   });
@@ -2416,9 +2559,10 @@ async function main(): Promise<void> {
     if (match.sheetIdx !== activeSheet) {
       activeSheet = match.sheetIdx;
       renderSheetTabs();
-      renderTable();
+      renderTableVirtualized();
     }
-    const td = tdFor(match.row, match.col);
+    // 가상 스크롤 범위 밖(다른 페이지)의 매치일 수 있다 — 필요하면 스크롤해 그 행을 그린 뒤 찾는다.
+    const td = tdForEnsureRendered(match.row, match.col);
     if (td) {
       td.classList.add('g-hit-current');
       td.scrollIntoView({ block: 'center', inline: 'center' });
