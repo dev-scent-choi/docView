@@ -688,160 +688,67 @@ async function main(): Promise<void> {
     setTimeout(() => document.addEventListener('mousedown', onSheetPopupOutsideClick), 0);
   }
 
-  /** 행 삽입/삭제 시 그 아래(또는 위) 행들의 cells/styles를 옮기고, 병합 정보도 같이 보정한다.
-   * delta는 +1(삽입, atRow 이후를 한 칸씩 아래로) 또는 -1(삭제, atRow+1 이후를 한 칸씩 위로)이다. */
-  function shiftRowsAndMerges(sheetIdx: number, atRow: number, delta: 1 | -1, oldColCount: number): void {
-    if (delta === 1) {
-      for (let r = 999; r >= atRow; r -= 1) {
-        for (let c = 0; c < oldColCount; c += 1) {
-          const fromKey = gridCellKey(sheetIdx, r, c);
-          const toKey = gridCellKey(sheetIdx, r + 1, c);
-          const val = cells.get(fromKey);
-          // 원본이 **비어 있으면 목적지도 비워야** 한다. 셀 맵은 성긴 구조라(빈 칸은 키 자체가
-          // 없다) 여기서 delete를 빼면, 구멍이 있는 열에서 그 자리에 직전 값이 그대로 남아
-          // 데이터가 복제된다 — 목적지 r+1은 이미 자기 값을 r+2로 옮기고 난 뒤이기 때문이다.
-          // (아래 delta === -1 쪽은 처음부터 이 처리를 하고 있었다.)
-          //
-          // **단, 그 "이미 옮기고 난 뒤"가 성립하는 목적지만 지워야 한다.** 이 루프의 원본 범위는
-          // [atRow, 999]이므로 목적지 범위는 [atRow+1, 1000]이고, 그중 행 1000은 **한 번도 원본이
-          // 된 적이 없다** — 즉 이 루프가 비워준 자리가 아니라 원래부터 사용자 데이터가 있던 자리다.
-          // 가드 없이 지우면 삽입 지점과 아무 상관 없는 행 1000의 데이터가 통째로 사라진다
-          // (1000행이 넘는 시트에서 행을 삽입하기만 하면 나던 실제 데이터 손실).
-          if (val !== undefined) cells.set(toKey, val);
-          else if (r + 1 <= 999) cells.delete(toKey);
-          const style = styles.get(fromKey);
-          if (style) styles.set(toKey, style);
-          else if (r + 1 <= 999) styles.delete(toKey);
-        }
-      }
-      for (let c = 0; c < oldColCount; c += 1) {
-        cells.delete(gridCellKey(sheetIdx, atRow, c));
-        styles.delete(gridCellKey(sheetIdx, atRow, c));
-      }
-    } else {
-      for (let r = atRow + 1; r <= 1000; r += 1) {
-        for (let c = 0; c < oldColCount; c += 1) {
-          const fromKey = gridCellKey(sheetIdx, r, c);
-          const toKey = gridCellKey(sheetIdx, r - 1, c);
-          const val = cells.get(fromKey);
-          if (val !== undefined) cells.set(toKey, val);
-          else cells.delete(toKey);
-          const style = styles.get(fromKey);
-          if (style) styles.set(toKey, style);
-          else styles.delete(toKey);
-          cells.delete(fromKey);
-          styles.delete(fromKey);
-        }
-      }
-    }
-    const sheetMerges = merges.get(String(sheetIdx));
-    if (sheetMerges && sheetMerges.length > 0) {
-      const adjusted = sheetMerges
-        .map((m): GridMergeShape | null => {
-          const r0 = m.r - 1;
-          if (delta === 1) {
-            if (r0 >= atRow) return { ...m, r: m.r + 1 };
-            if (atRow > r0 && atRow < r0 + m.rs) return { ...m, rs: m.rs + 1 };
-            return m;
-          }
-          if (r0 === atRow) return m.rs > 1 ? { ...m, rs: m.rs - 1 } : null; // 병합 첫 행이 삭제되면 다음 행이 새 앵커
-          if (r0 > atRow) return { ...m, r: m.r - 1 };
-          if (atRow > r0 && atRow < r0 + m.rs) return { ...m, rs: m.rs - 1 };
-          return m;
-        })
-        .filter((m): m is GridMergeShape => m !== null && m.rs > 0 && m.cs > 0);
-      merges.set(String(sheetIdx), adjusted);
-    }
-  }
+  /**
+   * 행/열 삽입·삭제 — 클라이언트는 **의도만 서버에 알리고** 실제 이동은 하지 않는다.
+   *
+   * **왜 직접 옮기지 않는가**(예전에는 shiftRowsAndMerges/shiftColsAndMerges가 Yjs의 cells/styles
+   * 키를 한 칸씩 직접 옮겼다):
+   *
+   * 1. 그 방식은 "이 시트의 모든 셀이 Yjs에 들어 있다"를 전제한다. 지금 Yjs는 **구독 중인 500행
+   *    페이지만 담는 창**이라(sendPageSubscription 참고) 창 밖의 행은 애초에 옮길 수가 없다 —
+   *    삽입 지점 아래의 나머지 시트 전체가 위쪽과 한 칸씩 어긋난 채로 남는다.
+   * 2. 그 루프의 상한은 시트 실제 크기가 아니라 **하드코딩된 1000**이었다(1000행 넘는 시트를
+   *    지원하기 전 시대의 코드). 1001행이 넘는 시트에서는 행 1000의 내용을 덮어쓰고 1001행
+   *    이후는 손대지도 않았다.
+   *
+   * 서버는 구독 상태와 무관하게 시트 전체를 담은 canonical 그리드를 들고 있으므로(room.ts의
+   * applyGridStructureOp) 거기서 옮기면 두 문제가 동시에 사라진다. 이동 결과는 평소의 Yjs
+   * 업데이트로 되돌아오고, 이미 있는 관찰자들이 화면을 맞춘다 — cells.observe가 바뀐 칸을 다시
+   * 그리고, structure.observe가 새 행/열 수로 표를 다시 그린다(서버가 구조 메타데이터를 일부러
+   * **마지막에** 보내므로 그 재렌더 시점엔 셀 데이터가 이미 도착해 있다).
+   *
+   * 알려진 대가: 행/열 삽입·삭제는 더 이상 Ctrl+Z(undoManager)로 되돌릴 수 없다 — UndoManager는
+   * 로컬 트랜잭션만 추적하고 이 변경은 서버에서 온다. 삭제된 행의 내용을 되살리려면 서버 쪽
+   * 역연산이 필요해 이번 범위 밖으로 둔다(예전 방식의 undo도 1000행 넘는 시트에서는 이미
+   * 깨져 있었다).
+   */
+  /** room.ts의 MESSAGE_GRID_STRUCTURE_OP와 **같은 값이어야 한다**(0~3은 y-websocket 표준
+   * 프로토콜이 이미 쓰고 있다 — 그쪽 주석 참고). */
+  const MESSAGE_GRID_STRUCTURE_OP = 4;
 
-  /** 열 버전 — 위 shiftRowsAndMerges와 같은 원리를 행↔열 바꿔서 적용한다. */
-  function shiftColsAndMerges(sheetIdx: number, atCol: number, delta: 1 | -1, oldRowCount: number): void {
-    if (delta === 1) {
-      for (let c = 999; c >= atCol; c -= 1) {
-        for (let r = 0; r < oldRowCount; r += 1) {
-          const fromKey = gridCellKey(sheetIdx, r, c);
-          const toKey = gridCellKey(sheetIdx, r, c + 1);
-          const val = cells.get(fromKey);
-          // 행 삽입과 같은 이유로 목적지를 비우되, **이 루프가 실제로 비운 자리일 때만** 지운다
-          // (맨 위 경계인 열 1000은 원본이 된 적이 없다 — shiftRowsAndMerges의 주석 참고).
-          if (val !== undefined) cells.set(toKey, val);
-          else if (c + 1 <= 999) cells.delete(toKey);
-          const style = styles.get(fromKey);
-          if (style) styles.set(toKey, style);
-          else if (c + 1 <= 999) styles.delete(toKey);
-        }
-      }
-      for (let r = 0; r < oldRowCount; r += 1) {
-        cells.delete(gridCellKey(sheetIdx, r, atCol));
-        styles.delete(gridCellKey(sheetIdx, r, atCol));
-      }
-    } else {
-      for (let c = atCol + 1; c <= 1000; c += 1) {
-        for (let r = 0; r < oldRowCount; r += 1) {
-          const fromKey = gridCellKey(sheetIdx, r, c);
-          const toKey = gridCellKey(sheetIdx, r, c - 1);
-          const val = cells.get(fromKey);
-          if (val !== undefined) cells.set(toKey, val);
-          else cells.delete(toKey);
-          const style = styles.get(fromKey);
-          if (style) styles.set(toKey, style);
-          else styles.delete(toKey);
-          cells.delete(fromKey);
-          styles.delete(fromKey);
-        }
-      }
-    }
-    const sheetMerges = merges.get(String(sheetIdx));
-    if (sheetMerges && sheetMerges.length > 0) {
-      const adjusted = sheetMerges
-        .map((m): GridMergeShape | null => {
-          const c0 = m.c - 1;
-          if (delta === 1) {
-            if (c0 >= atCol) return { ...m, c: m.c + 1 };
-            if (atCol > c0 && atCol < c0 + m.cs) return { ...m, cs: m.cs + 1 };
-            return m;
-          }
-          if (c0 === atCol) return m.cs > 1 ? { ...m, cs: m.cs - 1 } : null;
-          if (c0 > atCol) return { ...m, c: m.c - 1 };
-          if (atCol > c0 && atCol < c0 + m.cs) return { ...m, cs: m.cs - 1 };
-          return m;
-        })
-        .filter((m): m is GridMergeShape => m !== null && m.rs > 0 && m.cs > 0);
-      merges.set(String(sheetIdx), adjusted);
-    }
+  function sendGridStructureOp(
+    kind: 'insertRows' | 'deleteRows' | 'insertCols' | 'deleteCols',
+    at: number,
+    count = 1,
+  ): void {
+    if (!canEdit) return;
+    // sendPageSubscription과 완전히 같은 전송 방식(같은 WebSocket에 varUint 타입 + varString JSON).
+    if (!provider.ws || provider.ws.readyState !== WebSocket.OPEN) return;
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MESSAGE_GRID_STRUCTURE_OP);
+    encoding.writeVarString(encoder, JSON.stringify({ sheet: activeSheet, kind, at, count }));
+    provider.ws.send(encoding.toUint8Array(encoder));
   }
 
   function insertRowAt(row: number): void {
-    const sheet = structure.get(String(activeSheet));
-    if (!sheet) return;
-    ydoc.transact(() => {
-      shiftRowsAndMerges(activeSheet, row, 1, sheet.colCount);
-      structure.set(String(activeSheet), { ...sheet, rowCount: sheet.rowCount + 1 });
-    });
+    if (!structure.get(String(activeSheet))) return;
+    sendGridStructureOp('insertRows', row);
   }
   function deleteRowAt(row: number): void {
     const sheet = structure.get(String(activeSheet));
+    // 마지막 남은 행은 지우지 않는다 — 서버도 같은 검사를 하지만(applyGridStructureOp) 여기서
+    // 먼저 막아 왕복 없이 곧바로 아무 일도 일어나지 않게 한다.
     if (!sheet || sheet.rowCount <= 1) return;
-    ydoc.transact(() => {
-      shiftRowsAndMerges(activeSheet, row, -1, sheet.colCount);
-      structure.set(String(activeSheet), { ...sheet, rowCount: sheet.rowCount - 1 });
-    });
+    sendGridStructureOp('deleteRows', row);
   }
   function insertColumnAt(col: number): void {
-    const sheet = structure.get(String(activeSheet));
-    if (!sheet) return;
-    ydoc.transact(() => {
-      shiftColsAndMerges(activeSheet, col, 1, sheet.rowCount);
-      structure.set(String(activeSheet), { ...sheet, colCount: sheet.colCount + 1 });
-    });
+    if (!structure.get(String(activeSheet))) return;
+    sendGridStructureOp('insertCols', col);
   }
   function deleteColumnAt(col: number): void {
     const sheet = structure.get(String(activeSheet));
     if (!sheet || sheet.colCount <= 1) return;
-    ydoc.transact(() => {
-      shiftColsAndMerges(activeSheet, col, -1, sheet.rowCount);
-      structure.set(String(activeSheet), { ...sheet, colCount: sheet.colCount - 1 });
-    });
+    sendGridStructureOp('deleteCols', col);
   }
 
   /** 선택한 열 기준 오름차순/내림차순 정렬 — 데이터 행(구조상 실제 rowCount) 전체를 그 열의

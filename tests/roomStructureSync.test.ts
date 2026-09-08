@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const MESSAGE_SYNC = 0;
 const MESSAGE_PAGE_SUBSCRIBE = 2;
+const MESSAGE_GRID_STRUCTURE_OP = 4;
 
 /**
  * 이 파일이 붙잡는 회귀(최종 전체 브랜치 리뷰의 C1/C2/I2):
@@ -57,6 +58,26 @@ function sendSubscribe(socket: FakeSocket, payload: unknown): void {
   encoding.writeVarUint(encoder, MESSAGE_PAGE_SUBSCRIBE);
   encoding.writeVarString(encoder, JSON.stringify(payload));
   socket.emit('message', encoding.toUint8Array(encoder));
+}
+
+/**
+ * 행/열 삽입·삭제는 이제 클라이언트가 Yjs 키를 직접 옮기지 않고 이 메시지만 보낸다 — 서버가
+ * canonical 그리드에서 옮긴다(room.ts의 applyGridStructureOp). 재설계의 이유와 이 경로의 본 시험대는
+ * tests/roomRowColShift.test.ts 참고(1000행이 넘는 시트, 구독되지 않은 페이지까지 포함).
+ */
+function sendStructureOp(socket: FakeSocket, payload: unknown): void {
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_GRID_STRUCTURE_OP);
+  encoding.writeVarString(encoder, JSON.stringify(payload));
+  socket.emit('message', encoding.toUint8Array(encoder));
+}
+
+/** 행/열 연산은 canonical 갱신 체인에서 양보하며 돌므로 체인이 실제로 비는 것을 기다린다. */
+async function settleStructureOp(docId: string): Promise<void> {
+  const { awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
+  await awaitCanonicalGrowthForTest(docId);
+  await flushEventLoop();
+  await awaitCanonicalGrowthForTest(docId);
 }
 
 /** 페이지 채우기/재계산은 청크마다 실제 setImmediate로 양보하므로 그 턴을 흘려보낸다. */
@@ -141,93 +162,6 @@ async function makeSparseMiddleXlsx(): Promise<Buffer> {
   sheet.getCell('A4').value = 'omega';
   sheet.getCell('B4').value = 3;
   return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
-}
-
-/**
- * 밀기 루프의 **맨 위 경계**(행 1000)를 겨냥한 픽스처.
- *
- *            A열                      B열
- *   행 0      'top'                   'b'
- *   행 950    'mid'                   'b'   ← 삽입 지점(900) 아래 — 실제로 한 칸 밀려야 한다
- *   행 999    (빈 칸)                  'b'   ← 경계 회차(r=999)의 A열 **원본**이 비게 하는 핵심
- *   행 1000   'keepme'                'b'   ← 밀기 루프의 원본 범위([atRow,999]) 밖 — 손대면 안 된다
- *
- * 삽입 루프는 r=999부터 내려오므로 첫 회차의 목적지가 행 1000이다. A열의 원본(행 999)이 비어
- * 있을 때 목적지를 무조건 지우면, 애초에 이동 대상이 아니었던 행 1000의 'keepme'가 통째로 날아간다.
- *
- * B열을 끝까지 채우는 이유: ExcelJS의 `actualRowCount`는 "마지막 행 번호"가 아니라 **값이 있는 행의
- * 개수**라, 성긴 시트를 쓰면 parseXlsxToGrid가 시트를 세 줄짜리로 잘라 경계 행 자체가 사라진다.
- */
-async function makeTopBoundaryXlsx(): Promise<Buffer> {
-  const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('Sheet1');
-  for (let excelRow = 1; excelRow <= 1001; excelRow += 1) sheet.getCell(excelRow, 2).value = 'b';
-  sheet.getCell('A1').value = 'top';
-  sheet.getCell('A951').value = 'mid'; // 0-based 950
-  /* A1000(0-based 999)은 일부러 비워 둔다 */
-  sheet.getCell('A1001').value = 'keepme'; // 0-based 1000 = 루프의 맨 위 경계
-  return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
-}
-
-/**
- * grid-editor.ts의 `shiftRowsAndMerges(sheetIdx, atRow, 1, oldColCount)`를 **그대로 옮겨 적은** 것
- * (병합 보정은 이 테스트의 관심사가 아니라 뺐다). 클라이언트 모듈은 DOM 클로저 안에 있어 직접
- * import할 수 없으므로 전사(transcription)로 검증한다 — 저쪽을 고치면 여기도 같이 고쳐야 한다.
- */
-function shiftRowsDownLikeClient(
-  cells: Y.Map<string>,
-  styles: Y.Map<unknown>,
-  sheetIdx: number,
-  atRow: number,
-  oldColCount: number,
-  gridCellKey: (s: number, r: number, c: number) => string,
-): void {
-  for (let r = 999; r >= atRow; r -= 1) {
-    for (let c = 0; c < oldColCount; c += 1) {
-      const fromKey = gridCellKey(sheetIdx, r, c);
-      const toKey = gridCellKey(sheetIdx, r + 1, c);
-      const val = cells.get(fromKey);
-      // `r + 1 <= 999` — 이 루프가 실제로 비운 목적지만 지운다(맨 위 경계 행 1000은 원본이 된 적이
-      // 없어, 지우면 원래 있던 데이터가 사라진다). grid-editor.ts의 같은 가드와 반드시 일치시킬 것.
-      if (val !== undefined) cells.set(toKey, val);
-      else if (r + 1 <= 999) cells.delete(toKey);
-      const style = styles.get(fromKey);
-      if (style) styles.set(toKey, style);
-      else if (r + 1 <= 999) styles.delete(toKey);
-    }
-  }
-  for (let c = 0; c < oldColCount; c += 1) {
-    cells.delete(gridCellKey(sheetIdx, atRow, c));
-    styles.delete(gridCellKey(sheetIdx, atRow, c));
-  }
-}
-
-/** 위와 같은 이유로 옮겨 적은 `shiftColsAndMerges(sheetIdx, atCol, 1, oldRowCount)`. */
-function shiftColsRightLikeClient(
-  cells: Y.Map<string>,
-  styles: Y.Map<unknown>,
-  sheetIdx: number,
-  atCol: number,
-  oldRowCount: number,
-  gridCellKey: (s: number, r: number, c: number) => string,
-): void {
-  for (let c = 999; c >= atCol; c -= 1) {
-    for (let r = 0; r < oldRowCount; r += 1) {
-      const fromKey = gridCellKey(sheetIdx, r, c);
-      const toKey = gridCellKey(sheetIdx, r, c + 1);
-      const val = cells.get(fromKey);
-      // 행 버전과 같은 경계 가드 — grid-editor.ts의 `c + 1 <= 999`와 반드시 일치시킬 것.
-      if (val !== undefined) cells.set(toKey, val);
-      else if (c + 1 <= 999) cells.delete(toKey);
-      const style = styles.get(fromKey);
-      if (style) styles.set(toKey, style);
-      else if (c + 1 <= 999) styles.delete(toKey);
-    }
-  }
-  for (let r = 0; r < oldRowCount; r += 1) {
-    cells.delete(gridCellKey(sheetIdx, r, atCol));
-    styles.delete(gridCellKey(sheetIdx, r, atCol));
-  }
 }
 
 async function seedDoc(docId: string, original: Buffer): Promise<void> {
@@ -458,24 +392,10 @@ describe('room.ts: style-only and structural edits reach the canonical grid (and
   });
 
   test('inserting a row shifts the data down in the saved file', async () => {
-    const { GRID_CELLS_MAP, GRID_STRUCTURE_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
     const { docId, socket } = await openRoom(await makeSampleXlsx());
 
-    // insertRowAt(0)과 같은 한 트랜잭션: 아래로 셀 이동 → 첫 행 비우기 → rowCount+1.
-    applyOnMirror(socket, (doc) => {
-      const cells = doc.getMap<string>(GRID_CELLS_MAP);
-      const structure = doc.getMap<{ name: string; rowCount: number; colCount: number }>(GRID_STRUCTURE_MAP);
-      const current = structure.get('0')!;
-      for (let r = current.rowCount - 1; r >= 0; r -= 1) {
-        for (let c = 0; c < current.colCount; c += 1) {
-          const value = cells.get(gridCellKey(0, r, c));
-          if (value !== undefined) cells.set(gridCellKey(0, r + 1, c), value);
-        }
-      }
-      for (let c = 0; c < current.colCount; c += 1) cells.delete(gridCellKey(0, 0, c));
-      structure.set('0', { ...current, rowCount: current.rowCount + 1 });
-    });
-    await flushEventLoop();
+    sendStructureOp(socket, { sheet: 0, kind: 'insertRows', at: 0, count: 1 });
+    await settleStructureOp(docId);
 
     const workbook = await downloadWorkbook(docId);
     const sheet = workbook.getWorksheet('Sheet1')!;
@@ -486,23 +406,10 @@ describe('room.ts: style-only and structural edits reach the canonical grid (and
   });
 
   test('inserting a column shifts the data right in the saved file', async () => {
-    const { GRID_CELLS_MAP, GRID_STRUCTURE_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
     const { docId, socket } = await openRoom(await makeSampleXlsx());
 
-    applyOnMirror(socket, (doc) => {
-      const cells = doc.getMap<string>(GRID_CELLS_MAP);
-      const structure = doc.getMap<{ name: string; rowCount: number; colCount: number }>(GRID_STRUCTURE_MAP);
-      const current = structure.get('0')!;
-      for (let c = current.colCount - 1; c >= 0; c -= 1) {
-        for (let r = 0; r < current.rowCount; r += 1) {
-          const value = cells.get(gridCellKey(0, r, c));
-          if (value !== undefined) cells.set(gridCellKey(0, r, c + 1), value);
-        }
-      }
-      for (let r = 0; r < current.rowCount; r += 1) cells.delete(gridCellKey(0, r, 0));
-      structure.set('0', { ...current, colCount: current.colCount + 1 });
-    });
-    await flushEventLoop();
+    sendStructureOp(socket, { sheet: 0, kind: 'insertCols', at: 0, count: 1 });
+    await settleStructureOp(docId);
 
     const workbook = await downloadWorkbook(docId);
     const sheet = workbook.getWorksheet('Sheet1')!;
@@ -513,26 +420,13 @@ describe('room.ts: style-only and structural edits reach the canonical grid (and
   });
 
   test('inserting a row in the MIDDLE of a sheet with data on both sides (and a gap) shifts exactly once', async () => {
-    const { GRID_CELLS_MAP, GRID_STRUCTURE_MAP, GRID_STYLES_MAP, gridCellKey } = await import(
-      '../src/collab/gridShared.js'
-    );
     const { docId, socket } = await openRoom(await makeSparseMiddleXlsx()); // 4행 × 2열, A3이 빈 칸
 
     // insertRowAt(2) — 위(1,2행)에도 아래(3,4행)에도 데이터가 있는 진짜 "가운데" 삽입.
-    applyOnMirror(socket, (doc) => {
-      const structure = doc.getMap<{ name: string; rowCount: number; colCount: number }>(GRID_STRUCTURE_MAP);
-      const current = structure.get('0')!;
-      shiftRowsDownLikeClient(
-        doc.getMap<string>(GRID_CELLS_MAP),
-        doc.getMap(GRID_STYLES_MAP),
-        0,
-        2,
-        current.colCount,
-        gridCellKey,
-      );
-      structure.set('0', { ...current, rowCount: current.rowCount + 1 });
-    });
-    await flushEventLoop();
+    // 구멍(A3)이 섞인 픽스처를 쓰는 이유: 성긴 셀 맵에서 빈 칸이 목적지에 반영되지 않으면 그
+    // 자리에 직전 값이 남아 데이터가 복제된다 — 서버 재시딩 경로에서도 같은 실패가 가능하다.
+    sendStructureOp(socket, { sheet: 0, kind: 'insertRows', at: 2, count: 1 });
+    await settleStructureOp(docId);
 
     const sheet = (await downloadWorkbook(docId)).getWorksheet('Sheet1')!;
     expect(sheet.getCell('A1').value).toBe('Header'); // 삽입 지점 위 — 그대로
@@ -550,9 +444,6 @@ describe('room.ts: style-only and structural edits reach the canonical grid (and
   });
 
   test('inserting a column in the MIDDLE of a sheet with data on both sides (and a gap) shifts exactly once', async () => {
-    const { GRID_CELLS_MAP, GRID_STRUCTURE_MAP, GRID_STYLES_MAP, gridCellKey } = await import(
-      '../src/collab/gridShared.js'
-    );
     // 열 방향으로 같은 모양을 만든다: 1행은 A,B,(빈 C),D / 2행은 전부 채움.
     const workbookIn = new ExcelJS.Workbook();
     const sheetIn = workbookIn.addWorksheet('Sheet1');
@@ -568,20 +459,8 @@ describe('room.ts: style-only and structural edits reach the canonical grid (and
     const { docId, socket } = await openRoom(original);
 
     // insertColumnAt(2) — B(왼쪽)와 D(오른쪽) 사이의 진짜 "가운데" 삽입.
-    applyOnMirror(socket, (doc) => {
-      const structure = doc.getMap<{ name: string; rowCount: number; colCount: number }>(GRID_STRUCTURE_MAP);
-      const current = structure.get('0')!;
-      shiftColsRightLikeClient(
-        doc.getMap<string>(GRID_CELLS_MAP),
-        doc.getMap(GRID_STYLES_MAP),
-        0,
-        2,
-        current.rowCount,
-        gridCellKey,
-      );
-      structure.set('0', { ...current, colCount: current.colCount + 1 });
-    });
-    await flushEventLoop();
+    sendStructureOp(socket, { sheet: 0, kind: 'insertCols', at: 2, count: 1 });
+    await settleStructureOp(docId);
 
     const sheet = (await downloadWorkbook(docId)).getWorksheet('Sheet1')!;
     expect(sheet.getCell('A1').value).toBe('a1'); // 삽입 지점 왼쪽 — 그대로
@@ -595,78 +474,19 @@ describe('room.ts: style-only and structural edits reach the canonical grid (and
     expect(sheet.getCell('E2').value).toBe('d2');
   });
 
-  // -------------------------------------------- 밀기 루프 맨 위 경계의 파괴적 delete(회귀)
-  test('inserting a row far above the top boundary must NOT destroy data sitting at the boundary row', async () => {
-    const { GRID_CELLS_MAP, GRID_STRUCTURE_MAP, GRID_STYLES_MAP, gridCellKey } = await import(
-      '../src/collab/gridShared.js'
-    );
-    // 경계 행(0-based 1000)까지 Yjs에 실제로 올라와 있어야 밀기의 delete가 그 키에 닿는다 —
-    // 페이지 0(0~499)/1(500~999)/2(1000~1499)를 모두 구독한다.
-    const { docId, socket } = await openRoom(await makeTopBoundaryXlsx(), [0, 1, 2]);
-
-    // insertRowAt(900) — 경계 행과는 100행이나 떨어진, 아주 평범한 삽입.
-    applyOnMirror(socket, (doc) => {
-      const structure = doc.getMap<{ name: string; rowCount: number; colCount: number }>(GRID_STRUCTURE_MAP);
-      const current = structure.get('0')!;
-      shiftRowsDownLikeClient(
-        doc.getMap<string>(GRID_CELLS_MAP),
-        doc.getMap(GRID_STYLES_MAP),
-        0,
-        900,
-        current.colCount,
-        gridCellKey,
-      );
-      structure.set('0', { ...current, rowCount: current.rowCount + 1 });
-    });
-    await flushEventLoop();
-
-    const sheet = (await downloadWorkbook(docId)).getWorksheet('Sheet1')!;
-    expect(sheet.getCell('A1').value).toBe('top'); // 삽입 지점 위 — 그대로
-    expect(sheet.getCell('A952').value).toBe('mid'); // 0-based 950 → 951, 정확히 한 칸만
-    // 핵심: 행 1000은 이 루프의 이동 대상이 **아니다**(원본 범위가 [900, 999]이므로).
-    // 목적지를 무조건 지우던 버그에서는 여기가 비어 버린다.
-    expect(sheet.getCell('A1001').value).toBe('keepme');
-  });
-
-  test('the column shift leaves the top-boundary column key alone when its source is empty', async () => {
-    const { gridCellKey } = await import('../src/collab/gridShared.js');
-    // 룸을 거치지 않는 순수 밀기 검증 — 서버의 canonical 열 상한과 무관하게, 밀기 자체가
-    // 이동 대상이 아닌 열 1000을 건드리지 않는지만 본다(행 버전과 같은 실패 모드의 열 짝).
-    const doc = new Y.Doc();
-    const cells = doc.getMap<string>('cells');
-    const styles = doc.getMap<unknown>('styles');
-    cells.set(gridCellKey(0, 0, 1000), 'keepme');
-    styles.set(gridCellKey(0, 0, 1000), { b: 1 });
-    cells.set(gridCellKey(0, 0, 5), 'moves');
-    /* 열 999는 비워 둔다 → 경계 회차(c=999)의 원본이 빈 칸이 된다 */
-
-    shiftColsRightLikeClient(cells, styles, 0, 3, 1, gridCellKey);
-
-    expect(cells.get(gridCellKey(0, 0, 6))).toBe('moves'); // 밀기 자체는 정상
-    expect(cells.get(gridCellKey(0, 0, 1000))).toBe('keepme');
-    expect(styles.get(gridCellKey(0, 0, 1000))).toEqual({ b: 1 });
-  });
-
+  /**
+   * 예전 이 자리에는 클라이언트 밀기 루프의 **하드코딩된 상한 1000** 주변을 겨냥한 테스트 두
+   * 개가 있었다(경계 행 1000의 데이터를 파괴하는 회귀, 그리고 그 열 짝). 그 루프 자체가 사라졌고
+   * — 애초에 그 상한이 이번 재설계의 원인이다 — 같은 실패 모드는 이제 서버 경로에서, 훨씬 강한
+   * 형태로 검증한다: tests/roomRowColShift.test.ts의 1600행 시트 테스트는 행 999·1000·1500을
+   * 한꺼번에 확인하고, 그 행들이 **Yjs에 아예 올라와 있지 않은 상태**(페이지 0만 구독)에서도
+   * 정확히 밀리는지까지 본다.
+   */
   test('deleting a row (rowCount shrink) removes the tail row from the saved file', async () => {
-    const { GRID_CELLS_MAP, GRID_STRUCTURE_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
     const { docId, socket } = await openRoom(await makeSampleXlsx());
 
-    // deleteRowAt(0)과 같은 한 트랜잭션: 위로 당기고 rowCount-1.
-    applyOnMirror(socket, (doc) => {
-      const cells = doc.getMap<string>(GRID_CELLS_MAP);
-      const structure = doc.getMap<{ name: string; rowCount: number; colCount: number }>(GRID_STRUCTURE_MAP);
-      const current = structure.get('0')!;
-      for (let r = 1; r < current.rowCount; r += 1) {
-        for (let c = 0; c < current.colCount; c += 1) {
-          const value = cells.get(gridCellKey(0, r, c));
-          if (value !== undefined) cells.set(gridCellKey(0, r - 1, c), value);
-          else cells.delete(gridCellKey(0, r - 1, c));
-          cells.delete(gridCellKey(0, r, c));
-        }
-      }
-      structure.set('0', { ...current, rowCount: current.rowCount - 1 });
-    });
-    await flushEventLoop();
+    sendStructureOp(socket, { sheet: 0, kind: 'deleteRows', at: 0, count: 1 });
+    await settleStructureOp(docId);
 
     const workbook = await downloadWorkbook(docId);
     const sheet = workbook.getWorksheet('Sheet1')!;
