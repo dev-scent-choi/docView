@@ -333,6 +333,8 @@ async function main(): Promise<void> {
   /** 지금 실제로 편집 중(contenteditable=true, 텍스트 커서 보임)인 칸. 엑셀처럼 칸을 클릭만 하면
    * "선택"만 되고, F2·더블클릭·직접 타이핑을 해야 이 값이 채워지며 편집모드로 들어간다. */
   let editingKey: string | null = null;
+  /** 편집 중이라 건너뛴 구조 변경 재렌더가 밀려 있는지 — structure.observe/flushPendingStructureRender 참고. */
+  let pendingStructureRender = false;
   /** 다중 셀 드래그 선택의 두 꼭짓점 — 드래그 안 하고 그냥 칸 하나만 클릭/이동했으면 앵커=포커스로
    * 같아서(1×1 범위) 별도 배경 없이 기존 :focus 테두리만 보인다. */
   let selAnchorRow = 0;
@@ -695,9 +697,15 @@ async function main(): Promise<void> {
           const fromKey = gridCellKey(sheetIdx, r, c);
           const toKey = gridCellKey(sheetIdx, r + 1, c);
           const val = cells.get(fromKey);
+          // 원본이 **비어 있으면 목적지도 비워야** 한다. 셀 맵은 성긴 구조라(빈 칸은 키 자체가
+          // 없다) 여기서 delete를 빼면, 구멍이 있는 열에서 그 자리에 직전 값이 그대로 남아
+          // 데이터가 복제된다 — 목적지 r+1은 이미 자기 값을 r+2로 옮기고 난 뒤이기 때문이다.
+          // (아래 delta === -1 쪽은 처음부터 이 처리를 하고 있었다.)
           if (val !== undefined) cells.set(toKey, val);
+          else cells.delete(toKey);
           const style = styles.get(fromKey);
           if (style) styles.set(toKey, style);
+          else styles.delete(toKey);
         }
       }
       for (let c = 0; c < oldColCount; c += 1) {
@@ -748,9 +756,12 @@ async function main(): Promise<void> {
           const fromKey = gridCellKey(sheetIdx, r, c);
           const toKey = gridCellKey(sheetIdx, r, c + 1);
           const val = cells.get(fromKey);
+          // 행 삽입과 같은 이유로 목적지를 반드시 비운다(shiftRowsAndMerges의 주석 참고).
           if (val !== undefined) cells.set(toKey, val);
+          else cells.delete(toKey);
           const style = styles.get(fromKey);
           if (style) styles.set(toKey, style);
+          else styles.delete(toKey);
         }
       }
       for (let r = 0; r < oldRowCount; r += 1) {
@@ -1341,6 +1352,8 @@ async function main(): Promise<void> {
           renderCellDisplay(td, key); // 편집 종료 — 수식이면 계산 결과로 되돌린다
           recalcFormulaCells(); // 이 셀 값이 바뀌었으니 이를 참조하는 다른 수식 셀도 갱신
           setGridStatusText('준비');
+          flushPendingStructureRender(); // 편집 중이라 미뤄 뒀던 구조 변경이 있으면 지금 반영한다
+
         });
         if (canEditThisCell) {
           td.addEventListener('dblclick', () => enterEditMode(td, key));
@@ -1461,6 +1474,7 @@ async function main(): Promise<void> {
     recalcFormulaCells();
     moveSelection(row, col, dRow, dCol);
     setGridStatusText('준비');
+    flushPendingStructureRender();
   }
 
   function cancelEdit(td: HTMLTableCellElement, key: string): void {
@@ -1470,6 +1484,7 @@ async function main(): Promise<void> {
     renderCellDisplay(td, key); // 원래 값(수정 전)으로 되돌린다
     td.focus();
     setGridStatusText('준비');
+    flushPendingStructureRender();
   }
 
   /** td.scrollIntoView는 sticky thead/행번호 열이 실제로 화면을 가리고 있다는 걸 모른다 — 그
@@ -2012,7 +2027,52 @@ async function main(): Promise<void> {
     }
   });
 
+  /**
+   * 서버가 계산해 둔 수식 값(GRID_COMPUTED_MAP)이 도착하면 그 칸만 다시 그린다 — 리뷰 지적 C3.
+   *
+   * 클라이언트는 더 이상 수식을 직접 계산하지 않고 computed 맵의 값을 읽어 보여줄 뿐인데
+   * (computeCellDisplay), 이 맵에는 관찰자가 하나도 없었다. cells.observe가 부르는
+   * recalcFormulaCells()는 **셀 값이 바뀐 그 순간** 동기적으로 도는 것이라, 그때는 서버가 아직
+   * 계산하기 전이다(계산은 왕복 한 번 뒤에 computed 맵으로 돌아온다). 그래서 수식이 참조하는 칸을
+   * 고쳐도 수식 칸의 표시값이 그대로 멈춰 있고, 스크롤·클릭 등 **다른 이유로 재렌더가 일어나야만**
+   * 뒤늦게 갱신됐다 — 최종 리뷰가 잡아낸 바로 그 증상이다.
+   *
+   * 편집 중인 칸(editingKey === key)은 건드리지 않는다: 그 칸에는 계산 결과가 아니라 사용자가
+   * 지금 치고 있는 수식 원문이 보여야 하고, 재렌더는 커서/선택 범위를 잃게 한다(cells/styles
+   * 관찰자가 쓰는 것과 같은 가드).
+   */
+  computed.observe((event) => {
+    for (const key of event.keysChanged) {
+      const parsed = parseGridCellKey(key);
+      if (!parsed || parsed.sheetIdx !== activeSheet) continue;
+      const td = tdFor(parsed.row, parsed.col);
+      if (td && editingKey !== key) renderCellDisplay(td, key);
+    }
+  });
+
+  /**
+   * 편집이 끝난 뒤, 편집 중이라 미뤄 뒀던 구조 변경 재렌더를 따라잡는다 — 리뷰 지적 I5의 뒷부분.
+   * 편집 종료 경로(blur 커밋 / commitAndMove / cancelEdit) 끝에서 부른다.
+   */
+  function flushPendingStructureRender(): void {
+    if (!pendingStructureRender || editingKey !== null) return;
+    pendingStructureRender = false;
+    renderSheetTabs();
+    renderTableVirtualized();
+  }
+
   structure.observe(() => {
+    // 편집 중(contentEditable)에 표를 통째로 다시 그리면 그 <td>가 DOM에서 떨어져 나가며 강제
+    // blur가 발생하고, 방금 타이핑하던 값이 커밋되지 못한 채 사라진다(위 blur 핸들러의 세대 판정이
+    // 그런 blur를 "버림"으로 처리한다) — 스크롤 리스너가 같은 이유로 쓰는 가드와 같은 판정이다.
+    //
+    // 다만 스크롤과 달리 구조 변경은 "곧 또 오는" 이벤트가 아니다: 다른 참여자의 행 삽입이나 시트
+    // 이름 변경은 한 번뿐이라, 그냥 건너뛰면 편집이 끝나도 그 변경이 화면에 영영 반영되지 않는다
+    // (편집 종료 경로는 그 칸 하나만 다시 그린다). 그래서 건너뛰되 반드시 예약해 둔다.
+    if (editingKey !== null) {
+      pendingStructureRender = true;
+      return;
+    }
     renderSheetTabs();
     renderTableVirtualized();
   });
