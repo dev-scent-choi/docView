@@ -37,7 +37,14 @@ import {
   YIELD_EVERY_N_ROWS,
   type GridDocument,
 } from '../spreadsheet.js';
-import { exportXlsxFromGrid, reparseGridForViewer, seedGridFromXlsx } from '../xlsx/collab.js';
+import {
+  exportXlsxFromGrid,
+  reparseGridForViewer,
+  seedGridPageFromXlsx,
+  seedGridStructureOnly,
+  unseedGridPageFromXlsx,
+  GRID_WINDOW_SEED_ORIGIN,
+} from '../xlsx/collab.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { computeGridCellDisplay, formatComputedValueForStorage } from '../xlsx/formulas.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
@@ -49,6 +56,7 @@ import {
   GRID_COMPUTED_MAP,
   gridCellKey,
   parseGridCellKey,
+  PAGE_SIZE_ROWS,
 } from './gridShared.js';
 import { runSerialized } from './saveSerializer.js';
 
@@ -179,10 +187,19 @@ function applyCellsChangeToCanonical(
 }
 
 /**
- * 시트 하나의 모든 수식 셀을 canonical 그리드 기준으로 다시 계산해 GRID_COMPUTED_MAP에
- * 반영한다. 원본 셀 값(GRID_CELLS_MAP)은 절대 건드리지 않는다 — 계산된 표시값만 별도 맵에
- * 쓴다. 더 이상 수식이 아니거나(빈 칸 포함) 존재하지 않는 셀의 옛 computed 값은 지운다 —
- * 계산값이 GRID_CELLS_MAP으로 새지 않고, 낡은 값도 남지 않는다.
+ * 시트 하나의 **페이지 하나**(PAGE_SIZE_ROWS행) 안에 있는 모든 수식 셀을 canonical 그리드 기준으로
+ * 다시 계산해 GRID_COMPUTED_MAP에 반영한다. 원본 셀 값(GRID_CELLS_MAP)은 절대 건드리지 않는다 —
+ * 계산된 표시값만 별도 맵에 쓴다. 더 이상 수식이 아니거나(빈 칸 포함) 존재하지 않는 셀의 옛
+ * computed 값은 지운다 — 계산값이 GRID_CELLS_MAP으로 새지 않고, 낡은 값도 남지 않는다.
+ *
+ * **범위가 페이지 단위인 이유**(윈도잉 전에는 시트 전체를 돌았다): 계산 결과를 쓰는 곳이
+ * GRID_COMPUTED_MAP, 즉 "지금 구독 중인 페이지만 담는 창"이다. 아무도 보고 있지 않은 페이지의
+ * 계산값을 써 넣으면 창 밖의 데이터가 Yjs에 다시 쌓여 이 태스크가 없애려는 그 메모리·전파
+ * 비용이 그대로 돌아온다(편집 한 번마다 시트 전체를 다시 계산하는 CPU 비용도 함께). 단, 수식은
+ * 다른 페이지의 셀을 참조할 수 있으므로 "편집된 셀이 속한 페이지"만 다시 계산하는 것으로는
+ * 부족하다 — 호출부(cells.observe)는 **구독 중인 모든 페이지**를 대상으로 이 함수를 부른다.
+ * 계산 자체는 항상 canonical 전체를 참조하므로(computeGridCellDisplay), 창 밖의 값을 참조하는
+ * 수식도 정확히 계산된다.
  *
  * 넓은 범위를 참조하는 수식이 많은 시트를 훑는 동안 이벤트 루프를 막지 않도록
  * YIELD_EVERY_N_ROWS행마다 실제 이벤트 루프에 양보한다 — 대형 xlsx가 서버를 통째로 멈추던
@@ -199,16 +216,19 @@ function applyCellsChangeToCanonical(
  * 반대로 "안전하게" 감쌌다가는 재계산이 진행되는 동안 도착한 진짜 편집의 자동저장 예약을
  * 놓치는 별개의 버그를 새로 만든다).
  */
-async function recomputeFormulasForSheet(room: Room, sheetIdx: number): Promise<void> {
+async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: number): Promise<void> {
   if (!room.canonicalGrid) return;
   const sheet = room.canonicalGrid.sheets[sheetIdx];
   if (!sheet) return;
   const computed = room.ydoc.getMap<string>(GRID_COMPUTED_MAP);
-  for (let start = 0; start < sheet.rows.length; start += YIELD_EVERY_N_ROWS) {
-    const end = Math.min(start + YIELD_EVERY_N_ROWS, sheet.rows.length);
+  const pageStart = page * PAGE_SIZE_ROWS;
+  const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, sheet.rows.length);
+  for (let start = pageStart; start < pageEnd; start += YIELD_EVERY_N_ROWS) {
+    const end = Math.min(start + YIELD_EVERY_N_ROWS, pageEnd);
     room.ydoc.transact(() => {
       for (let r = start; r < end; r += 1) {
         const row = sheet.rows[r];
+        if (!row) continue;
         for (let c = 0; c < row.length; c += 1) {
           const cell = row[c];
           const key = gridCellKey(sheetIdx, r, c);
@@ -237,35 +257,46 @@ async function seedRoom(room: Room): Promise<void> {
       // Node 20+(package.json engines)이라 내장 structuredClone을 그대로 쓴다 — GridDocument는
       // 함수·순환참조·Map/Set이 전혀 없는 순수 JSON 모양 데이터라 깊은 복사에 안전하다.
       room.baselineGrid = structuredClone(grid);
-      await seedGridFromXlsx(ydoc, grid);
-      // 시딩이 끝난 뒤에만 관찰을 시작한다 — 시딩 자체도 GRID_CELLS_MAP에 쓰기(seedableCellValue로
-      // 서식이 벗겨진 "편집용" 텍스트, 예: "1,000" → "1000")를 하므로, 시딩 도중에 이미 관찰이
-      // 걸려 있으면 방금 room.canonicalGrid에 넣은 올바른 표시 텍스트를 그 벗겨진 값으로 되돌려
-      // 덮어써 버린다(사용자 편집이 하나도 없었는데도). canonicalGrid는 이미 parseXlsxToGrid의
-      // 결과로 정확히 채워져 있으므로, 이 시점 이후의 "진짜" 편집만 관찰하면 된다.
+      // 셀 데이터는 여기서 채우지 않는다(윈도잉 컷오버) — 구조/병합 메타데이터만 전량 채우고,
+      // 실제 셀은 클라이언트가 "이 페이지들을 보고 있다"고 알려올 때 그 페이지만 채운다
+      // (reconcilePageSubscriptions). 룸이 막 생긴 이 시점에는 구독자가 하나도 없으므로 채울
+      // 페이지도 없다. 큰 xlsx를 열 때 전체 셀을 Yjs에 심으며 서버가 멈추던 문제와, 그 전체를
+      // 모든 클라이언트에 전파하던 비용이 여기서 사라진다.
+      await seedGridStructureOnly(ydoc, grid);
       const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
       cells.observe((event) => {
+        // 서버 자신이 창을 채우거나(seed) 비운(unseed) 변경은 사용자 편집이 아니므로 canonical에
+        // 되반영하지 않는다 — 특히 unseed는 "키 삭제"라, 걸러내지 않으면 아래
+        // applyCellsChangeToCanonical이 "사용자가 그 500행을 다 지웠다"로 해석해 canonical을
+        // 비우고 그게 그대로 파일에 저장된다(자세한 설명은 GRID_WINDOW_SEED_ORIGIN 주석 참고).
+        // 새로 채운 페이지의 수식 계산은 reconcilePageSubscriptions가 직접 부르므로 여기서
+        // 다시 걸 필요도 없다.
+        if (event.transaction.origin === GRID_WINDOW_SEED_ORIGIN) return;
         applyCellsChangeToCanonical(grid, cells, event);
         // 이번 배치에서 실제로 바뀐 셀이 속한 시트만 재계산한다 — event.changes.keys가
         // "시트:행:열" 키별로 add/update/delete를 알려주므로 거기서 시트 인덱스를 뽑아낸다.
+        // 재계산 대상은 그 시트 전체가 아니라 "지금 구독 중인 페이지들"이다 — 수식이 창 밖의
+        // 셀을 참조할 수 있으니 편집된 페이지 하나로는 부족하지만, 아무도 안 보는 페이지까지
+        // 계산해 Yjs에 쌓을 이유는 없다(recomputeFormulasForPage 주석 참고).
         // 재계산 자체는 비동기(양보 지점 있음)라 여기서 기다리지 않고 흘려보낸다 — 실패해도
-        // 콘솔에만 로그를 남기고(각 함수 내부에서 처리되는 예외는 없지만) 소켓 메시지 처리
-        // 자체를 막지 않기 위함.
+        // 콘솔에만 로그를 남기고 소켓 메시지 처리 자체를 막지 않기 위함.
         const touchedSheets = new Set<number>();
         for (const key of event.changes.keys.keys()) {
           const parsed = parseGridCellKey(key);
           if (parsed) touchedSheets.add(parsed.sheetIdx);
         }
         for (const sheetIdx of touchedSheets) {
-          void recomputeFormulasForSheet(room, sheetIdx);
+          for (const page of getSubscribedPageUnion(room, sheetIdx)) {
+            void recomputeFormulasForPage(room, sheetIdx, page).catch((error: unknown) => {
+              console.error(`수식 재계산 실패 (문서 ${docId}, 시트 ${sheetIdx}, 페이지 ${page}):`, error);
+            });
+          }
         }
       });
-      // 시딩 직후 한 번은 반드시 재계산한다 — cells.observe는 "이 시점 이후의" 편집만
-      // 감지하므로, 원본 파일 자체에 이미 있던 수식들의 최초 계산값은 여기서 직접 채워야
-      // 클라이언트가 처음 문서를 열자마자 수식 결과를 볼 수 있다.
-      for (let sheetIdx = 0; sheetIdx < grid.sheets.length; sheetIdx += 1) {
-        await recomputeFormulasForSheet(room, sheetIdx);
-      }
+      // 예전에는 여기서 모든 시트를 한 번 통째로 재계산했다 — 윈도잉 이후에는 그 시점에 구독
+      // 중인 페이지가 하나도 없어(=Yjs에 아무 셀도 없어) 계산해 둘 곳도, 그걸 볼 사람도 없다.
+      // 원본 파일에 이미 있던 수식의 최초 계산값은 그 페이지가 처음 구독되는 순간
+      // reconcilePageSubscriptions가 셀 데이터와 함께 채운다.
     } else if (kind === 'pptx') {
       seedSlidesFromPptx(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
     } else {
@@ -502,14 +533,24 @@ function getOrCreateRoom(docId: string, ext: string): Room {
   room.ready = seedRoom(room);
   rooms.set(docId, room);
 
-  ydoc.on('update', (update: Uint8Array) => {
+  ydoc.on('update', (update: Uint8Array, origin: unknown) => {
     const encoder = encoding.createEncoder();
     encoding.writeVarUint(encoder, MESSAGE_SYNC);
     writeUpdate(encoder, update);
+    // 전파는 origin과 무관하게 항상 한다 — 방금 채운 페이지가 클라이언트에 도착하는 경로가
+    // 바로 이 broadcast이고, 비운 페이지가 클라이언트 메모리에서도 함께 줄어드는 경로이기도 하다.
     broadcast(room, encoding.toUint8Array(encoder));
     // canonical 그리드 동기화는 이제 cells.observe(...)(seedRoom, 시딩 완료 후 등록)가 맡는다 —
     // 여기서 다시 처리하면 삭제(cells.delete)를 놓치는 문제가 있었다(findings 참고).
     // 저장 결과를 반영하는 flushToStore 자신의 쓰기는 예외 — 위 suppressAutosaveReschedule 설명 참고.
+    //
+    // 창을 채우고 비우는 것(GRID_WINDOW_SEED_ORIGIN)도 자동저장을 예약하지 않는다: 그건 사용자
+    // 편집이 아니라 "누가 어디를 보고 있는지"에 따른 캐시 조작일 뿐이고, 저장의 유일한 기준인
+    // canonicalGrid는 그로 인해 한 글자도 바뀌지 않는다. 예약을 걸면 아무도 편집하지 않은 문서를
+    // 스크롤만 해도 8초마다 파일 전체를 다시 내보내고 뷰어 캐시를 재생성한다(편집 없는 무한
+    // 재저장 루프와 같은 클래스의 낭비). 이 억제는 플래그가 아니라 트랜잭션 origin으로 판별하므로
+    // 시딩 도중(청크 사이 양보 틈)에 도착한 진짜 편집의 자동저장 예약을 놓치는 일은 없다.
+    if (origin === GRID_WINDOW_SEED_ORIGIN) return;
     if (!room.suppressAutosaveReschedule) scheduleAutosave(room);
   });
 
@@ -535,6 +576,14 @@ function getOrCreateRoom(docId: string, ext: string): Room {
 function closeConn(room: Room, conn: WebSocket): void {
   const controlled = room.conns.get(conn);
   if (controlled) {
+    // **순서가 미묘하다**: 아래 delete가 끝나면 이 연결이 어느 시트를 보고 있었는지 알 방법이
+    // 없고, "이전 합집합"도 이미 그 연결이 빠진 값이 되어 버린다 — 그러면 이 연결만 보던
+    // 페이지가 차이(before - after)에 나타나지 않아 영원히 Yjs에 남는다. 그래서 구독 정보와
+    // 그 시트의 합집합을 delete "전에" 확보하고, after는 delete "후에" 구한다.
+    // 한 연결은 동시에 한 시트만 구독하므로 그 시트 하나만 reconcile하면 된다.
+    const subscription = room.pageSubscriptions.get(conn);
+    const before = subscription === undefined ? null : getSubscribedPageUnion(room, subscription.sheet);
+
     room.conns.delete(conn);
     room.readOnlyConns.delete(conn);
     room.pageSubscriptions.delete(conn);
@@ -544,11 +593,19 @@ function closeConn(room: Room, conn: WebSocket): void {
         clearTimeout(room.autosaveTimer);
         room.autosaveTimer = null;
       }
+      // 룸이 닫히면 남은 지연 제거 예약은 전부 취소한다 — 이제 Yjs를 비울 이유가 없고(문서
+      // 전체가 메모리에서 사라진다), 살아 있는 타이머는 10초 뒤 이미 destroy된 Y.Doc을
+      // 건드리려 하며 그동안 Room과 canonicalGrid(대형 시트 전체)를 GC에서 붙잡아 둔다.
+      cancelPendingUnseeds(room.docId);
       rooms.delete(room.docId);
       void room.ready
         .then(() => queueFlush(room))
         .catch((error) => console.error(`동시편집 종료 저장 실패 (문서 ${room.docId}):`, error))
         .finally(() => room.ydoc.destroy());
+    } else if (subscription !== undefined && before !== null) {
+      // 룸이 계속 살아 있는 경우에만 reconcile한다 — 위 분기에서는 곧 Y.Doc이 destroy되므로
+      // 채우거나 비울 대상 자체가 없다.
+      reconcileInBackground(room, subscription.sheet, before, getSubscribedPageUnion(room, subscription.sheet));
     }
   }
   try {
@@ -596,7 +653,25 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
             Array.isArray(parsed.pages) &&
             parsed.pages.every((p) => typeof p === 'number')
           ) {
+            // 합집합은 이 연결의 구독을 덮어쓰기 "전"과 "후"로 각각 구해야 한다 — 그 차이가
+            // 곧 "채울 페이지"와 "비울 페이지"다(reconcilePageSubscriptions).
+            //
+            // 시트를 갈아탄 경우(시트 탭 전환)에는 새 시트만 reconcile하면 이전 시트의 페이지가
+            // 아무도 보지 않는데도 Yjs에 영원히 남는다 — 이전 시트도 함께 reconcile해서 유예
+            // 시간 뒤에 비워지도록 한다. 한 연결은 동시에 한 시트만 구독하므로 이전 시트는 최대
+            // 하나다(스펙의 "시트 전환" 절).
+            const previous = room.pageSubscriptions.get(conn);
+            const previousSheet =
+              previous !== undefined && previous.sheet !== parsed.sheet ? previous.sheet : null;
+            const beforeNew = getSubscribedPageUnion(room, parsed.sheet);
+            const beforeOld = previousSheet === null ? null : getSubscribedPageUnion(room, previousSheet);
+
             room.pageSubscriptions.set(conn, { sheet: parsed.sheet, pages: parsed.pages });
+
+            if (previousSheet !== null && beforeOld !== null) {
+              reconcileInBackground(room, previousSheet, beforeOld, getSubscribedPageUnion(room, previousSheet));
+            }
+            reconcileInBackground(room, parsed.sheet, beforeNew, getSubscribedPageUnion(room, parsed.sheet));
           }
         } catch (error) {
           console.error('페이지 구독 메시지 처리 오류:', error);
@@ -706,9 +781,123 @@ export function activeRoomCount(): number {
 }
 
 /**
+ * 구독에서 빠진 페이지를 곧바로 비우지 않고 기다리는 유예 시간. 스크롤은 본질적으로 왕복이 잦아
+ * (한 칸 내렸다 바로 올리거나, 두 페이지 경계를 오가며 흔들리는 경우), 빠지는 즉시 비우면 같은
+ * 500행을 계속 지웠다 다시 채우며 그 전량을 모든 클라이언트에 다시 전파하게 된다. 10초 정도
+ * 남겨두면 그 왕복은 전부 "이미 채워져 있음"으로 흡수된다.
+ */
+const PAGE_UNSEED_GRACE_MS = 10_000;
+
+/**
+ * 지연 제거가 예약된 페이지의 타이머 — 문서별로 묶어 둔다(바깥 키 docId, 안쪽 키 "시트:페이지").
+ * 문서별로 묶는 이유는 룸이 닫힐 때 그 문서의 예약을 한 번에 취소해야 하기 때문이다
+ * (cancelPendingUnseeds).
+ */
+const pendingPageUnseeds = new Map<string, Map<string, NodeJS.Timeout>>();
+
+function pageUnseedKey(sheet: number, page: number): string {
+  return `${sheet}:${page}`;
+}
+
+/** 예약된 지연 제거 하나를 취소한다 — 유예 시간 안에 그 페이지가 다시 구독될 때 쓴다. */
+function cancelPendingUnseed(docId: string, sheet: number, page: number): void {
+  const perDoc = pendingPageUnseeds.get(docId);
+  if (!perDoc) return;
+  const key = pageUnseedKey(sheet, page);
+  const timer = perDoc.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  perDoc.delete(key);
+  if (perDoc.size === 0) pendingPageUnseeds.delete(docId);
+}
+
+/**
+ * 그 문서에 예약된 지연 제거를 전부 취소한다 — 마지막 참여자가 나가 룸을 닫을 때 반드시 불러야
+ * 한다. 남겨두면 (1) 10초 뒤 이미 destroy된 Y.Doc에 쓰기를 시도하고, (2) 그동안 살아 있는
+ * 타이머가 Room과 canonicalGrid(대형 시트 전체) 전체를 GC 대상에서 붙잡아 둔다.
+ */
+function cancelPendingUnseeds(docId: string): void {
+  const perDoc = pendingPageUnseeds.get(docId);
+  if (!perDoc) return;
+  for (const timer of perDoc.values()) clearTimeout(timer);
+  pendingPageUnseeds.delete(docId);
+}
+
+/**
+ * 구독 합집합이 before → after로 바뀐 것을 실제 Yjs 내용에 반영한다 — 이 함수가 이 태스크의
+ * 핵심이다(윈도우를 실제로 움직이는 유일한 지점).
+ *
+ * - 새로 들어온 페이지: 즉시 셀 데이터를 채우고, 그 페이지의 수식 계산값도 같이 채운다(둘이
+ *   함께 도착해야 클라이언트가 수식 칸을 빈 칸으로 잠깐 보는 일이 없다).
+ * - 빠진 페이지: PAGE_UNSEED_GRACE_MS 뒤에 "그때도 여전히 아무도 안 보고 있으면" 비운다.
+ */
+async function reconcilePageSubscriptions(
+  room: Room,
+  sheet: number,
+  before: Set<number>,
+  after: Set<number>,
+): Promise<void> {
+  if (!room.canonicalGrid) return;
+
+  // 1) 취소는 먼저, 동기적으로 전부 처리한다. 아래 채우기 루프는 페이지마다 await로 양보하므로,
+  //    취소를 그 루프 안에서 하면 "앞 페이지를 채우는 동안 뒤 페이지의 제거 타이머가 발동"하는
+  //    틈이 생긴다(유예 10초에 비하면 극히 좁은 틈이지만, 없앨 수 있는 틈을 남길 이유가 없다).
+  for (const page of after) cancelPendingUnseed(room.docId, sheet, page);
+
+  // 2) 새로 구독된 페이지를 채운다.
+  for (const page of after) {
+    if (before.has(page)) continue;
+    await seedGridPageFromXlsx(room.ydoc, room.canonicalGrid, sheet, page);
+    await recomputeFormulasForPage(room, sheet, page);
+  }
+
+  // 3) 빠진 페이지의 지연 제거를 예약한다.
+  for (const page of before) {
+    if (after.has(page)) continue;
+    const perDoc = pendingPageUnseeds.get(room.docId) ?? new Map<string, NodeJS.Timeout>();
+    pendingPageUnseeds.set(room.docId, perDoc);
+    const key = pageUnseedKey(sheet, page);
+    clearTimeout(perDoc.get(key)); // 같은 페이지에 이미 예약이 있으면 뒤 것으로 갱신
+    perDoc.set(
+      key,
+      setTimeout(() => {
+        perDoc.delete(key);
+        if (perDoc.size === 0) pendingPageUnseeds.delete(room.docId);
+        // 룸이 이미 닫혔으면(마지막 참여자 퇴장 → rooms에서 제거 + ydoc.destroy()) 비울 것도,
+        // 비울 대상 Y.Doc도 없다 — 파괴된 Y.Doc을 건드리지 않도록 여기서 끝낸다. 정상 경로에서는
+        // closeConn이 cancelPendingUnseeds로 미리 취소하므로 여기까지 오지 않는다.
+        if (rooms.get(room.docId) !== room || !room.canonicalGrid) return;
+        // 유예 시간 동안 누군가 이 페이지를 다시 구독했을 수 있다 — 예약 취소를 놓친 경로가
+        // 있어도 여기서 한 번 더 확인해 "보고 있는 페이지를 비우는" 사고를 막는다.
+        if (getSubscribedPageUnion(room, sheet).has(page)) return;
+        const rowCount = room.canonicalGrid.sheets[sheet]?.rows.length ?? 0;
+        void unseedGridPageFromXlsx(room.ydoc, sheet, page, rowCount).catch((error: unknown) => {
+          console.error(`페이지 비우기 실패 (문서 ${room.docId}, 시트 ${sheet}, 페이지 ${page}):`, error);
+        });
+      }, PAGE_UNSEED_GRACE_MS),
+    );
+  }
+}
+
+/**
+ * reconcilePageSubscriptions를 기다리지 않고 흘려보낸다 — 호출부(소켓 메시지 처리, 연결 종료)는
+ * 둘 다 동기 함수라 await할 수 없고, 페이지 채우기는 청크마다 이벤트 루프에 양보하므로 애초에
+ * 기다려서도 안 된다(그 사이 다른 클라이언트의 메시지가 막힌다).
+ *
+ * `.catch`가 반드시 필요하다: 버려진 Promise의 reject는 Node에서 unhandledRejection이 되어
+ * 프로세스 전체를 죽이고, 그러면 이 문서만이 아니라 그 순간 열려 있던 모든 편집 세션이 함께
+ * 끊긴다(scheduleAutosave의 같은 주석 참고).
+ */
+function reconcileInBackground(room: Room, sheet: number, before: Set<number>, after: Set<number>): void {
+  void reconcilePageSubscriptions(room, sheet, before, after).catch((error: unknown) => {
+    console.error(`페이지 구독 반영 실패 (문서 ${room.docId}, 시트 ${sheet}):`, error);
+  });
+}
+
+/**
  * 특정 시트에 대해, 지금 그 룸에 연결된 모든 클라이언트가 구독 중인 페이지 번호의 합집합을
- * 계산한다. 아직 이 결과로 Yjs 내용을 채우거나 비우지는 않는다(Task 7이 이 함수를 재사용해서
- * 실제 윈도잉을 구현한다) — 지금은 순수하게 "누가 무엇을 보고 있는지" 집계만 한다.
+ * 계산한다 — 이 합집합이 곧 "Yjs가 담고 있어야 하는 창"이고, 이 값이 바뀔 때마다
+ * reconcilePageSubscriptions가 실제 Yjs 내용을 그에 맞춘다.
  */
 function getSubscribedPageUnion(room: Room, sheet: number): Set<number> {
   const union = new Set<number>();
@@ -724,6 +913,29 @@ export function getSubscribedPageUnionForTest(docId: string, sheet: number): Set
   const room = rooms.get(docId);
   if (!room) return new Set();
   return getSubscribedPageUnion(room, sheet);
+}
+
+/**
+ * 테스트 전용 — "지금 실제로 Yjs에 채워져 있는 페이지 집합"을 들여다본다.
+ *
+ * getSubscribedPageUnionForTest(누가 무엇을 보고 있다고 말했는지)와 다르다: 이쪽은 그 의도가
+ * 실제 Yjs 내용에 반영됐는지, 특히 유예 시간 뒤 정말로 비워졌는지를 본다. 유예 제거는
+ * canonicalGrid에는 아무 영향이 없어(그쪽은 항상 전체를 담는다) 클라이언트 mirror만으로는
+ * "지워짐"을 관찰하기 어렵기 때문에 서버 내부 상태를 직접 확인할 창구가 필요하다.
+ *
+ * GRID_CELLS_MAP의 키에서 행 번호를 뽑아 페이지 번호로 환산한다 — 값이 있는 셀이 하나도 없는
+ * 페이지는(예: 전부 빈 칸인 500행) 채워져 있어도 여기 나타나지 않으므로, 테스트 픽스처는 페이지마다
+ * 최소 한 칸은 값이 있도록 만들어야 한다.
+ */
+export function getSeededPagesForTest(docId: string, sheet: number): Set<number> {
+  const room = rooms.get(docId);
+  const pages = new Set<number>();
+  if (!room) return pages;
+  for (const key of room.ydoc.getMap<string>(GRID_CELLS_MAP).keys()) {
+    const parsed = parseGridCellKey(key);
+    if (parsed && parsed.sheetIdx === sheet) pages.add(Math.floor(parsed.row / PAGE_SIZE_ROWS));
+  }
+  return pages;
 }
 
 /** 테스트 전용 — 룸의 canonical 그리드를 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */

@@ -17,6 +17,7 @@ import {
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const MESSAGE_SYNC = 0;
+const MESSAGE_PAGE_SUBSCRIBE = 2;
 
 class FakeSocket extends EventEmitter {
   binaryType = '';
@@ -76,6 +77,24 @@ async function makeNumberFormattedXlsx(): Promise<Buffer> {
   amountCell.numFmt = '#,##0';
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer as ArrayBuffer);
+}
+
+/**
+ * Task 7(윈도잉 컷오버) 이후 Yjs cells 맵은 "구독 중인 페이지"만 담는다 — 룸을 열기만 하고
+ * 아무 페이지도 구독하지 않으면 셀이 하나도 채워지지 않으므로, 실제 클라이언트가 셀을 보고
+ * 편집·삭제할 수 있는 상태를 재현하려면 먼저 그 페이지를 구독해야 한다. 이 파일의 픽스처는
+ * 전부 몇 행뿐이라 페이지 0 하나가 시트 전체를 덮는다.
+ */
+function sendSubscribe(socket: FakeSocket, sheet: number, pages: readonly number[]): void {
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_PAGE_SUBSCRIBE);
+  encoding.writeVarString(encoder, JSON.stringify({ sheet, pages }));
+  socket.emit('message', encoding.toUint8Array(encoder));
+}
+
+/** 페이지 채우기는 청크마다 실제 setImmediate로 양보하므로 그 턴을 흘려보내야 한다. */
+async function flushEventLoop(turns = 50): Promise<void> {
+  for (let i = 0; i < turns; i += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
 function sendCellEdit(socket: FakeSocket, key: string, value: string): void {
@@ -241,6 +260,12 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
     const before = getRoomCanonicalGridForTest(docId);
     expect(before!.sheets[0].rows[1][0]).toEqual({ v: 'Alice' });
 
+    // 실제 클라이언트처럼 먼저 보고 있는 페이지를 구독한다 — 그래야 그 페이지의 셀이 Yjs에
+    // 채워지고, 아래 syncMirrorWithRoom이 mirror에 그 셀을 가져올 수 있다(윈도잉 이후 구독
+    // 없이는 지울 셀 자체가 Yjs에 없다).
+    sendSubscribe(socket, 0, [0]);
+    await flushEventLoop();
+
     // 실제 클라이언트(grid-editor.ts의 commitCell)가 셀을 지울 때 하는 것과 동일하게
     // cells.delete(key)를 수행한다 — cells.set(key, '')가 아니다.
     syncMirrorWithRoom(socket);
@@ -308,9 +333,16 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
     const socket = new FakeSocket();
     await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
 
-    // joinEditSession이 resolve된 직후, 편집 메시지를 하나도 보내기 전 — canonical은 여전히
-    // parseXlsxToGrid가 만든 올바른 표시 텍스트("1,000")를 담고 있어야 한다. seedGridFromXlsx가
-    // Yjs cells 맵에 심는 편집용 스트립 값("1000")으로 오염되면 안 된다.
+    // 윈도잉 이후 시딩은 룸 생성 시점이 아니라 페이지가 구독될 때 일어난다 — 즉 cells.observe가
+    // 이미 걸린 뒤에 계속 일어난다. 그래서 구독을 실제로 보내 그 시딩을 유발해야 이 테스트가
+    // 검증하려는 오염 경로가 재현된다(구독을 보내지 않으면 아무것도 시딩되지 않아 통과가 무의미).
+    sendSubscribe(socket, 0, [0]);
+    await flushEventLoop();
+
+    // 편집 메시지를 하나도 보내지 않았으므로 — canonical은 여전히 parseXlsxToGrid가 만든 올바른
+    // 표시 텍스트("1,000")를 담고 있어야 한다. seedGridPageFromXlsx가 Yjs cells 맵에 심는 편집용
+    // 스트립 값("1000")으로 오염되면 안 된다(그 시딩 트랜잭션은 GRID_WINDOW_SEED_ORIGIN 표식을
+    // 달고 있어 cells.observe가 canonical 되반영을 건너뛴다).
     const canonical = getRoomCanonicalGridForTest(docId);
     const cell = canonical!.sheets[0].rows[1][0];
     expect(cell).not.toBe(0);

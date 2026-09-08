@@ -125,6 +125,18 @@ export interface GridMergeShape {
 
 export const GRID_MERGES_MAP = 'merges';
 
+/**
+ * 윈도잉(페이지 단위 로딩)의 페이지 크기 — 페이지 N은 0-based로 행 [N*500, (N+1)*500)이다.
+ *
+ * 서버(room.ts, src/xlsx/collab.ts)와 클라이언트 번들(src/client/grid-editor.ts)이 **반드시 같은
+ * 값**을 봐야 한다: 클라이언트는 지금 보이는 행 범위를 이 값으로 나눠 "페이지 번호"를 구해 구독
+ * 메시지를 보내고, 서버는 같은 계산으로 그 페이지의 행 범위를 Yjs에 채운다 — 두 쪽이 어긋나면
+ * 클라이언트가 요청한 곳과 서버가 채운 곳이 달라져 화면에 빈 칸만 보인다. 그래서 서버 전용
+ * 의존성이 딸려오는 xlsx/collab.ts가 아니라 이 공유 상수 파일에 둔다(GRID_CELLS_MAP 등이 여기
+ * 있는 것과 같은 이유).
+ */
+export const PAGE_SIZE_ROWS = 500;
+
 /** 편집 세션 하나가 감당할 수 있다고 보는 상한 — 넘으면 UI에 부드러운 경고만 띄운다(차단하지 않음). */
 export const EDIT_SOFT_ROW_LIMIT = 500;
 export const EDIT_SOFT_COL_LIMIT = 60;

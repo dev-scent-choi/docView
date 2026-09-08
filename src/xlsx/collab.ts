@@ -3,11 +3,14 @@ import * as Y from 'yjs';
 import {
   GRID_BASELINE_MAP,
   GRID_CELLS_MAP,
+  GRID_COMPUTED_MAP,
   GRID_MERGES_MAP,
   GRID_STRUCTURE_MAP,
   GRID_STYLES_BASELINE_MAP,
   GRID_STYLES_MAP,
   gridCellKey,
+  parseGridCellKey,
+  PAGE_SIZE_ROWS,
   type CellStyleAttrs,
   type GridMergeShape,
   type SheetStructure,
@@ -126,6 +129,156 @@ export async function seedGridFromXlsx(ydoc: Y.Doc, grid: GridDocument): Promise
       });
       await yieldToEventLoop();
     }
+  }
+}
+
+/**
+ * 윈도잉이 만드는 Yjs 트랜잭션에 붙이는 origin 표식 — "이 변경은 사용자 편집이 아니라 서버가
+ * 창(window)을 채우거나 비운 것"이라는 뜻이다.
+ *
+ * **이게 없으면 조용한 데이터 손상이 난다.** room.ts는 `cells.observe(...)`로 GRID_CELLS_MAP의
+ * 모든 변경을 canonical 그리드에 되반영하는데(Task 2), 그 관찰자는 "키 삭제 = 사용자가 그 칸을
+ * 지웠다"로 해석해 canonical을 0(빈 칸)으로 되돌린다. 페이지를 비우는 것(unseed)도 똑같이 키
+ * 삭제이므로, 표식이 없으면 "스크롤해서 화면에서 사라진 500행"이 canonical에서 통째로 지워지고
+ * 그 상태가 그대로 파일에 저장된다 — 사용자가 아무것도 지우지 않았는데 데이터가 날아간다.
+ * 반대로 페이지를 채우는 것(seed)은 seedableCellValue로 서식이 벗겨진 편집용 텍스트를 쓰므로
+ * (예: "1,000" → "1000"), 표식이 없으면 canonical의 올바른 표시 텍스트를 그 벗겨진 값으로
+ * 덮어쓴다(seedRoom이 최초 시딩을 관찰 시작 "전"에 하는 것과 같은 이유의 문제 — 윈도잉에서는
+ * 시딩이 관찰이 걸린 뒤에도 계속 일어나므로 시점으로는 피할 수 없다).
+ *
+ * 플래그 변수(`room.suppressCanonicalSync = true` 같은 것) 대신 트랜잭션 origin을 쓰는 이유:
+ * 이 함수들은 청크 사이에 `await yieldToEventLoop()`으로 양보하므로, 그 틈에 도착한 **진짜**
+ * 사용자 편집도 플래그가 켜져 있는 동안 처리되어 canonical 반영을 놓친다(자동저장 억제 플래그를
+ * 함수 전체에 두르면 안 되는 것과 똑같은 클래스의 버그, Room.suppressAutosaveReschedule 주석
+ * 참고). origin은 트랜잭션마다 개별적으로 붙으므로 그런 시간 창이 애초에 존재하지 않는다.
+ */
+export const GRID_WINDOW_SEED_ORIGIN = 'window-seed';
+
+/**
+ * 시트 하나의 페이지 하나(PAGE_SIZE_ROWS행)만 Yjs에 채운다 — seedGridFromXlsx의 내부 행 루프와
+ * 같은 로직을 한 페이지 범위로 좁힌 것.
+ *
+ * 데이터 출처는 원본 파일이 아니라 **canonicalGrid**다: 사용자가 편집한 뒤 스크롤로 화면에서
+ * 밀려났다가(unseed) 다시 돌아온 페이지도 편집된 값 그대로 되살아나야 한다(원본에서 다시 읽으면
+ * 그 편집이 조용히 되돌려진다).
+ */
+export async function seedGridPageFromXlsx(
+  ydoc: Y.Doc,
+  canonicalGrid: GridDocument,
+  sheetIdx: number,
+  page: number,
+): Promise<void> {
+  const sheet = canonicalGrid.sheets[sheetIdx];
+  if (!sheet) return;
+  const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
+  const baseline = ydoc.getMap<string>(GRID_BASELINE_MAP);
+  const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
+  const stylesBaseline = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP);
+  const covered = mergeCoveredCells(sheet.merges);
+  const pageStart = page * PAGE_SIZE_ROWS;
+  const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, sheet.rows.length);
+
+  // 페이지(500행)가 지금은 YIELD_EVERY_N_ROWS(2000행)보다 작아 실제로는 청크가 하나뿐이지만,
+  // 두 상수 중 어느 쪽이 나중에 바뀌어도 "큰 시트가 이벤트 루프를 막지 않는다"는 보장이 유지되도록
+  // 다른 대형 루프와 같은 청크+양보 구조를 그대로 쓴다(spreadsheet.ts yieldToEventLoop 주석 참고).
+  for (let start = pageStart; start < pageEnd; start += YIELD_EVERY_N_ROWS) {
+    const end = Math.min(start + YIELD_EVERY_N_ROWS, pageEnd);
+    ydoc.transact(() => {
+      for (let r = start; r < end; r += 1) {
+        const row = sheet.rows[r];
+        if (!row) continue;
+        for (let c = 0; c < row.length; c += 1) {
+          const cell = row[c];
+          if (cell === 0) continue;
+          if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커의 중복 값이라 시딩하지 않는다
+          const key = gridCellKey(sheetIdx, r, c);
+          const style = cell.s !== undefined ? canonicalGrid.styles[cell.s] : undefined;
+          if (cell.v !== '') {
+            const value = seedableCellValue(cell.v, style);
+            cells.set(key, value);
+            // 이 baseline 맵은 이제 저장 기준선이 아니다 — 저장은 room.baselineGrid(룸 생성 시점의
+            // 깊은 복사본)를 쓴다(Task 3). 그래서 편집된 셀이 재시딩될 때 여기에 "편집된 값"이
+            // 들어가도 저장 결과에는 영향이 없다. 클라이언트가 참고할 수 있도록 채우는 것뿐.
+            baseline.set(key, value);
+          }
+          if (style) {
+            const attrs = toCellStyleAttrs(style);
+            if (Object.keys(attrs).length > 0) {
+              styles.set(key, attrs);
+              stylesBaseline.set(key, attrs);
+            }
+          }
+        }
+      }
+    }, GRID_WINDOW_SEED_ORIGIN);
+    await yieldToEventLoop();
+  }
+}
+
+/**
+ * 페이지 하나를 Yjs에서 지운다 — canonical 그리드에는 아무 영향도 없다(그쪽이 항상 진실이고,
+ * 저장·다운로드·수식 계산은 모두 canonical만 본다). 지워진 키는 그 페이지를 아무도 보고 있지
+ * 않다는 뜻이므로, 클라이언트 쪽 메모리도 같은 sync 프로토콜을 타고 함께 줄어든다.
+ *
+ * 행 범위로 좁히기 위해 맵 전체 키를 훑는다 — 윈도잉 이후 이 맵에는 "지금 구독 중인 페이지"의
+ * 키만 들어 있어(그게 이 태스크의 요점) 훑는 양 자체가 작다.
+ */
+export async function unseedGridPageFromXlsx(
+  ydoc: Y.Doc,
+  sheetIdx: number,
+  page: number,
+  rowCount: number,
+): Promise<void> {
+  const maps = [
+    ydoc.getMap<string>(GRID_CELLS_MAP),
+    ydoc.getMap<string>(GRID_BASELINE_MAP),
+    ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP),
+    ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP),
+    ydoc.getMap<string>(GRID_COMPUTED_MAP),
+  ] as ReadonlyArray<Y.Map<unknown>>;
+  const pageStart = page * PAGE_SIZE_ROWS;
+  const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, rowCount);
+
+  for (let start = pageStart; start < pageEnd; start += YIELD_EVERY_N_ROWS) {
+    const end = Math.min(start + YIELD_EVERY_N_ROWS, pageEnd);
+    ydoc.transact(() => {
+      for (const map of maps) {
+        for (const key of [...map.keys()]) {
+          const parsed = parseGridCellKey(key);
+          if (parsed && parsed.sheetIdx === sheetIdx && parsed.row >= start && parsed.row < end) {
+            map.delete(key);
+          }
+        }
+      }
+    }, GRID_WINDOW_SEED_ORIGIN);
+    await yieldToEventLoop();
+  }
+}
+
+/**
+ * 셀 데이터 없이 구조 메타데이터(시트 이름·행렬 수·틀고정·열 너비·병합)만 채운다 — 룸을 열자마자
+ * 호출한다. 클라이언트는 아직 로드하지 않은 페이지의 스크롤 높이와 병합 경계를 미리 알아야
+ * 가상 스크롤바를 올바른 길이로 그릴 수 있으므로, 이 두 맵은 **절대 윈도잉하지 않는다**(계획의
+ * Global Constraints) — 구독 상태와 무관하게 모든 시트 분량을 항상 즉시 채운다.
+ */
+export async function seedGridStructureOnly(ydoc: Y.Doc, grid: GridDocument): Promise<void> {
+  const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
+  const merges = ydoc.getMap<readonly GridMergeShape[]>(GRID_MERGES_MAP);
+
+  for (let sheetIdx = 0; sheetIdx < grid.sheets.length; sheetIdx += 1) {
+    const sheet = grid.sheets[sheetIdx];
+    ydoc.transact(() => {
+      structure.set(String(sheetIdx), {
+        name: sheet.name,
+        rowCount: sheet.rowCount,
+        colCount: sheet.colCount,
+        freezeRows: sheet.freezeRows,
+        freezeCols: sheet.freezeCols,
+        colWidths: sheet.colWidths,
+      });
+      if (sheet.merges.length > 0) merges.set(String(sheetIdx), sheet.merges);
+    }, GRID_WINDOW_SEED_ORIGIN);
+    await yieldToEventLoop();
   }
 }
 
