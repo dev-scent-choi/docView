@@ -7,7 +7,13 @@ import ExcelJS from 'exceljs';
 import * as decoding from 'lib0/decoding';
 import * as encoding from 'lib0/encoding';
 import * as Y from 'yjs';
-import { messageYjsSyncStep2, messageYjsUpdate, readUpdate, writeSyncStep1 } from 'y-protocols/sync';
+import {
+  messageYjsSyncStep2,
+  messageYjsUpdate,
+  readUpdate,
+  writeSyncStep1,
+  writeUpdate,
+} from 'y-protocols/sync';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const MESSAGE_SYNC = 0;
@@ -60,6 +66,55 @@ async function flushEventLoop(turns = 50): Promise<void> {
   for (let i = 0; i < turns; i += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
+/**
+ * 클라이언트가 보낸 Yjs 업데이트로 서버 쪽 맵 하나에 값을 쓴다 — 실제 편집 경로(소켓 메시지)를
+ * 그대로 타므로 서버의 관찰자·origin 판정이 프로덕션과 동일하게 동작한다.
+ *
+ * clientId를 표현 가능한 최댓값 근처로 고정하는 이유와, 한 테스트에서 두 번 이상 부를 때 서로 다른
+ * clientId를 줘야 하는 이유는 xlsxFormulaRecompute.test.ts의 sendCellEdit 주석 참고.
+ */
+function sendMapEdit(
+  socket: FakeSocket,
+  mapName: string,
+  key: string,
+  value: unknown,
+  clientId = 0xffffffff,
+): void {
+  const scratch = new Y.Doc();
+  scratch.clientID = clientId;
+  scratch.getMap(mapName).set(key, value);
+  const update = Y.encodeStateAsUpdate(scratch);
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_SYNC);
+  writeUpdate(encoder, update);
+  socket.emit('message', encoding.toUint8Array(encoder));
+}
+
+/**
+ * 이벤트 루프에 실제로 제어권이 돌아오는 횟수를 센다(tests/xlsxYielding.test.ts와 같은 패턴).
+ * 측정 대상이 한 번도 안 쉬는 동기 블록이라면 이 재귀 티커는 그 블록이 끝날 때까지 단 한 번도
+ * 돌지 못한다 — 그래서 "양보가 실제로 일어났는지"를 값의 정확성과 무관하게 직접 관찰할 수 있다.
+ */
+function startTicker(): { count: () => number; stop: () => number } {
+  let ticks = 0;
+  let running = true;
+  function schedule(): void {
+    setImmediate(() => {
+      if (!running) return;
+      ticks += 1;
+      schedule();
+    });
+  }
+  schedule();
+  return {
+    count: () => ticks,
+    stop: () => {
+      running = false;
+      return ticks;
+    },
+  };
+}
+
 async function makeBigXlsx(rows: number): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Sheet1');
@@ -79,6 +134,34 @@ async function makeCrossPageFormulaXlsx(): Promise<Buffer> {
   // 계산 결과(result)를 일부러 넣지 않는다 — 넣으면 parseXlsxToGrid가 그 캐시된 값을 셀 값으로
   // 삼아 "수식 셀"이 아니게 되고, 재계산 경로 자체를 검증할 수 없다.
   sheet.getCell(601, 2).value = { formula: 'SUM(A1:A3)' } as ExcelJS.CellFormulaValue;
+  return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+}
+
+/**
+ * 3000행(= 페이지 0~5) 시트 — A열은 숫자, **각 페이지마다 하나씩** B열에 수식이 있다(1, 501,
+ * 1001, 1501, 2001, 2501행). 페이지마다 수식이 최소 하나 있어야 그 페이지의 재계산이 실제로
+ * computed 맵에 쓰고(= Yjs 트랜잭션 하나 + 전파 하나를 만들고) 그래서 "페이지 사이에 양보가
+ * 있었는지"를 트랜잭션 단위로 관찰할 수 있다(수식이 없는 페이지의 재계산은 아무것도 쓰지 않아
+ * 빈 트랜잭션이 되고 'update'가 발생하지 않는다).
+ */
+async function makeFormulaOnEveryPageXlsx(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  for (let r = 1; r <= 3000; r += 1) sheet.getCell(r, 1).value = r;
+  // 계산 결과(result)는 일부러 넣지 않는다 — 넣으면 parseXlsxToGrid가 그 캐시값을 셀 값으로 삼아
+  // "수식 셀"이 아니게 되고 재계산 경로 자체를 검증할 수 없다.
+  for (const row of [1, 501, 1001, 1501, 2001, 2501]) {
+    sheet.getCell(row, 2).value = { formula: 'SUM(A1:A100)' } as ExcelJS.CellFormulaValue;
+  }
+  return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+}
+
+/** 1000행(= 페이지 0과 1) 시트 — A1에 원본 파일에서부터 굵게 서식이 걸려 있다. A2에는 아무 서식도 없다. */
+async function makeStyledXlsx(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  for (let r = 1; r <= 1000; r += 1) sheet.getCell(r, 1).value = `row-${r}`;
+  sheet.getCell(1, 1).font = { bold: true };
   return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
 }
 
@@ -370,5 +453,156 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
       expect(computed.get(gridCellKey(0, 0, 0))).toBeUndefined();
     },
     30_000,
+  );
+
+  test(
+    'one edit while subscribed to many pages yields to the event loop between pages ' +
+      '(no unyielded whole-window recompute block)',
+    async () => {
+      const { joinEditSession } = await import('../src/collab/room.js');
+      const { GRID_CELLS_MAP, GRID_COMPUTED_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+
+      const docId = randomUUID();
+      await seedDoc(docId, await makeFormulaOnEveryPageXlsx());
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      // 6개 페이지 전부 구독 — 편집 하나가 6페이지 분량의 재계산을 유발하는 상황을 만든다.
+      sendSubscribe(socket, 0, [0, 1, 2, 3, 4, 5]);
+      await flushEventLoop(300);
+
+      // 페이지 재계산이 만드는 서버 트랜잭션 하나하나가 전파되어 mirror의 computed 맵을 바꾼다 —
+      // 그때마다 "지금까지 이벤트 루프가 몇 번 돌았는지"를 기록한다. 페이지들이 양보 없이 연달아
+      // 돌면 여러 기록이 **똑같은 틱 값**을 갖는다(그 사이 이벤트 루프가 한 번도 못 돌았다는 뜻).
+      const ticker = startTicker();
+      const ticksAtComputedWrite: number[] = [];
+      socket.mirror.getMap<string>(GRID_COMPUTED_MAP).observe(() => {
+        ticksAtComputedWrite.push(ticker.count());
+      });
+
+      // A1 편집 — 구독 중인 6페이지 전부의 재계산을 유발한다.
+      sendMapEdit(socket, GRID_CELLS_MAP, gridCellKey(0, 0, 0), '999');
+      await flushEventLoop(300);
+      ticker.stop();
+
+      // 페이지마다 수식이 하나씩 있으므로, 페이지들이 서로 다른 이벤트 루프 턴에서 돌았다면
+      // 재계산 트랜잭션도 페이지 수만큼 나온다.
+      //
+      // 픽스 이전 코드(페이지마다 `void`)에서는 이 값이 **1**이었다(실측) — 여섯 페이지의 재계산이
+      // 전부 편집 트랜잭션의 cleanup 안에서 연달아 동기 실행되는 바람에 Yjs가 그것을 트랜잭션
+      // 하나로 합쳐 버리기 때문이다. 즉 이 숫자 자체가 "여섯 페이지가 한 호흡에 붙어 돌았다"는
+      // 직접적인 증거다.
+      expect(ticksAtComputedWrite.length).toBeGreaterThanOrEqual(6);
+
+      // 같은 틱 값으로 연달아 기록된 최대 길이 = "양보 한 번 없이 연달아 실행된 페이지 재계산 수".
+      // 페이지마다 void로 흘려보내던 예전 코드에서는 6개 페이지의 동기 블록이 전부 같은 틱에
+      // 몰려(= 최대 길이 6) 이 값이 페이지 수만큼 커진다. 한 체인으로 await하면 페이지 사이마다
+      // 이벤트 루프가 실제로 한 턴 돌아 이 값이 1로 떨어진다.
+      let longestUnyieldedRun = 1;
+      let currentRun = 1;
+      for (let i = 1; i < ticksAtComputedWrite.length; i += 1) {
+        currentRun = ticksAtComputedWrite[i] === ticksAtComputedWrite[i - 1] ? currentRun + 1 : 1;
+        longestUnyieldedRun = Math.max(longestUnyieldedRun, currentRun);
+      }
+      expect(longestUnyieldedRun).toBeLessThanOrEqual(2);
+
+      // 양보가 실제로 여러 번 일어났다는 직접 증거 — 페이지 수만큼(경계 5개 이상) 틱이 늘어났다.
+      expect(ticksAtComputedWrite[ticksAtComputedWrite.length - 1] - ticksAtComputedWrite[0]).toBeGreaterThanOrEqual(5);
+    },
+    60_000,
+  );
+
+  test(
+    'loading a page by scrolling (no user edit) does not trigger a save, but a real edit still does',
+    async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+      const { store } = await import('../src/storage.js');
+      const { joinEditSession } = await import('../src/collab/room.js');
+      const { GRID_CELLS_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+
+      const docId = randomUUID();
+      await seedDoc(docId, await makeCrossPageFormulaXlsx()); // 페이지 1에 수식이 있는 1000행 시트
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      await flushEventLoop();
+
+      const saveSpy = vi.spyOn(store, 'saveOriginal');
+
+      // 스크롤로 페이지 1을 열었을 뿐 — 사용자 편집은 하나도 없다. 이 구독이 페이지 시딩과 그
+      // 페이지의 수식 재계산(computed 맵 쓰기)을 유발한다.
+      sendSubscribe(socket, 0, [1]);
+      await flushEventLoop(200);
+      await vi.advanceTimersByTimeAsync(8_100); // 유휴 자동저장 디바운스를 한참 넘긴다
+      // 저장 파이프라인(ExcelJS 로드 → export → saveOriginal)은 실제 이벤트 루프 턴을 꽤 많이
+      // 먹는다 — 여기서 턴을 아끼면 "아직 도달하지 못한 저장"을 "저장이 예약되지 않았다"로
+      // 오판해 이 테스트가 무의미하게 통과한다(실측으로 확인: 50턴에서는 픽스 없이도 통과했다).
+      await flushEventLoop(400);
+
+      // computed 맵은 저장 대상이 아니다(exportXlsxFromGrid는 canonicalGrid/baselineGrid만 읽는다)
+      // — 그 맵에 쓰였다는 이유로 전체 xlsx export + 재파싱 + 뷰어 캐시 재생성이 돌면 안 된다.
+      expect(saveSpy).not.toHaveBeenCalled();
+
+      // 반대로 진짜 편집은 여전히 저장을 예약해야 한다 — 억제가 필요 이상으로 넓어지지 않았는지
+      // 함께 검증한다(계산값 쓰기만 면제되고 셀 쓰기는 그대로).
+      sendMapEdit(socket, GRID_CELLS_MAP, gridCellKey(0, 600, 0), 'edited');
+      await flushEventLoop(200);
+      await vi.advanceTimersByTimeAsync(8_100);
+      await flushEventLoop(400);
+
+      expect(saveSpy).toHaveBeenCalled();
+    },
+    60_000,
+  );
+
+  test(
+    'a style stays applied across a full unseed → reseed cycle (styles are never windowed)',
+    async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+      const { joinEditSession, getSeededPagesForTest } = await import('../src/collab/room.js');
+      const { GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+
+      const docId = randomUUID();
+      await seedDoc(docId, await makeStyledXlsx()); // A1은 원본부터 굵게, 1000행(페이지 0·1)
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      sendSubscribe(socket, 0, [0]); // 서식이 있는 셀이 속한 페이지를 구독
+      await flushEventLoop();
+      socket.requestSync();
+
+      const styles = socket.mirror.getMap<{ b?: 1; i?: 1 }>(GRID_STYLES_MAP);
+      // 서식은 구독과 무관하게 룸을 열 때 전량 채워지므로 이미 있어야 한다.
+      expect(styles.get(gridCellKey(0, 0, 0))?.b).toBe(1);
+
+      // 사용자가 A2에 기울임을 적용한다 — 클라이언트가 GRID_STYLES_MAP에 직접 쓰는 실제 경로.
+      // 서버에는 이 서식 편집을 canonicalGrid로 되반영하는 관찰자가 없으므로, 서식이 셀 값처럼
+      // 윈도잉된다면 이 편집은 unseed(키 삭제) → reseed(canonical의 원본 서식으로 다시 채움)에서
+      // 조용히 사라진다 — 이 테스트가 붙잡는 회귀가 바로 그것이다.
+      sendMapEdit(socket, GRID_STYLES_MAP, gridCellKey(0, 1, 0), { i: 1 });
+      await flushEventLoop();
+      expect(styles.get(gridCellKey(0, 1, 0))?.i).toBe(1);
+
+      // 페이지 0에서 스크롤해 나간 뒤 유예 시간을 넘긴다 → 페이지 0이 실제로 비워진다.
+      sendSubscribe(socket, 0, [1]);
+      await flushEventLoop();
+      await vi.advanceTimersByTimeAsync(10_100);
+      await flushEventLoop();
+      expect(getSeededPagesForTest(docId, 0).has(0)).toBe(false); // 셀 데이터는 정말 비워졌다
+
+      // 다시 스크롤해 돌아온다 → 페이지 0이 다시 채워진다.
+      sendSubscribe(socket, 0, [0, 1]);
+      await flushEventLoop();
+      socket.requestSync();
+      expect(getSeededPagesForTest(docId, 0).has(0)).toBe(true);
+
+      // 원본 파일의 서식도, 사용자가 적용한 서식도 그대로 남아 있어야 한다 — 애초에 지워진 적이
+      // 없기 때문이다(서식은 윈도잉 대상이 아니다).
+      expect(styles.get(gridCellKey(0, 0, 0))?.b).toBe(1);
+      expect(styles.get(gridCellKey(0, 1, 0))?.i).toBe(1);
+    },
+    60_000,
   );
 });

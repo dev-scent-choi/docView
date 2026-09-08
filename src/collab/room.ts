@@ -39,10 +39,13 @@ import {
 } from '../spreadsheet.js';
 import {
   exportXlsxFromGrid,
+  isAutosaveExemptOrigin,
   reparseGridForViewer,
   seedGridPageFromXlsx,
   seedGridStructureOnly,
+  seedGridStylesFromXlsx,
   unseedGridPageFromXlsx,
+  GRID_COMPUTED_WRITE_ORIGIN,
   GRID_WINDOW_SEED_ORIGIN,
 } from '../xlsx/collab.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
@@ -240,9 +243,47 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
           computed.set(key, formatComputedValueForStorage(value));
         }
       }
-    });
+    }, GRID_COMPUTED_WRITE_ORIGIN);
     await yieldToEventLoop();
   }
+}
+
+/**
+ * 편집 하나가 유발하는 "구독 중인 모든 페이지 재계산"을, 페이지마다 **순서대로 await하는 하나의
+ * 백그라운드 체인**으로 돌린다.
+ *
+ * **왜 페이지별로 `void`를 따로 붙이면 안 되는가** — 이 프로젝트가 이미 두 번 고친 "이벤트 루프
+ * 통째로 멈춤" 버그가 그대로 되살아난다. recomputeFormulasForPage는 첫 청크를 **동기로** 돌고
+ * 나서야 첫 `await yieldToEventLoop()`에 닿는데, 페이지 크기(PAGE_SIZE_ROWS=500)가
+ * YIELD_EVERY_N_ROWS(2000)보다 작아 한 페이지의 재계산은 내부적으로 한 번도 양보하지 않는
+ * 500행짜리 단일 동기 블록이다. 그런 호출을 `void f(); void f(); ...`처럼 동기 루프에서 줄줄이
+ * 시작하면 각 호출이 자기 첫 await까지 **동기로** 실행되므로, N페이지를 구독한 클라이언트가 셀
+ * 하나를 편집하는 순간 N×500행의 수식 평가가 양보 지점 하나 없이 연달아 붙어 돈다(= 구독 범위
+ * 전체를 한 호흡에 재계산하는 동안 서버 전체가 멈춘다).
+ *
+ * 하나의 체인으로 묶어 `await`하면 앞 페이지의 Promise가 (그 페이지 자신의
+ * `await yieldToEventLoop()`을 거쳐) 실제로 해소된 뒤에 다음 페이지가 시작하므로, 페이지의 동기
+ * 블록 사이마다 이벤트 루프가 확실히 한 턴 돈다. 바깥의 `void`는 여전히 하나뿐이라 호출부
+ * (cells.observe 콜백)는 예전과 똑같이 즉시 반환한다 — 여러 페이지를 시딩할 때
+ * reconcilePageSubscriptions가 이미 쓰고 있는 것과 같은 패턴이다.
+ */
+function recomputeSubscribedPagesInBackground(room: Room, sheetIndices: Iterable<number>): void {
+  void (async () => {
+    for (const sheetIdx of sheetIndices) {
+      for (const page of getSubscribedPageUnion(room, sheetIdx)) {
+        // 페이지 하나가 실패해도 나머지 페이지는 계속 재계산한다 — 그리고 버려진 Promise의
+        // reject가 프로세스를 죽이지 않도록 반드시 여기서 잡는다(scheduleAutosave의 같은 주석 참고).
+        await recomputeFormulasForPage(room, sheetIdx, page).catch((error: unknown) => {
+          console.error(
+            `수식 재계산 실패 (문서 ${room.docId}, 시트 ${sheetIdx}, 페이지 ${page}):`,
+            error,
+          );
+        });
+      }
+    }
+  })().catch((error: unknown) => {
+    console.error(`수식 재계산 체인 실패 (문서 ${room.docId}):`, error);
+  });
 }
 
 async function seedRoom(room: Room): Promise<void> {
@@ -263,6 +304,12 @@ async function seedRoom(room: Room): Promise<void> {
       // 페이지도 없다. 큰 xlsx를 열 때 전체 셀을 Yjs에 심으며 서버가 멈추던 문제와, 그 전체를
       // 모든 클라이언트에 전파하던 비용이 여기서 사라진다.
       await seedGridStructureOnly(ydoc, grid);
+      // 서식도 구조 메타데이터와 같은 부류다 — **절대 윈도잉하지 않고** 여기서 전량 한 번만 채운
+      // 뒤 어떤 unseed 경로에서도 지우지 않는다. 서식을 셀 값처럼 윈도잉하면, 서버에 서식 편집을
+      // canonical로 되반영하는 경로가 없기 때문에 페이지가 비워졌다 다시 채워지는 순간 사용자가
+      // 적용해 둔 굵게·색·표시 형식이 조용히 원본 서식으로 되돌아간다
+      // (seedGridStylesFromXlsx 주석 참고).
+      await seedGridStylesFromXlsx(ydoc, grid);
       const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
       cells.observe((event) => {
         // 서버 자신이 창을 채우거나(seed) 비운(unseed) 변경은 사용자 편집이 아니므로 canonical에
@@ -285,13 +332,10 @@ async function seedRoom(room: Room): Promise<void> {
           const parsed = parseGridCellKey(key);
           if (parsed) touchedSheets.add(parsed.sheetIdx);
         }
-        for (const sheetIdx of touchedSheets) {
-          for (const page of getSubscribedPageUnion(room, sheetIdx)) {
-            void recomputeFormulasForPage(room, sheetIdx, page).catch((error: unknown) => {
-              console.error(`수식 재계산 실패 (문서 ${docId}, 시트 ${sheetIdx}, 페이지 ${page}):`, error);
-            });
-          }
-        }
+        // 페이지마다 따로 흘려보내지 않고 **하나의 체인**으로 순서대로 돈다 — 그러지 않으면 여러
+        // 페이지의 동기 재계산 블록이 양보 없이 연달아 붙어 이벤트 루프가 멈춘다
+        // (recomputeSubscribedPagesInBackground 주석 참고).
+        recomputeSubscribedPagesInBackground(room, touchedSheets);
       });
       // 예전에는 여기서 모든 시트를 한 번 통째로 재계산했다 — 윈도잉 이후에는 그 시점에 구독
       // 중인 페이지가 하나도 없어(=Yjs에 아무 셀도 없어) 계산해 둘 곳도, 그걸 볼 사람도 없다.
@@ -550,7 +594,14 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     // 스크롤만 해도 8초마다 파일 전체를 다시 내보내고 뷰어 캐시를 재생성한다(편집 없는 무한
     // 재저장 루프와 같은 클래스의 낭비). 이 억제는 플래그가 아니라 트랜잭션 origin으로 판별하므로
     // 시딩 도중(청크 사이 양보 틈)에 도착한 진짜 편집의 자동저장 예약을 놓치는 일은 없다.
-    if (origin === GRID_WINDOW_SEED_ORIGIN) return;
+    //
+    // 수식 계산값 쓰기(GRID_COMPUTED_WRITE_ORIGIN)도 같은 이유로 자동저장을 예약하지 않는다:
+    // exportXlsxFromGrid는 canonicalGrid/baselineGrid만 읽고 computed 맵은 아예 보지 않으므로
+    // 그 맵에 무엇이 쓰여도 저장될 바이트는 달라지지 않는다. 표식이 없으면 새 페이지를 스크롤로
+    // 열기만 해도(구독 → 그 페이지 재계산 → computed 쓰기) 자동저장이 걸려, 아무도 편집하지 않은
+    // 문서를 읽는 동안 전체 export + 재파싱이 반복된다. 진짜 편집은 GRID_CELLS_MAP 쓰기로
+    // 도착하고 그건 이 표식이 없으므로 그대로 자동저장을 예약한다.
+    if (isAutosaveExemptOrigin(origin)) return;
     if (!room.suppressAutosaveReschedule) scheduleAutosave(room);
   });
 
