@@ -361,6 +361,26 @@ function enqueueCanonicalGrowth(room: Room, work: () => Promise<void>): void {
 }
 
 /**
+ * 지금 예약돼 있는 canonical 갱신 작업이 전부 끝날 때까지 기다린다.
+ *
+ * **내보내기(exportXlsxFromGrid) 직전에는 반드시 이걸 먼저 await해야 한다** — 리뷰 지적 I-1.
+ * 열 방향 연산은 청크마다 이벤트 루프에 양보하므로(gridShift.ts의 insertCanonicalCols /
+ * deleteCanonicalCols), 그 사이에 끼어든 내보내기는 canonical 그리드를 **앞쪽 행은 이미 밀렸고
+ * 뒤쪽 행은 아직 안 밀린** 반쪽 상태로 읽는다. 그렇게 나간 파일은 행마다 열이 다르게 밀려 있다 —
+ * 이 계획 전체가 없애려던 바로 그 어긋남이, 화면에는 정상으로 보이는 채로 사용자 파일에 저장된다.
+ *
+ * 체인이 도는 도중에 새 작업이 덧붙을 수 있으므로(한 구조 연산이 서식 키 재매핑·페이지 재시딩·수식
+ * 재계산을 다시 예약한다) 더 이상 늘어나지 않을 때까지 따라간다.
+ */
+async function drainCanonicalGrowth(room: Room): Promise<void> {
+  let seen: Promise<void> | null = null;
+  while (seen !== room.canonicalGrowth) {
+    seen = room.canonicalGrowth;
+    await seen;
+  }
+}
+
+/**
  * GRID_STYLES_MAP(서식 레이어)의 변화를 canonical 그리드에 반영한다 — 리뷰 지적 C1.
  *
  * 이게 없으면 **값을 한 글자도 바꾸지 않고 서식만 바꾼 편집**(굵게·색·표시 형식)이 Yjs에만 남고
@@ -939,6 +959,9 @@ async function flushToStore(room: Room): Promise<void> {
     if (!room.canonicalGrid || !room.baselineGrid) {
       console.error(`동시편집 저장 실패 — canonical 그리드 없음 (문서 ${docId})`);
     } else {
+      // 진행 중인 행/열 이동이 끝난 뒤에 읽는다 — 반쪽 상태를 저장하지 않기 위해(리뷰 지적 I-1,
+      // drainCanonicalGrowth 주석 참고).
+      await drainCanonicalGrowth(room);
       const newXlsxBytes = await exportXlsxFromGrid(
         original,
         room.canonicalGrid,
@@ -1102,6 +1125,9 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
   const original = await store.readOriginal(docId, meta.ext);
   if (room.kind === 'xlsx') {
     if (!room.canonicalGrid || !room.baselineGrid) return null;
+    // flushToStore와 같은 이유로 진행 중인 행/열 이동을 먼저 기다린다 — 이 경로는 사용자가 방금
+    // 누른 다운로드라 반쪽 상태가 그대로 손에 들어간다(리뷰 지적 I-1).
+    await drainCanonicalGrowth(room);
     // flushToStore와 같은 이유로 룸을 열 때의 원본을 기준으로 내보낸다(Room.originalXlsxBytes 주석).
     return exportXlsxFromGrid(
       room.originalXlsxBytes ?? original,
@@ -1647,10 +1673,7 @@ export function getRoomCanonicalGridForTest(docId: string): GridDocument | null 
 export async function awaitCanonicalGrowthForTest(docId: string): Promise<void> {
   const room = rooms.get(docId);
   if (!room) return;
-  // 체인이 도는 도중에 새 작업이 덧붙을 수 있으므로, 더 이상 늘어나지 않을 때까지 따라간다.
-  let seen: Promise<void> | null = null;
-  while (seen !== room.canonicalGrowth) {
-    seen = room.canonicalGrowth;
-    await seen;
-  }
+  // 내보내기 경로가 쓰는 것과 **같은 배수 로직**을 쓴다(drainCanonicalGrowth) — 두 벌로 두면
+  // 한쪽만 고쳐지는 일이 생긴다.
+  await drainCanonicalGrowth(room);
 }
