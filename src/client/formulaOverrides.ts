@@ -1,14 +1,11 @@
-import {
-  Criteria,
-  FormulaError,
-  FormulaHelpers,
-  Types,
-  WildCard,
+import FormulaParser, {
   type ContextFormulaFunction,
   type FormulaContext,
   type FormulaFunction,
   type ParsedCriteria,
 } from 'fast-formula-parser';
+
+const { Criteria, FormulaError, FormulaHelpers, Types, WildCard } = FormulaParser;
 
 /**
  * fast-formula-parser(MIT)는 VLOOKUP/HLOOKUP/INDEX는 실제로 구현돼 있지만, README의 "280개 함수

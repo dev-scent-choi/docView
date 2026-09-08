@@ -1,4 +1,5 @@
-import FormulaParser, { FormulaError, type CellRef, type RangeRef } from 'fast-formula-parser';
+import FormulaParser, { type CellRef, type RangeRef } from 'fast-formula-parser';
+const { FormulaError } = FormulaParser;
 import { formulaFunctions, formulaFunctionsNeedContext } from '../client/formulaOverrides.js';
 import type { GridDocument } from '../spreadsheet.js';
 import { EDIT_SOFT_ROW_LIMIT, EDIT_SOFT_COL_LIMIT } from '../collab/gridShared.js';
