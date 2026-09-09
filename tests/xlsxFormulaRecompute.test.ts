@@ -206,6 +206,61 @@ describe('room.ts: formula cells recompute into GRID_COMPUTED_MAP', () => {
   }, 20_000);
 
   test(
+    'a formula referencing a row outside the subscribed page still recomputes correctly after an edit',
+    async () => {
+      const { store } = await import('../src/storage.js');
+      const { joinEditSession } = await import('../src/collab/room.js');
+      const { gridCellKey, GRID_COMPUTED_MAP } = await import('../src/collab/gridShared.js');
+
+      const docId = randomUUID();
+      // A1000(원본 행 999)은 페이지 1(500~999행)에 속해 페이지 0만 구독하면 Yjs 창 밖에 남는다.
+      // B1의 수식은 그래도 canonical 전체를 기준으로 정확히 계산돼야 한다
+      // (recomputeFormulasForPage가 computeGridCellDisplayAsync/LazyGridStore 어댑터를 거쳐도
+      // 구독 여부와 무관하게 canonicalGrid 전체를 읽는다는 기존 동작이 유지되는지 검증).
+      // 모든 행(1~1000)을 밀도 있게 채운다 — parseXlsxToGrid가 rowCount를
+      // sheet.actualRowCount(= 실제로 값이 있는 행의 "개수")로 정하므로, 듬성듬성(1행과 1000행만)
+      // 채우면 actualRowCount가 2가 되어 1000번째 행이 애초에 grid에 들어오지 않는다(위 4번째
+      // 테스트가 3000행을 모두 채우는 것과 같은 이유).
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      for (let r = 1; r <= 1000; r += 1) sheet.getCell(r, 1).value = r;
+      sheet.getCell('B1').value = { formula: 'A1+A1000' };
+      const original = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+      await store.saveOriginal(docId, 'xlsx', original);
+      await store.writeMeta({
+        id: docId,
+        name: 'x.xlsx',
+        ext: 'xlsx',
+        status: 'ready',
+        pageCount: 1,
+        createdAt: new Date().toISOString(),
+        progress: 100,
+        viewKind: 'grid',
+      });
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      // 페이지 0만 구독한다 — A1000(페이지 1)은 창 밖에 남는다.
+      sendSubscribe(socket, 0, [0]);
+      await flushEventLoop();
+
+      let computed = socket.mirror.getMap<string>(GRID_COMPUTED_MAP);
+      // A1(=1) + A1000(=1000) = 1001
+      expect(computed.get(gridCellKey(0, 0, 1))).toBe('1001');
+
+      // A1을 1 → 100으로 편집(페이지 0 안, 구독 중). B1은 여전히 창 밖의 A1000을 정확히 참조해
+      // 재계산돼야 한다.
+      sendCellEdit(socket, gridCellKey(0, 0, 0), '100');
+      await flushEventLoop();
+
+      computed = socket.mirror.getMap<string>(GRID_COMPUTED_MAP);
+      // 100 + 1000 = 1100
+      expect(computed.get(gridCellKey(0, 0, 1))).toBe('1100');
+    },
+    20_000,
+  );
+
+  test(
     "a real edit arriving while a previous edit's recompute is still yielding still schedules " +
       'autosave, converges to the correct computed value, and does not cause a perpetual resave loop',
     async () => {

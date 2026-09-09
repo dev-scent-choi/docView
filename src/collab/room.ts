@@ -65,7 +65,7 @@ import {
 } from '../xlsx/gridShift.js';
 import type { LazyGridStore } from '../xlsx/lazyGridStore.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
-import { computeGridCellDisplay, formatComputedValueForStorage } from '../xlsx/formulas.js';
+import { computeGridCellDisplayAsync, formatComputedValueForStorage } from '../xlsx/formulas.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
 import {
   DOC_META_MAP,
@@ -755,24 +755,43 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
   const sheet = room.canonicalGrid.sheets[sheetIdx];
   if (!sheet) return;
   const computed = room.ydoc.getMap<string>(GRID_COMPUTED_MAP);
+  // Task 8과 같은 임시 어댑터 — room.lazyGrid 필드는 Task 14에서 정식으로 생기기 전까지는 이
+  // 어댑터로 room.canonicalGrid를 LazyGridStore처럼 감싸 넘긴다(위 lazyGridStoreAdapterForCanonicalGrid
+  // 주석 참고). 디스크를 건드리지 않고 항상 캐시 히트로만 동작한다.
+  const store = lazyGridStoreAdapterForCanonicalGrid(room.canonicalGrid);
   const pageStart = page * PAGE_SIZE_ROWS;
   const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, sheet.rows.length);
   for (let start = pageStart; start < pageEnd; start += RECOMPUTE_YIELD_EVERY_N_ROWS) {
     const end = Math.min(start + RECOMPUTE_YIELD_EVERY_N_ROWS, pageEnd);
-    room.ydoc.transact(() => {
-      for (let r = start; r < end; r += 1) {
-        const row = sheet.rows[r];
-        if (!row) continue;
-        for (let c = 0; c < row.length; c += 1) {
-          const cell = row[c];
-          const key = gridCellKey(sheetIdx, r, c);
-          if (cell === 0 || !cell.v.startsWith('=')) {
-            if (computed.has(key)) computed.delete(key);
-            continue;
-          }
-          const value = computeGridCellDisplay(room.canonicalGrid!, sheetIdx, r, c);
-          computed.set(key, formatComputedValueForStorage(value));
+    const nonFormulaKeys: string[] = [];
+    const formulaCells: Array<{ r: number; c: number; key: string }> = [];
+    for (let r = start; r < end; r += 1) {
+      const row = sheet.rows[r];
+      if (!row) continue;
+      for (let c = 0; c < row.length; c += 1) {
+        const cell = row[c];
+        const key = gridCellKey(sheetIdx, r, c);
+        if (cell === 0 || !cell.v.startsWith('=')) {
+          nonFormulaKeys.push(key);
+        } else {
+          formulaCells.push({ r, c, key });
         }
+      }
+    }
+    // Yjs의 transact() 콜백은 반드시 동기여야 한다(비동기 콜백을 넘기면 첫 await에서 콜백이
+    // 일시 정지하는 순간 트랜잭션이 이미 닫혀버려, 그 뒤의 쓰기가 트랜잭션 밖에서 개별적으로
+    // 일어난다) — 그래서 computeGridCellDisplayAsync는 반드시 transact 밖에서 먼저 끝낸 뒤,
+    // 이미 계산된 값만 동기 콜백 안에서 쓴다(seedGridPageFromXlsx가 getRow를 Promise.all로 먼저
+    // 기다린 뒤 transact하는 것과 같은 패턴, xlsx/collab.ts 참고).
+    const values = await Promise.all(
+      formulaCells.map(({ r, c }) => computeGridCellDisplayAsync(store, sheetIdx, r, c)),
+    );
+    room.ydoc.transact(() => {
+      for (const key of nonFormulaKeys) {
+        if (computed.has(key)) computed.delete(key);
+      }
+      for (let i = 0; i < formulaCells.length; i += 1) {
+        computed.set(formulaCells[i].key, formatComputedValueForStorage(values[i]));
       }
     }, GRID_COMPUTED_WRITE_ORIGIN);
     await yieldToEventLoop();
