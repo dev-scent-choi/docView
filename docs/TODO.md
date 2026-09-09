@@ -83,35 +83,37 @@
   메모리에서 사라지는지, 대용량 룸 상한 슬롯이 즉시 반환되는지, 룸이 없을 때 안전한 no-op인지,
   삭제 후 자동저장이 파일을 되살리지 않는지까지 확인.
 
+**저장 실패(`Invalid array length`) — 완료(2026-09-09), 스트리밍 폴백으로 해결:**
+- 실제 버그 하나 먼저 발견·수정함: `exportXlsxFromGrid`(`src/xlsx/collab.ts`)의 행/열 삭제
+  감지 로직이 방금 재로드한 워크북의 raw `sheet.rowCount`/`columnCount`(서식만 있어도
+  세는 ExcelJS 고유 카운트)를 기준으로 비교하고 있었음 — 편집이 전혀 없어도 "행이 삭제됐다"고
+  오판해 `spliceRows`/`spliceColumns`가 잘못 호출될 수 있었음(이미 위 1번 재설계에 흡수됨).
+- **하지만 이 수정만으로는 이 특정 파일(292,244행 × 36열, 서식 거의 전 셀)의 저장 문제가
+  끝나지 않았다.** `workbook.xlsx.writeBuffer()` 자체가 `RangeError: Invalid array length`로
+  실패 — ExcelJS 4.4.0(최신) 자체가 이 정도 규모의 워크북을 통째로 메모리에서 재직렬화하는 걸
+  감당하지 못하는 라이브러리 레벨 한계로 확인(수정 없이 load+writeBuffer만 해도 동일 실패).
+- **해결: `src/xlsx/exportStreaming.ts`에 `exportXlsxFromGridStreaming` 신규 추가** —
+  `ExcelJS.stream.xlsx.WorkbookWriter`(행 단위 스트리밍 직렬화, 로컬 임시 파일에 쓴 뒤 읽어
+  들여 반환)로 원본을 행 단위로 복사하면서 `dirtyCells`에 담긴 편집된 칸만 canonicalGrid 값으로
+  덮어쓴다. **기존 `exportXlsxFromGrid`는 전혀 건드리지 않았다** — `room.ts`에 새로 추가한
+  `exportXlsxWithFallback`이 정상 경로를 먼저 시도하고, 그게 실제로 실패할 때만(사전 임계값이
+  아니라 실패 후 재시도) 이 스트리밍 함수로 넘어간다. 정상 크기 파일은 전혀 영향받지 않는다.
+- **알려진 스코프 제한(의도적, 문서화됨)**: 이 폴백은 행/열 삽입·삭제(`structuralOps`)를
+  지원하지 않는다(있으면 조용히 잘못 쓰는 대신 즉시 예외) — 이 정도로 거대한 파일에서 그런
+  구조 변경까지 겪는 일은 드물다고 보고 스코프를 좁혔다. 시트 보호 재적용도 하지 않는다.
+- **실측 검증(실제 문제의 원인이었던 그 파일로)**: 파싱 40초, 스트리밍 내보내기(편집 2건 포함)
+  66초, 출력 64.5MB, 재오픈 검증 통과, 메모리 5.8GB(16GB 힙 한도 내). 최초에 이 파일이
+  "connection refused"로 아예 안 열리던 문제(이제 열람은 이미 해결됨)에 이어, **저장까지
+  end-to-end로 성공**하는 것을 확인.
+- 회귀 테스트: `tests/xlsxExportStreaming.test.ts`(신규, 8개 — 구조연산 거부, 무편집 라운드트립,
+  더티 셀만 덮어쓰기, 서식 적용, 협업 중 추가된 새 시트, 직접 rowCount 축소, 시트 순서, 시트
+  제거), `tests/roomExportFallback.test.ts`(신규, 2개 — 정상 경로 실패 시 실제로 폴백이 성공하는지,
+  폴백마저 실패하면 에러가 조용히 삼켜지지 않고 그대로 드러나는지).
+
 **남은 항목:**
 2. (장기) 대용량 시트를 통째로 메모리에 올리지 않고 필요한 부분만 그때그때 읽는 진짜 지연
-   materialization — 이번 세션에 끝낸 xlsx 윈도잉 프로젝트급의 별도 큰 작업.
-
-**저장 실패(`Invalid array length`) — 원인 규명 완료, 부분 수정:**
-- 실제 버그 하나 발견·수정함: `exportXlsxFromGrid`(`src/xlsx/collab.ts`)의 행/열 삭제
-  감지 로직이 방금 재로드한 워크북의 raw `sheet.rowCount`/`columnCount`(서식만 있어도
-  세는 ExcelJS 고유 카운트)를 기준으로 비교하고 있었음 — 원래는 `baselineGrid`의
-  `actualRowCount` 기반 카운트와 비교했어야 함. 이 버그 때문에 편집이 전혀 없어도
-  "행이 삭제됐다"고 오판해 `spliceRows`/`spliceColumns`가 잘못 호출될 수 있었음.
-  회귀 테스트 추가 완료(`tests/xlsx-collab.test.ts`), 전체 테스트 통과.
-- **하지만 이 수정만으로는 이 특정 파일(292,244행 × 36열, 서식 거의 전 셀)의 저장 문제가
-  끝나지 않음.** 위 수정을 적용한 후에도 `workbook.xlsx.writeBuffer()` 자체가
-  `RangeError: Invalid array length`로 실패함 — 독립적으로 확인(이 파일을 로드 후
-  아무 수정 없이 바로 `writeBuffer()`만 호출해도 동일하게 실패, 힙 제한 없는 환경에서는
-  OOM). 즉 ExcelJS 4.4.0(최신) 자체가 이 정도 규모의 워크북을 통째로 메모리에서
-  재직렬화하는 걸 감당하지 못하는 라이브러리 레벨 한계.
-- **우회 방법 확인 완료(스파이크):** `ExcelJS.stream.xlsx.WorkbookWriter`(스트리밍 writer)로
-  시트/행 단위로 순회하며 새 워크북에 다시 써내려가는 방식은 이 파일에서 성공함
-  (64.5MB 출력, 행/시트/서식 모두 보존, 재오픈 검증 완료). 메모리도 안정적 — 일반
-  방식은 16GB 힙에서도 죽었는데 스트리밍 방식은 파일 로드(4.5GB) 위에 추가로 약
-  1.2GB만 사용.
-  - 단, API가 완전히 다름: in-place 편집(`spliceRows` 등) 없이 원본을 행 단위로
-    복사하면서 편집된 셀만 canonicalGrid 값으로 덮어쓰는 방식으로 export 로직을
-    다시 짜야 함. 삭제된 행은 복사 단계에서 건너뛰는 식으로 재구현.
-  - 출력도 버퍼 반환이 아니라 파일 스트림에 직접 쓰는 방식이라 `room.ts`의
-    `flushToStore` 인터페이스도 손볼 가능성 있음.
-  - **범위가 커서 별도 브레인스토밍/설계+계획을 거쳐야 하는 작업으로 판단, 지금은
-    보류.** 다음에 시작할 때 코드 상태(특히 `exportXlsxFromGrid`)를 먼저 재확인할 것.
+   materialization — 이번 세션에 끝낸 xlsx 윈도잉 프로젝트급의 별도 큰 작업. 남은 유일한 큰
+   항목.
 
 **참고:** 자세한 배경은 이 세션의 대화 기록 참조. 다시 시작할 때 코드 상태를 먼저 재확인할 것
 (시간이 지나 내용이 달라졌을 수 있음).

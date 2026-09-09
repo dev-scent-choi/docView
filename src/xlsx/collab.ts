@@ -20,7 +20,7 @@ import type { GridCell, GridDocument, GridStyle } from '../spreadsheet.js';
 import { parseXlsxToGrid, yieldToEventLoop, YIELD_EVERY_N_ROWS } from '../spreadsheet.js';
 
 
-function toCellStyleAttrs(style: GridStyle): CellStyleAttrs {
+export function toCellStyleAttrs(style: GridStyle): CellStyleAttrs {
   const attrs: { -readonly [K in keyof CellStyleAttrs]?: CellStyleAttrs[K] } = {};
   if (style.b) attrs.b = 1;
   if (style.i) attrs.i = 1;
@@ -503,7 +503,7 @@ export async function seedGridStructureOnly(ydoc: Y.Doc, grid: GridDocument): Pr
 }
 
 /** '='로 시작하면 수식으로 저장한다(계산은 하지 않음 — 실제 결과는 저장 후 엑셀/뷰어에서 재계산된다). */
-function coerceCellValue(raw: string): string | number | { formula: string } {
+export function coerceCellValue(raw: string): string | number | { formula: string } {
   const trimmed = raw.trim();
   if (trimmed.startsWith('=') && trimmed.length > 1) {
     return { formula: trimmed.slice(1) };
@@ -544,7 +544,7 @@ function numFmtStringFor(style: CellStyleAttrs): string | undefined {
   }
 }
 
-function applyStyleToCell(cell: ExcelJS.Cell, style: CellStyleAttrs | undefined): void {
+export function applyStyleToCell(cell: ExcelJS.Cell, style: CellStyleAttrs | undefined): void {
   if (!style) {
     cell.font = {};
     cell.fill = { type: 'pattern', pattern: 'none' };
@@ -581,14 +581,14 @@ function applyStyleToCell(cell: ExcelJS.Cell, style: CellStyleAttrs | undefined)
 
 /** canonicalGrid 셀(GridCell | 0)에서 표시 텍스트만 뽑는다 — 빈 칸(0 sentinel)은 빈 문자열로
  * 취급한다. */
-function cellText(cell: GridCell | 0 | undefined): string {
+export function cellText(cell: GridCell | 0 | undefined): string {
   return cell === 0 || cell === undefined ? '' : cell.v;
 }
 
 /** canonicalGrid의 셀이 참조하는 스타일 인덱스를 실제 GridStyle로 해석한다 —
  * grid.styles는 공용 스타일 배열이라 셀은 인덱스(.s)만 들고 있다(Yjs styles 맵과 달리 셀마다
  * 통짜 서식 객체를 직접 들고 있지 않다). */
-function cellStyle(cell: GridCell | 0 | undefined, grid: GridDocument): GridStyle | undefined {
+export function cellStyle(cell: GridCell | 0 | undefined, grid: GridDocument): GridStyle | undefined {
   if (cell === 0 || cell === undefined || cell.s === undefined) return undefined;
   return grid.styles[cell.s];
 }

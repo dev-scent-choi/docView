@@ -41,6 +41,7 @@ import {
   type GridDocument,
   type GridSheet,
 } from '../spreadsheet.js';
+import { exportXlsxFromGridStreaming } from '../xlsx/exportStreaming.js';
 import {
   exportXlsxFromGrid,
   findOrAddGridStyleIndex,
@@ -610,6 +611,41 @@ function exportOptionsFor(room: Room) {
 }
 
 /**
+ * xlsx 내보내기의 유일한 진입점 — 정상 경로(exportXlsxFromGrid)를 먼저 시도하고, 그게 실패하면
+ * (ExcelJS의 대용량 재직렬화 한계, 예: `RangeError: Invalid array length` — exportStreaming.ts
+ * 주석 참고) 스트리밍 폴백으로 자동 재시도한다.
+ *
+ * **왜 사전 임계값이 아니라 "실패하면 재시도"인가**: 실패 여부는 행 수뿐 아니라 서식 밀도 등
+ * 여러 요인에 좌우돼 미리 정확한 기준선을 잡기 어렵다. 이 순서는 절대다수인 "정상 크기" 파일에는
+ * 전혀 영향을 주지 않고(항상 검증된 기존 경로만 탄다), 실제로 그 경로가 감당 못하는 극단적으로
+ * 큰 파일에서만 스트리밍 경로가 관여한다.
+ *
+ * 스트리밍 폴백은 스코프가 좁다(구조 연산 미지원 등, exportStreaming.ts 주석 참고) — 그것도
+ * 실패하면(예: 구조 연산이 있어서) 그 에러를 그대로 던진다. 호출부(flushToStore/getCurrentBytes)
+ * 는 이미 실패를 정상적으로 처리한다(저장 실패 표시, 에러 로그).
+ */
+async function exportXlsxWithFallback(room: Room, originalXlsxBytes: Uint8Array): Promise<Uint8Array> {
+  const grid = room.canonicalGrid!;
+  const options = exportOptionsFor(room);
+  try {
+    return await exportXlsxFromGrid(
+      originalXlsxBytes,
+      grid,
+      room.baselineSheetExtents!,
+      room.dirtyCells,
+      room.structuralOps,
+      options,
+    );
+  } catch (error) {
+    console.error(
+      `xlsx 내보내기 실패, 스트리밍 폴백으로 재시도 (문서 ${room.docId}):`,
+      error,
+    );
+    return exportXlsxFromGridStreaming(originalXlsxBytes, grid, room.dirtyCells, room.structuralOps, options);
+  }
+}
+
+/**
  * 시트 하나의 **페이지 하나**(PAGE_SIZE_ROWS행) 안에 있는 모든 수식 셀을 canonical 그리드 기준으로
  * 다시 계산해 GRID_COMPUTED_MAP에 반영한다. 원본 셀 값(GRID_CELLS_MAP)은 절대 건드리지 않는다 —
  * 계산된 표시값만 별도 맵에 쓴다. 더 이상 수식이 아니거나(빈 칸 포함) 존재하지 않는 셀의 옛
@@ -1081,14 +1117,7 @@ async function flushToStore(room: Room): Promise<void> {
       // 진행 중인 행/열 이동이 끝난 뒤에 읽는다 — 반쪽 상태를 저장하지 않기 위해(리뷰 지적 I-1,
       // drainCanonicalGrowth 주석 참고).
       await drainCanonicalGrowth(room);
-      const newXlsxBytes = await exportXlsxFromGrid(
-        original,
-        room.canonicalGrid,
-        room.baselineSheetExtents,
-        room.dirtyCells,
-        room.structuralOps,
-        exportOptionsFor(room),
-      );
+      const newXlsxBytes = await exportXlsxWithFallback(room, original);
       await store.saveOriginal(docId, meta.ext, Buffer.from(newXlsxBytes));
       try {
         const grid = await reparseGridForViewer(newXlsxBytes);
@@ -1250,14 +1279,7 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
     // 누른 다운로드라 반쪽 상태가 그대로 손에 들어간다(리뷰 지적 I-1).
     await drainCanonicalGrowth(room);
     // flushToStore와 같은 이유로 룸을 열 때의 원본을 기준으로 내보낸다(Room.originalXlsxBytes 주석).
-    return exportXlsxFromGrid(
-      room.originalXlsxBytes ?? original,
-      room.canonicalGrid,
-      room.baselineSheetExtents,
-      room.dirtyCells,
-      room.structuralOps,
-      exportOptionsFor(room),
-    );
+    return exportXlsxWithFallback(room, room.originalXlsxBytes ?? original);
   }
   if (room.kind === 'pptx') {
     // 읽기 전용 헬퍼라 Yjs 배열은 절대 건드리지 않는다 — flushToStore의 저장-후 배열 재작성과
