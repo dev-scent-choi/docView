@@ -80,15 +80,42 @@ interface LazyGridStore {
 `src/xlsx/lazyGridStore.ts`)를 부른다:
 
 1. `ExcelJS.stream.xlsx.WorkbookReader`(이미 `exportStreaming.ts`에서 쓴 `WorkbookWriter`의
-   짝, forward-only)로 원본 바이트를 앞에서부터 훑는다.
-2. 시트 메타(이름, 스타일 팔레트, 병합, 틀고정, 열 너비)는 오늘의 `parseXlsxToGrid`와 같은
-   규칙으로 그대로 뽑아 `sheetMeta`/`styles`에 채운다(작으므로 그대로 메모리 보관).
+   짝, forward-only)로 원본 바이트를 앞에서부터 훑는다. 이 스트리밍 리더는 `styles.xml`/
+   `sharedStrings.xml`을 시트보다 먼저 읽어야 하는 문제를 이미 내부적으로 처리해 둔다(시트가
+   먼저 나오면 그 시트를 자기 임시 파일에 잠깐 버퍼링했다가 나중에 다시 읽음, ExcelJS 자체
+   구현 확인 완료) — 우리가 별도로 순서를 신경 쓸 필요 없다.
+   - **단, `xl/theme/theme1.xml`은 이 스트리밍 리더가 아예 파싱하지 않는다**(ExcelJS 소스 확인
+     완료 — 알려진 항목만 처리하고 나머지는 그냥 버림). 테마 색을 쓰는 셀 서식을 올바르게
+     해석하려면 이 파일이 필요하므로, **`jszip`(이미 `exceljs`의 간접 의존성이지만 명시적
+     직접 의존성으로 추가)으로 원본 zip에서 이 항목 하나만 별도로 꺼내** 기존
+     `parseThemeColors(themeXml)`(`spreadsheet.ts`, 이미 export됨, 순수 문자열 입력이라
+     ExcelJS 객체 모델과 무관)에 넘긴다. 이 항목은 작아서(전체 파일과 무관하게 몇 KB) 압축
+     해제 비용이 무시할 만하다.
+2. 시트 메타(이름, 병합, 틀고정, 열 너비)와 스타일 팔레트는 오늘의 `parseXlsxToGrid`가 쓰는
+   `extractStyle`/`StylePalette`/`displayValue`/`parseMergeRange`(`spreadsheet.ts`, 현재
+   비공개 함수 — 이번 작업에서 export로 바꾼다)를 **그대로 재사용**해 `sheetMeta`/`styles`에
+   채운다(작으므로 그대로 메모리 보관). 이 함수들은 `ExcelJS.Cell`/`Row` 인터페이스만 보고
+   동작하고, 스트리밍 리더가 주는 `Row`/`Cell` 객체도 같은 인터페이스를 구현하므로(같은
+   내부 클래스 재사용, ExcelJS 소스 확인 완료) 수정 없이 그대로 호출할 수 있다.
 3. 각 행이 스트리밍으로 도착할 때마다, 그 행을 `parseXlsxToGrid`가 만드는 것과 같은 모양
    (`Array<GridCell | 0>`)으로 JSON 직렬화해 `rowStorePath`(문서별 임시 파일, 위치는
    `os.tmpdir()`, 이름에 `docId` + `randomUUID()` 포함)에 이어붙이고, 그 시작 바이트 오프셋과
    길이를 `rowIndex`에 기록한 뒤 **그 행 자체는 버린다**(변수가 스코프를 벗어나 GC됨). 이 시점에
    메모리에 남는 건 "지금 처리 중인 딱 한 행"뿐이다.
 4. `logicalToOriginalRow/Col`을 항등 배열(`[0, 1, 2, ...]`)로 초기화한다.
+
+**rowCount/colCount는 사전 스캔 없이 진행하면서 결정한다**: 오늘의 `parseXlsxToGrid`는 (a) 전체를
+훑어 실제 최대 열 번호를 미리 구하고(ExcelJS의 `actualColumnCount`가 수식만 있는 맨 오른쪽 열을
+누락시키는 버그를 보정하기 위해, `spreadsheet.ts:459-473` 주석 참고), (b) 값 없이 서식만 남은
+꼬리 행을 최종적으로 잘라낸다(`lastWithValue`, `spreadsheet.ts:504-511`) — 둘 다 "전체를 다 본
+뒤에" 확정하는 값이라, 앞으로만 갈 수 있는 스트리밍에서는 순서를 바꿔서 구현한다: 정확한 값을
+미리 알 필요 없이, 행을 하나씩 처리하며 그 행에서 실제로 값이 있는 셀을 볼 때마다
+`maxRowWithValue`/`maxColWithValue`(단순 정수 두 개)를 갱신하고, **스트림이 끝난 뒤** 이 값들을
+`sheetMeta.rowCount`/`colCount`로 확정한다. 각 행 자체는 실제로 값이 있는 칸까지만 저장해도 되고
+(그 행의 저장된 배열이 최종 colCount보다 짧을 수 있음 — 읽기 경로가 이미 "행 배열이 colCount보다
+짧으면 그 뒤는 빈 칸"으로 처리하도록 설계돼 있다, 오늘 `exportXlsxFromGrid`의 같은 관례 참고),
+이렇게 하면 `actualColumnCount`/`actualRowCount`에 의존하지 않아 그 버그 자체를 안 겪는다(오늘의
+사전 스캔 보정 코드가 통째로 필요 없어진다).
 
 **실패 처리**: 오늘의 `seedRoom`과 동일하게 이 전체를 하나의 try/catch로 감싸 실패 시 로그만
 남기고(룸은 canonical 없이 남는다 — 오늘의 `!room.canonicalGrid` 가드가 이미 이 상태를 안전하게
@@ -128,20 +155,37 @@ interface LazyGridStore {
 `getCell` 호출부가 `rowCount`/`colCount` 경계 체크로 이미 걸러낸다, 오늘의 canonical 그리드가
 축소 시 배열을 자르지 않는 것과 같은 원칙).
 
-## 수식 계산 — 2단계 읽기
+## 수식 계산 — 캐시 미스 시 예외로 중단 후 재시도
 
-`computeGridCellDisplay`(`src/xlsx/formulas.ts`)는 오늘 동기 함수로, 수식이 참조하는 임의의 칸을
-그 자리에서 바로 인덱싱한다. `getCell`이 비동기가 되므로 그대로는 못 쓴다. 대신:
+`computeGridCellDisplay`(`src/xlsx/formulas.ts`)는 `fast-formula-parser`의 `onCell`/`onRange`
+콜백 안에서 재귀적으로 셀을 읽는다. **`fast-formula-parser` 자체가 이 콜백을 항상 동기로만
+호출한다**(라이브러리에 비동기 지원이 없음 — `node_modules/fast-formula-parser` 확인 완료) —
+그래서 "미리 필요한 좌표를 다 모아서 캐시를 데운 뒤 평가한다"는 단순한 2단계 방식은 **성립하지
+않는다**: `IF(A1>0, B1, C1)`처럼 실제로 어떤 셀을 참조할지가 이미 읽은 값(A1)에 따라 달라지는
+수식은, 평가를 실제로 진행해 봐야만 다음에 필요한 좌표를 알 수 있다 — AST를 미리 훑어서는
+전체 참조 집합을 알 수 없다.
 
-1. **1단계(prefetch)**: 수식 AST를 먼저 훑어 이 수식이 참조하는 모든 (시트, 행, 열) 좌표를
-   모은다(이미 같은 파싱이 계산 자체에도 필요하므로 새 작업이 아니라 순서만 바꾸는 것). 이
-   좌표들을 시트·원본행별로 묶어 `getRow`를 배치로 호출해 `readCache`를 미리 데운다.
-2. **2단계(evaluate)**: 캐시가 데워진 상태에서, 오늘과 똑같은 동기 평가 로직을 그대로 돌린다
-   (캐시 히트만 있으므로 실제로는 동기 함수를 그대로 재사용할 수 있다 — 캐시 조회 자체는
-   동기다).
+대신 **"캐시 미스가 나면 예외로 그 자리에서 평가를 중단하고, 놓친 칸을 채운 뒤 처음부터
+다시 평가한다"** 방식을 쓴다:
 
-`recomputeFormulasForPage`(`room.ts`)는 이 두 단계를 감싸는 얇은 async 래퍼가 된다. 페이지 단위
-청크+양보 구조는 그대로 유지.
+1. `rawCellText`(내부에서 `getCell`을 호출하는 지점)가 더티 오버레이에도 읽기 캐시에도 없는
+   좌표를 만나면, **던지지 않는다**(`fast-formula-parser`가 동기 콜백 안의 예외를 자기 나름대로
+   `FormulaError`로 재포장해버려 원래 정보를 잃는다 — 지금 `rangeTooLarge`를 예외 대신 플래그로
+   처리하는 것과 같은 이유, `xlsx/formulas.ts` 기존 주석 참고). 대신 `rangeTooLarge`와 같은
+   클로저 변수(예: `cacheMiss: {sheetIdx,row,col} | null`)에 그 좌표를 기록하고, 그 자리에서
+   당장 쓸 수 있는 값(예: 빈 문자열/`0`)을 돌려줘 평가를 계속 진행시킨다(어차피 이 결과는 버려질
+   것이므로 정확할 필요가 없다).
+2. `parser.parse()`가 끝난 뒤(무엇을 반환했든) 이 플래그를 확인한다 — 기록돼 있으면 그 결과는
+   버리고, 기록된 좌표가 속한 행을 `getRow`로 비동기로 읽어 캐시에 채운 뒤 **같은 수식 평가를
+   처음부터 다시 시도**한다. 이번에는 방금 채운 칸까지는 캐시 히트라 그 지점을 넘어가고, 또 다른
+   새 미스를 만나면 같은 과정을 반복한다.
+3. 이 재시도 루프는 반드시 끝난다 — 매 반복마다 최소 한 행이 캐시에 새로 채워지고, 한 수식이
+   참조할 수 있는 서로 다른 행의 수는 `MAX_RANGE_CELLS`(이미 있는 상한)로 유계이기 때문이다.
+   재평가가 여러 번 일어날 수 있다는 뜻이지만(같은 수식을 앞부분부터 다시 계산), 수식 계산
+   자체는 이미 가벼운 연산이라 디스크 접근 횟수를 최소화하는 이득이 그 재계산 비용보다 크다.
+
+`recomputeFormulasForPage`(`room.ts`)는 이 "예외 시 재시도" 루프를 감싸는 async 래퍼가 된다.
+페이지 단위 청크+양보 구조는 그대로 유지.
 
 ## 행/열 삽입·삭제
 
