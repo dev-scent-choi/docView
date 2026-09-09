@@ -126,6 +126,24 @@ export interface GridMergeShape {
 export const GRID_MERGES_MAP = 'merges';
 
 /**
+ * 행/열 삽입·삭제 연산의 종류 — room.ts(MESSAGE_GRID_STRUCTURE_OP 처리)와 xlsx/collab.ts
+ * (내보내기 시점 재생) 양쪽이 같은 모양을 봐야 해서 여기 둔다(GridMergeShape와 같은 이유).
+ */
+export type GridStructureOpKind = 'insertRows' | 'deleteRows' | 'insertCols' | 'deleteCols';
+
+/**
+ * 협업 중 실제로 적용된 행/열 삽입·삭제 연산 한 건의 기록 — "이 시트의 at 자리에 행/열 count개를
+ * 넣거나 뺐다"만 남긴다. room.ts가 순서대로 쌓아 두고(Room.structuralOps), 내보내기가 원본을 다시
+ * 로드한 워크북에 같은 순서로 재생(splice)해 canonicalGrid와 같은 물리적 위치를 맞춘다.
+ */
+export interface GridStructureOpRecord {
+  readonly sheet: number;
+  readonly kind: GridStructureOpKind;
+  readonly at: number;
+  readonly count: number;
+}
+
+/**
  * 윈도잉(페이지 단위 로딩)의 페이지 크기 — 페이지 N은 0-based로 행 [N*500, (N+1)*500)이다.
  *
  * 서버(room.ts, src/xlsx/collab.ts)와 클라이언트 번들(src/client/grid-editor.ts)이 **반드시 같은

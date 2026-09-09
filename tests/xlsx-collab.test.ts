@@ -1,10 +1,16 @@
 import ExcelJS from 'exceljs';
 import * as Y from 'yjs';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { GRID_CELLS_MAP, gridCellKey } from '../src/collab/gridShared.js';
 import { parseXlsxToGrid } from '../src/spreadsheet.js';
 import { exportXlsxFromGrid, seedGridFromXlsx } from '../src/xlsx/collab.js';
 import type { GridCell, GridDocument, GridStyle } from '../src/spreadsheet.js';
+
+/** exportXlsxFromGrid의 새 시그니처(baselineGrid 전체 대신 시트별 크기만)를 위해, 지금까지 테스트가
+ * 만들어 온 baselineGrid(GridDocument)에서 그 가벼운 스냅샷만 뽑는다. */
+function baselineExtentsOf(grid: GridDocument): Array<{ rowCount: number; colCount: number }> {
+  return grid.sheets.map((s) => ({ rowCount: s.rowCount, colCount: s.colCount }));
+}
 
 async function makeSampleXlsx(): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
@@ -42,6 +48,65 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     expect(ydoc.getMap<string>(GRID_CELLS_MAP).get(gridCellKey(0, 0, 1))).toBe('=SUM(A1:A2)');
   });
 
+  test('export does not call spliceRows/spliceColumns when nothing was actually edited, even if ExcelJS-raw rowCount/columnCount differ from actualRowCount/actualColumnCount', async () => {
+    // 실측 버그 재현: ExcelJS의 sheet.rowCount(서식만 있고 값은 없는 "꼬리 행"까지 포함해서 셈)와
+    // parseXlsxToGrid가 canonical에 쓰는 rowCount(actualRowCount 기반, 실제 값이 있는 행까지만)는
+    // 같은 파일에서도 서로 다를 수 있다 — 실제 29만 행급 파일에서 이 어긋남이 편집을 하나도 안 해도
+    // exportXlsxFromGrid가 "행/열이 삭제됐다"고 잘못 판정해 spliceRows/spliceColumns를 실행시켰고,
+    // 대용량에서는 ExcelJS 내부에서 `RangeError: Invalid array length`로 죽었다. 작은 규모에서는
+    // spliceRows 자체가 부작용 없이 조용히 아무 일도 안 하는 경우가 있어(직접 확인함), 소비되는
+    // 부작용이 아니라 **호출 여부 자체**를 스파이로 검증한다 — 이게 이 판정 오류의 진짜 단위다.
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Sheet1');
+    sheet.getCell('A1').value = 'hi';
+    sheet.getCell('A2').value = 'there';
+    sheet.getRow(10).height = 30; // 값은 없이 서식(행 높이)만 — ExcelJS의 rowCount만 10으로 밀어올린다
+    sheet.getColumn(8).width = 20; // 같은 원리로 columnCount도 밀어올려본다(값 없이 서식만)
+    const original = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+
+    // 대조군: 이 파일이 실제로 rowCount(ExcelJS raw) != actualRowCount(canonical 기준) 어긋남을
+    // 만든다는 걸 먼저 확인한다 — 안 그러면 이 테스트가 뭘 재현하는지 스스로도 보장 못 한다.
+    const reloadedForSanityCheck = new ExcelJS.Workbook();
+    await reloadedForSanityCheck.xlsx.load(original as unknown as ArrayBuffer);
+    const sheetForSanityCheck = reloadedForSanityCheck.getWorksheet('Sheet1')!;
+    expect(sheetForSanityCheck.rowCount).toBe(10);
+    expect(sheetForSanityCheck.actualRowCount).toBe(2);
+
+    const baselineGrid = await parseXlsxToGrid(original);
+    expect(baselineGrid.sheets[0].rowCount).toBe(2); // canonical은 actualRowCount 기준 — 2가 맞다
+    const canonicalGrid = structuredClone(baselineGrid) as GridDocument;
+    // 편집은 전혀 하지 않는다 — canonicalGrid === baselineGrid 그대로.
+
+    // ExcelJS는 Worksheet 클래스를 export하지 않으므로, 실제 워크시트 인스턴스에서 프로토타입을
+    // 구해 스파이한다 — exportXlsxFromGrid 내부에서 새로 만드는 워크북의 시트도 같은 프로토타입을
+    // 공유하므로(같은 ExcelJS 클래스) 그 호출도 이 스파이에 잡힌다.
+    const worksheetPrototype = Object.getPrototypeOf(sheet) as ExcelJS.Worksheet;
+    const spliceRowsSpy = vi.spyOn(worksheetPrototype, 'spliceRows');
+    const spliceColumnsSpy = vi.spyOn(worksheetPrototype, 'spliceColumns');
+    try {
+      const exported = await exportXlsxFromGrid(
+        original,
+        canonicalGrid,
+        baselineExtentsOf(baselineGrid),
+        new Set<string>(), // 편집 없음
+        [],
+      );
+      const reopened = new ExcelJS.Workbook();
+      await reopened.xlsx.load(exported as unknown as ArrayBuffer);
+      const reopenedSheet = reopened.getWorksheet('Sheet1')!;
+
+      // 편집이 없었으니 애초에 spliceRows/spliceColumns가 불릴 이유가 없다 — 버그 있던 코드는
+      // ExcelJS raw rowCount/columnCount만 보고 이 둘을 호출했다.
+      expect(spliceRowsSpy).not.toHaveBeenCalled();
+      expect(spliceColumnsSpy).not.toHaveBeenCalled();
+      expect(reopenedSheet.getCell('A1').value).toBe('hi');
+      expect(reopenedSheet.getCell('A2').value).toBe('there');
+    } finally {
+      spliceRowsSpy.mockRestore();
+      spliceColumnsSpy.mockRestore();
+    }
+  });
+
   test('seeds a canonical grid from xlsx, edits a cell, and flushes back to a valid xlsx while preserving formulas', async () => {
     const original = await makeSampleXlsx();
     const baselineGrid = await parseXlsxToGrid(original);
@@ -51,7 +116,13 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     // applyCellsChangeToCanonical이 하는 것과 동일한 형태의 직접 대입).
     (canonicalGrid.sheets[0].rows[1] as Array<GridCell | 0>)[0] = { v: 'Alice Kim' }; // A2
 
-    const exported = await exportXlsxFromGrid(original, canonicalGrid, baselineGrid);
+    const exported = await exportXlsxFromGrid(
+      original,
+      canonicalGrid,
+      baselineExtentsOf(baselineGrid),
+      new Set([gridCellKey(0, 1, 0)]), // A2
+      [],
+    );
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const sheet = reopened.getWorksheet('Sheet1')!;
@@ -98,7 +169,13 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     (canonicalGrid.sheets[0].rows[1] as Array<GridCell | 0>)[0] = { v: cells.get(gridCellKey(0, 1, 0))! }; // A2
     (canonicalGrid.sheets[0].rows[2] as Array<GridCell | 0>)[0] = { v: cells.get(gridCellKey(0, 2, 0))! }; // A3
 
-    const exported = await exportXlsxFromGrid(original, canonicalGrid, baselineGrid);
+    const exported = await exportXlsxFromGrid(
+      original,
+      canonicalGrid,
+      baselineExtentsOf(baselineGrid),
+      new Set([gridCellKey(0, 1, 0), gridCellKey(0, 2, 0)]), // A2, A3
+      [],
+    );
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const sheet = reopened.getWorksheet('Sheet1')!;
@@ -118,7 +195,13 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     styles.push({ b: 1, col: '#ff0000', bg: '#ffff00', a: 'c' });
     (canonicalGrid.sheets[0].rows[0] as Array<GridCell | 0>)[0] = { v: 'Name', s: styleIndex }; // A1
 
-    const exported = await exportXlsxFromGrid(original, canonicalGrid, baselineGrid);
+    const exported = await exportXlsxFromGrid(
+      original,
+      canonicalGrid,
+      baselineExtentsOf(baselineGrid),
+      new Set([gridCellKey(0, 0, 0)]), // A1
+      [],
+    );
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const sheet = reopened.getWorksheet('Sheet1')!;
@@ -138,7 +221,13 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     const canonicalGrid = structuredClone(baselineGrid) as GridDocument;
     (canonicalGrid.sheets[0].rows[0] as Array<GridCell | 0>)[0] = { v: '=B2+B3' }; // A1
 
-    const exported = await exportXlsxFromGrid(original, canonicalGrid, baselineGrid);
+    const exported = await exportXlsxFromGrid(
+      original,
+      canonicalGrid,
+      baselineExtentsOf(baselineGrid),
+      new Set([gridCellKey(0, 0, 0)]), // A1
+      [],
+    );
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const sheet = reopened.getWorksheet('Sheet1')!;
@@ -160,7 +249,13 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     sheet.rowCount = beforeRowCount - 1;
     sheet.rows = sheet.rows.slice(0, beforeRowCount - 1); // 마지막(수식) 행 삭제
 
-    const exported = await exportXlsxFromGrid(original, canonicalGrid, baselineGrid);
+    const exported = await exportXlsxFromGrid(
+      original,
+      canonicalGrid,
+      baselineExtentsOf(baselineGrid),
+      new Set<string>(), // 삽입·삭제 연산 없이 rowCount만 직접 줄인 경우 — 편집 없음
+      [],
+    );
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const reopenedSheet = reopened.getWorksheet('Sheet1')!;

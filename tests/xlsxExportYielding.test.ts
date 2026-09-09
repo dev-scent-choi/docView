@@ -1,12 +1,17 @@
 import ExcelJS from 'exceljs';
 import { describe, expect, test } from 'vitest';
+import { gridCellKey } from '../src/collab/gridShared.js';
 import { exportXlsxFromGrid } from '../src/xlsx/collab.js';
 import type { GridCell, GridDocument, GridSheet } from '../src/spreadsheet.js';
 
 /**
- * 최종 전체 브랜치 리뷰의 I1을 붙잡는 테스트 — `exportXlsxFromGrid`의 두 전체 그리드 스캔(값 diff,
- * 서식 diff)에 양보 지점이 하나도 없어, 큰 시트에서 자동저장·다운로드마다 이벤트 루프가 통째로
- * 멈추던 문제.
+ * 최종 전체 브랜치 리뷰의 I1을 붙잡는 테스트 — `exportXlsxFromGrid`가 큰 시트에서 자동저장·다운로드
+ * 마다 이벤트 루프를 통째로 멈추던 문제.
+ *
+ * baselineGrid 전체 복제본을 없앤 재설계(2026-09-09) 이후로는 "값이 같은지 매 칸 비교"하는 전체
+ * 스캔 자체가 사라지고, 편집된 칸(dirtyCells)만 훑는 구조가 됐다 — 그래서 이 테스트도 "많은 칸이
+ * 편집됐을 때 그 쓰기 루프가 양보하는지"를 검증하도록 바꿨다(예전에는 "값 diff/서식 diff 전체
+ * 스캔"이 대상이었다).
  *
  * **측정 방법**: ExcelJS의 zip/stream 자체가 배경에서 setImmediate를 많이 쓰기 때문에(그래서
  * xlsxYielding.test.ts는 parseXlsxToGrid에 대한 절대 틱 임계값 검증을 실증적으로 기각했다) 단순히
@@ -65,16 +70,15 @@ async function makeTinyOriginal(): Promise<Buffer> {
   return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
 }
 
-describe('xlsx/collab.ts: exportXlsxFromGrid yields to the event loop while scanning a large grid', () => {
+describe('xlsx/collab.ts: exportXlsxFromGrid yields to the event loop while writing many edited cells', () => {
   test(
-    'both full-grid passes (value diff, style diff) hit real yield points',
+    'the dirty-cell write pass hits real yield points when many cells were edited',
     async () => {
-      const ROWS = 10_000; // YIELD_EVERY_N_ROWS(2000) 경계를 각 패스마다 4번 넘긴다
+      const ROWS = 10_000; // YIELD_EVERY_N_ROWS(2000) 경계를 4번 넘긴다
       const COLS = 3;
       const original = await makeTinyOriginal();
 
       const canonicalRows = makeRows(ROWS, COLS);
-      const baselineRows = makeRows(ROWS, COLS); // 내용이 동일 → ExcelJS 쓰기는 한 번도 안 일어나고 순수 스캔만 남는다
 
       const ticker = startTicker();
       const ticksAtRowRead: number[] = [];
@@ -89,23 +93,25 @@ describe('xlsx/collab.ts: exportXlsxFromGrid yields to the event loop while scan
         styles: [],
         sheets: [makeSheet('Big', instrumentedRows, COLS)],
       };
-      const baselineGrid: GridDocument = {
-        styles: [],
-        sheets: [makeSheet('Big', baselineRows, COLS)],
-      };
+      // 원본은 1행짜리라 shrink-check는 트리거되지 않는다(target.rowCount가 baseline보다 훨씬 크다).
+      const baselineSheetExtents = [{ rowCount: 1, colCount: 1 }];
+      // 모든 행의 0번 열을 "편집됨"으로 표시 — 예전 전체-스캔 테스트와 같은 규모(ROWS개 항목)로
+      // 새 쓰기 루프(dirtyCells 기반)가 청크마다 실제로 양보하는지 검증한다.
+      const dirtyCells = new Set<string>();
+      for (let r = 0; r < ROWS; r += 1) dirtyCells.add(gridCellKey(0, r, 0));
 
-      await exportXlsxFromGrid(original, canonicalGrid, baselineGrid);
+      await exportXlsxFromGrid(original, canonicalGrid, baselineSheetExtents, dirtyCells, []);
       ticker.stop();
 
-      // 두 패스 모두 실제로 전체 행을 훑었는지(계측이 붙긴 했는지) 먼저 확인한다.
-      expect(ticksAtRowRead.length).toBeGreaterThanOrEqual(ROWS * 2);
+      // 편집된 칸 전체를 실제로 훑었는지(계측이 붙긴 했는지) 먼저 확인한다.
+      expect(ticksAtRowRead.length).toBeGreaterThanOrEqual(ROWS);
 
-      // 양보 지점이 없던 예전 코드에서는 이 값이 1이다 — 전체 스캔이 한 호흡의 동기 블록이라
+      // 양보 지점이 없던 예전 코드에서는 이 값이 1이다 — 전체 쓰기가 한 호흡의 동기 블록이라
       // 그동안 이벤트 루프가 단 한 번도 돌지 못하기 때문이다.
       const distinctTicks = new Set(ticksAtRowRead).size;
-      expect(distinctTicks).toBeGreaterThanOrEqual(6);
+      expect(distinctTicks).toBeGreaterThanOrEqual(3);
 
-      // "한 번도 안 쉬고 연달아 훑은 최대 행 수"도 직접 확인한다 — 청크 크기(2000행)보다
+      // "한 번도 안 쉬고 연달아 훑은 최대 행 수"도 직접 확인한다 — 청크 크기(2000개)보다
       // 크게 벗어나면 어딘가 양보가 빠진 것이다(약간의 여유는 둔다).
       let longestUnyieldedRun = 1;
       let currentRun = 1;

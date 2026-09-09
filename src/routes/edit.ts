@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { recordAudit } from '../audit.js';
-import { joinEditSession } from '../collab/room.js';
+import { checkRoomCapacity, joinEditSession } from '../collab/room.js';
 import { InvalidTokenError, verifyViewToken } from '../security.js';
 import { store } from '../storage.js';
 
@@ -70,6 +70,16 @@ export async function editRoutes(app: FastifyInstance): Promise<void> {
       if (meta.ext !== 'docx' && meta.ext !== 'xlsx' && meta.ext !== 'pptx') {
         socket.off('message', queueEarly);
         socket.close(4400, '이 문서 형식은 동시편집을 지원하지 않습니다.');
+        return;
+      }
+
+      // 대용량 xlsx 룸이 동시에 너무 많이 열리면(각각 canonicalGrid를 통째로 메모리에 들고 있다)
+      // 서버 OOM으로 이어질 수 있다 — 이미 열려 있는 문서에 대한 추가 접속자는 항상 받고, 상한에
+      // 걸리는 건 "새로 열어야 하는" 대용량 문서뿐이다(room.ts의 checkRoomCapacity 주석 참고).
+      const capacity = await checkRoomCapacity(claims.docId, meta.ext);
+      if (!capacity.ok) {
+        socket.off('message', queueEarly);
+        socket.close(4429, capacity.reason);
         return;
       }
 

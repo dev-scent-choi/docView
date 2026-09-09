@@ -13,6 +13,7 @@ import {
   PAGE_SIZE_ROWS,
   type CellStyleAttrs,
   type GridMergeShape,
+  type GridStructureOpRecord,
   type SheetStructure,
 } from '../collab/gridShared.js';
 import type { GridCell, GridDocument, GridStyle } from '../spreadsheet.js';
@@ -218,8 +219,8 @@ export const GRID_WINDOW_SEED_ORIGIN = 'window-seed';
  * 취지("이건 사용자 편집이 아니라 서버가 만든 파생 캐시이므로 자동저장을 예약할 이유가 없다")지만
  * 다른 종류의 쓰기라 상수를 따로 둔다.
  *
- * **왜 자동저장을 예약하면 안 되는가**: 저장(exportXlsxFromGrid)은 canonicalGrid/baselineGrid만
- * 읽고 이 맵은 단 한 번도 보지 않는다 — 즉 이 맵에 무엇이 쓰여도 디스크에 나갈 바이트는 한 글자도
+ * **왜 자동저장을 예약하면 안 되는가**: 저장(exportXlsxFromGrid)은 canonicalGrid/dirtyCells/
+ * structuralOps만 읽고 이 맵은 단 한 번도 보지 않는다 — 즉 이 맵에 무엇이 쓰여도 디스크에 나갈 바이트는 한 글자도
  * 달라지지 않는다. 그런데 표식이 없으면 **편집 없이 스크롤만 해도**(새 페이지 구독 → 그 페이지
  * 재계산 → computed 쓰기 → 'update') 자동저장이 걸려, 문서를 읽기만 하는 사용자가 8초 이상 멈출
  * 때마다 전체 xlsx export + 재파싱 + 뷰어 캐시 재생성이 한 번씩 돈다(flushToStore에는 dirty 검사가
@@ -284,9 +285,10 @@ export async function seedGridPageFromXlsx(
           if (cell.v !== '') {
             const value = seedableCellValue(cell.v, style);
             cells.set(key, value);
-            // 이 baseline 맵은 이제 저장 기준선이 아니다 — 저장은 room.baselineGrid(룸 생성 시점의
-            // 깊은 복사본)를 쓴다(Task 3). 그래서 편집된 셀이 재시딩될 때 여기에 "편집된 값"이
-            // 들어가도 저장 결과에는 영향이 없다. 클라이언트가 참고할 수 있도록 채우는 것뿐.
+            // 이 baseline 맵은 이제 저장 기준선이 아니다 — 저장은 room.dirtyCells/structuralOps로
+            // "무엇이 편집됐는지"를 판단한다(Task 3 이후). 그래서 편집된 셀이 재시딩될 때 여기에
+            // "편집된 값"이 들어가도 저장 결과에는 영향이 없다. 클라이언트가 참고할 수 있도록
+            // 채우는 것뿐.
             baseline.set(key, value);
           }
           // 서식은 여기서 쓰지 않는다 — 룸을 열 때 seedGridStylesFromXlsx가 전량 채워 두고 그
@@ -377,8 +379,8 @@ export const GRID_STRUCTURE_SHIFT_ORIGIN = 'structure-shift';
  * 저장될 파일도 표현할 수 없는 영역이다.
  *
  * GRID_STYLES_BASELINE_MAP은 **일부러 건드리지 않는다**: 저장 기준선은 Task 3 이후
- * room.baselineGrid이고 이 맵을 읽는 코드는 서버·클라이언트 어디에도 남아 있지 않다(계획의
- * "죽은 baseline/stylesBaseline 맵" 정리 항목).
+ * room.dirtyCells/structuralOps이고 이 맵을 읽는 코드는 서버·클라이언트 어디에도 남아 있지 않다
+ * (계획의 "죽은 baseline/stylesBaseline 맵" 정리 항목).
  */
 export async function shiftGridStyleKeys(
   ydoc: Y.Doc,
@@ -577,13 +579,13 @@ function applyStyleToCell(cell: ExcelJS.Cell, style: CellStyleAttrs | undefined)
   cell.numFmt = numFmtStringFor(style) ?? 'General';
 }
 
-/** canonicalGrid/baselineGrid의 셀(GridCell | 0)에서 표시 텍스트만 뽑는다 — 빈 칸(0 sentinel)과
- * baseline 쪽 시트 자체가 없는 경우(새로 추가된 시트) 모두 빈 문자열로 취급한다. */
+/** canonicalGrid 셀(GridCell | 0)에서 표시 텍스트만 뽑는다 — 빈 칸(0 sentinel)은 빈 문자열로
+ * 취급한다. */
 function cellText(cell: GridCell | 0 | undefined): string {
   return cell === 0 || cell === undefined ? '' : cell.v;
 }
 
-/** canonicalGrid/baselineGrid의 셀이 참조하는 스타일 인덱스를 실제 GridStyle로 해석한다 —
+/** canonicalGrid의 셀이 참조하는 스타일 인덱스를 실제 GridStyle로 해석한다 —
  * grid.styles는 공용 스타일 배열이라 셀은 인덱스(.s)만 들고 있다(Yjs styles 맵과 달리 셀마다
  * 통짜 서식 객체를 직접 들고 있지 않다). */
 function cellStyle(cell: GridCell | 0 | undefined, grid: GridDocument): GridStyle | undefined {
@@ -611,20 +613,31 @@ const EMPTY_REMOVED_SHEETS: ReadonlySet<number> = new Set<number>();
 
 /**
  * 원본 xlsx(수식·서식 등 우리가 편집하지 않는 모든 것)를 그대로 로드한 뒤,
- * 실제로 사용자가 바꾼 셀(값·서식 각각)만 덮어써 재직렬화한다 — docx export와 같은
- * "바뀐 부분만 교체" 원칙. baselineGrid와 값이 같은 셀(한 번도 편집되지 않은 셀 — 수식 셀 포함)은
- * 건드리지 않는다: 수식 셀은 시딩 시 계산된 결괏값 문자열로만 채워지므로, 건드리지 않았는데도
- * canonicalGrid에 있다고 전부 써버리면 수식 자체가 정적 값으로 깨진다.
- * 행/열 삭제(구조 축소)는 시트 끝에서부터만 지원한다(v1 스코프 단순화).
+ * 실제로 사용자가 바꾼 칸(값·서식 각각)만 덮어써 재직렬화한다 — docx export와 같은
+ * "바뀐 부분만 교체" 원칙. 한 번도 편집되지 않은 칸(수식 셀 포함)은 건드리지 않는다: 수식 셀은
+ * 시딩 시 계산된 결괏값 문자열로만 채워지므로, 건드리지 않았는데도 canonicalGrid에 있다고 전부
+ * 써버리면 수식 자체가 정적 값으로 깨진다.
  *
- * 데이터 소스는 Yjs Y.Doc이 아니라 canonicalGrid/baselineGrid다(Task 3) — canonicalGrid는 룸이
- * 항상 최신 상태로 유지하는 "단일 진실"이고, baselineGrid는 그 룸이 처음 시딩될 때의 깊은 복사본
- * (한 번도 편집되지 않은 셀을 가려내는 기준선 — 예전 Yjs baseline/stylesBaseline 맵과 같은 역할).
+ * 데이터 소스는 Yjs Y.Doc이 아니라 canonicalGrid다(Task 3) — 룸이 항상 최신 상태로 유지하는
+ * "단일 진실". "무엇이 바뀌었는지"는 더 이상 canonicalGrid 전체 복제본(옛 baselineGrid)과의
+ * 셀 단위 비교로 재구성하지 않는다 — 대신 세 가지 가벼운 기록으로 재구성한다:
+ * - `baselineSheetExtents`: 룸이 열릴 때 각 시트의 (rowCount, colCount)만 남긴 스냅샷.
+ * - `structuralOps`: 협업 중 적용된 행/열 삽입·삭제(MESSAGE_GRID_STRUCTURE_OP)의 순서 기록 —
+ *   원본을 다시 로드한 이 워크시트에 **같은 순서로 재생**해 canonicalGrid와 물리적 위치를 맞춘다.
+ * - `dirtyCells`: 값 또는 서식이 실제로 편집된 칸의 좌표(gridCellKey 형식) 집합 — 재생이 끝난
+ *   뒤 이 좌표들만 canonicalGrid의 현재 값으로 덮어쓴다.
+ *
+ * **알려진 트레이드오프**: dirtyCells는 한 번 편집된 칸을 계속 "편집됨"으로 기억한다 — 원래
+ * 수식이었던 칸을 편집했다가 정확히 그 수식의 계산값과 같은 문자열로 되돌려도, 이 칸은 이제
+ * 정적 값으로 저장된다(예전에는 값이 같으면 원본 수식이 그대로 보존됐다). 시트 전체를 매번
+ * 비교하는 대신 실제 편집 건수에 비례하는 메모리만 쓰기 위해 받아들인 차이다.
  */
 export async function exportXlsxFromGrid(
   originalXlsxBytes: Uint8Array,
   canonicalGrid: GridDocument,
-  baselineGrid: GridDocument,
+  baselineSheetExtents: ReadonlyArray<{ readonly rowCount: number; readonly colCount: number }>,
+  dirtyCells: ReadonlySet<string>,
+  structuralOps: readonly GridStructureOpRecord[],
   options: XlsxExportOptions = {},
 ): Promise<Uint8Array> {
   const removedSheets = options.removedSheetIndices ?? EMPTY_REMOVED_SHEETS;
@@ -657,6 +670,7 @@ export async function exportXlsxFromGrid(
     // 협업 중 새로 추가된 시트(webviewer 쪽 "+"/삽입 메뉴)는 원본 xlsx에 애초에 없어서
     // visibleSheets에 자리가 없다 — 지금 이름으로 새 워크시트를 만들어 그 자리에 채워 넣는다.
     let sheet = visibleSheets[sheetIdx];
+    const isNewSheet = !sheet;
     if (!sheet) {
       sheet = workbook.addWorksheet(target.name);
       visibleSheets[sheetIdx] = sheet;
@@ -666,11 +680,53 @@ export async function exportXlsxFromGrid(
       sheet.name = target.name;
     }
 
-    if (sheet.rowCount > target.rowCount) {
-      sheet.spliceRows(target.rowCount + 1, sheet.rowCount - target.rowCount);
+    if (isNewSheet) continue; // 원본에 없던 시트 — 재생할 구조 연산도, 맞출 원본 크기도 없다
+    const baselineExtent = baselineSheetExtents[sheetIdx];
+    if (!baselineExtent) continue;
+
+    // 이 시트에 적용된 행/열 삽입·삭제를 **기록된 순서 그대로** 방금 원본을 다시 읽어들인
+    // 이 워크시트에도 재생한다 — canonicalGrid에 있었던 것과 같은 splice를 적용해 두 쪽의 행/열
+    // 물리적 위치를 맞춘다. ExcelJS의 spliceRows/spliceColumns는 재생되는 기존 행/열의 값·서식·
+    // 행 높이 등을 그대로 옮겨 주므로, 편집되지 않은 칸은 이 재생만으로 이미 올바른 위치에 있다.
+    let expectedRowCount = baselineExtent.rowCount;
+    let expectedColCount = baselineExtent.colCount;
+    for (const op of structuralOps) {
+      if (op.sheet !== sheetIdx) continue;
+      const onRows = op.kind === 'insertRows' || op.kind === 'deleteRows';
+      const insert = op.kind === 'insertRows' || op.kind === 'insertCols';
+      if (onRows) {
+        if (insert) {
+          sheet.spliceRows(op.at + 1, 0, ...Array.from({ length: op.count }, () => [] as unknown[]));
+          expectedRowCount += op.count;
+        } else {
+          sheet.spliceRows(op.at + 1, op.count);
+          expectedRowCount -= op.count;
+        }
+      } else if (insert) {
+        sheet.spliceColumns(op.at + 1, 0, ...Array.from({ length: op.count }, () => [] as unknown[]));
+        expectedColCount += op.count;
+      } else {
+        sheet.spliceColumns(op.at + 1, op.count);
+        expectedColCount -= op.count;
+      }
     }
-    if (sheet.columnCount > target.colCount) {
-      sheet.spliceColumns(target.colCount + 1, sheet.columnCount - target.colCount);
+
+    // 위 재생 이후에도 남는 차이는 삽입·삭제 연산 없이 rowCount/colCount만 직접 줄어든 경우다
+    // (grid-editor.ts 툴바의 "행/열 삭제" 버튼 — 시트 끝에서부터만 지원하는 v1 단순화). 기준은
+    // ExcelJS의 raw sheet.rowCount/columnCount가 아니라 위에서 계산한 expectedRowCount/
+    // expectedColCount다 — raw 값은 서식만 있는 꼬리 행/열까지 세어 실제와 어긋날 수 있고, 이
+    // 함수가 예전에 겪은 `Invalid array length` 버그의 원인이 정확히 그 어긋남이었다.
+    if (target.rowCount < expectedRowCount) {
+      const removeCount = expectedRowCount - target.rowCount;
+      if (sheet.rowCount >= target.rowCount + removeCount) {
+        sheet.spliceRows(target.rowCount + 1, removeCount);
+      }
+    }
+    if (target.colCount < expectedColCount) {
+      const removeCount = expectedColCount - target.colCount;
+      if (sheet.columnCount >= target.colCount + removeCount) {
+        sheet.spliceColumns(target.colCount + 1, removeCount);
+      }
     }
   }
 
@@ -682,57 +738,66 @@ export async function exportXlsxFromGrid(
     if (sheet) workbook.removeWorksheet(sheet.id);
   }
 
-  // 값 diff 패스 — 이 아래 두 전체 그리드 스캔은 최대 시트 크기에서 각각 초 단위로 이어질 수
-  // 있고(실측 ~2초), 자동저장과 다운로드 **매번** 돈다. 다른 대형 루프와 똑같이
-  // YIELD_EVERY_N_ROWS행마다 실제 이벤트 루프에 양보한다(계획의 Global Constraint #1).
-  for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
-    if (removedSheets.has(sheetIdx)) continue;
-    const currentSheet = canonicalGrid.sheets[sheetIdx];
-    const baselineSheet = baselineGrid.sheets[sheetIdx];
-    const sheet = visibleSheets[sheetIdx];
-    if (!sheet) continue;
-
-    for (let r = 0; r < currentSheet.rows.length; r += 1) {
-      const currentRow = currentSheet.rows[r];
-      const baselineRow = baselineSheet?.rows[r];
-      // 열 상한은 행 배열 길이가 아니라 시트의 colCount다 — 편집으로 열이 늘어난 시트에서는
-      // (원본 시절 만들어진) 기존 행 배열이 새 colCount보다 짧을 수 있고, 그 새 열에 들어온 값이
-      // 행 배열 길이 기준으로 돌면 통째로 빠진다. cellText는 없는 칸(undefined)을 빈 칸으로 본다.
-      for (let c = 0; c < currentSheet.colCount; c += 1) {
-        const currentCell = currentRow?.[c];
-        const baselineCell = baselineRow?.[c];
-        const currentText = cellText(currentCell);
-        const baselineText = cellText(baselineCell);
-        if (currentText === baselineText) continue; // 편집되지 않음 (수식 셀 포함) — 원본 그대로 둔다
-        if (r >= currentSheet.rowCount) continue;
-        sheet.getCell(r + 1, c + 1).value = currentText === '' ? null : coerceCellValue(currentText);
-      }
-      if ((r + 1) % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
+  // 편집된 칸의 좌표를 시트별로 미리 묶어 둔다 — dirtyCells 전체를 시트마다 다시 훑지 않기 위함.
+  const dirtyBySheet = new Map<number, Array<{ row: number; col: number }>>();
+  for (const key of dirtyCells) {
+    const parsed = parseGridCellKey(key);
+    if (!parsed || removedSheets.has(parsed.sheetIdx)) continue;
+    let list = dirtyBySheet.get(parsed.sheetIdx);
+    if (!list) {
+      list = [];
+      dirtyBySheet.set(parsed.sheetIdx, list);
     }
+    list.push({ row: parsed.row, col: parsed.col });
   }
 
-  // 서식 diff 패스 — 위와 같은 이유로 같은 양보 구조를 쓴다.
+  // 쓰기 패스 — 새로 추가된 시트는 비교할 기준선이 없으므로 비어 있지 않은 칸을 전부 옮겨 쓰고,
+  // 원본에 있던 시트는(위에서 이미 구조가 재생돼 물리적 위치가 맞아 있다) dirtyBySheet에 담긴
+  // 좌표만 다시 쓴다. 두 경우 모두 실제 편집 규모에 비례하므로(전체 시트 크기가 아니라), 대용량
+  // 파일에서 편집이 적으면 이 패스는 예전의 전체 셀 스캔보다 훨씬 빠르다.
+  let sinceYield = 0;
+  const maybeYield = async () => {
+    sinceYield += 1;
+    if (sinceYield >= YIELD_EVERY_N_ROWS) {
+      sinceYield = 0;
+      await yieldToEventLoop();
+    }
+  };
   for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
     if (removedSheets.has(sheetIdx)) continue;
     const currentSheet = canonicalGrid.sheets[sheetIdx];
-    const baselineSheet = baselineGrid.sheets[sheetIdx];
     const sheet = visibleSheets[sheetIdx];
     if (!sheet) continue;
+    const isNewSheet = sheetIdx >= originalSheetCount;
 
-    for (let r = 0; r < currentSheet.rows.length; r += 1) {
-      const currentRow = currentSheet.rows[r];
-      const baselineRow = baselineSheet?.rows[r];
-      for (let c = 0; c < currentSheet.colCount; c += 1) {
-        const currentCell = currentRow?.[c];
-        const baselineCell = baselineRow?.[c];
-        const currentStyle = cellStyle(currentCell, canonicalGrid);
-        const baselineStyle = cellStyle(baselineCell, baselineGrid);
-        if (currentStyle === baselineStyle) continue;
-        if (currentStyle && baselineStyle && JSON.stringify(currentStyle) === JSON.stringify(baselineStyle)) continue;
-        if (r >= currentSheet.rowCount) continue;
-        applyStyleToCell(sheet.getCell(r + 1, c + 1), currentStyle ? toCellStyleAttrs(currentStyle) : undefined);
+    if (isNewSheet) {
+      for (let r = 0; r < currentSheet.rows.length; r += 1) {
+        if (r < currentSheet.rowCount) {
+          const row = currentSheet.rows[r];
+          for (let c = 0; c < currentSheet.colCount; c += 1) {
+            const cell = row?.[c];
+            if (cell === 0 || cell === undefined) continue;
+            const text = cellText(cell);
+            sheet.getCell(r + 1, c + 1).value = text === '' ? null : coerceCellValue(text);
+            const style = cellStyle(cell, canonicalGrid);
+            applyStyleToCell(sheet.getCell(r + 1, c + 1), style ? toCellStyleAttrs(style) : undefined);
+          }
+        }
+        await maybeYield();
       }
-      if ((r + 1) % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
+      continue;
+    }
+
+    const dirtyList = dirtyBySheet.get(sheetIdx);
+    if (!dirtyList) continue;
+    for (const { row: r, col: c } of dirtyList) {
+      if (r >= currentSheet.rowCount || c >= currentSheet.colCount) continue; // 이후 잘려나간 칸
+      const cell = currentSheet.rows[r]?.[c];
+      const text = cellText(cell);
+      sheet.getCell(r + 1, c + 1).value = text === '' ? null : coerceCellValue(text);
+      const style = cellStyle(cell, canonicalGrid);
+      applyStyleToCell(sheet.getCell(r + 1, c + 1), style ? toCellStyleAttrs(style) : undefined);
+      await maybeYield();
     }
   }
 

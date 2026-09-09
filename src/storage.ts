@@ -30,6 +30,9 @@ export interface DocumentStore {
   readonly mode: 'disk' | 'memory';
   saveOriginal(id: string, ext: string, data: Buffer): Promise<void>;
   readOriginal(id: string, ext: string): Promise<Buffer>;
+  /** 원본 파일의 바이트 크기만 — 내용을 읽지 않고 알아야 할 때(예: 동시편집 룸 개수 상한 판단)
+   * 쓴다. 파일이 없으면 null. */
+  originalSize(id: string, ext: string): Promise<number | null>;
   saveDerived(id: string, kind: DerivedKind, data: Buffer): Promise<void>;
   readDerived(id: string, kind: DerivedKind): Promise<Buffer>;
   hasDerived(id: string, kind: DerivedKind): Promise<boolean>;
@@ -91,6 +94,15 @@ export class DiskStore implements DocumentStore {
 
   async readOriginal(id: string, ext: string): Promise<Buffer> {
     return fs.readFile(this.originalPath(id, ext));
+  }
+
+  async originalSize(id: string, ext: string): Promise<number | null> {
+    try {
+      const stat = await fs.stat(this.originalPath(id, ext));
+      return stat.size;
+    } catch {
+      return null;
+    }
   }
 
   async saveDerived(id: string, kind: DerivedKind, data: Buffer): Promise<void> {
@@ -207,6 +219,10 @@ export class MemoryStore implements DocumentStore {
     const data = this.originals.get(id);
     if (!data) throw new Error('문서가 메모리에서 만료되었습니다. 다시 업로드해 주세요.');
     return data;
+  }
+
+  async originalSize(id: string, _ext: string): Promise<number | null> {
+    return this.originals.get(id)?.length ?? null;
   }
 
   async saveDerived(id: string, kind: DerivedKind, data: Buffer): Promise<void> {

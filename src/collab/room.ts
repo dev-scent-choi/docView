@@ -79,6 +79,8 @@ import {
   PAGE_SIZE_ROWS,
   type CellStyleAttrs,
   type GridMergeShape,
+  type GridStructureOpKind,
+  type GridStructureOpRecord,
   type SheetStructure,
 } from './gridShared.js';
 import { runSerialized } from './saveSerializer.js';
@@ -159,17 +161,44 @@ interface Room {
    * (Task 6 이후) 지금 구독 중인 페이지만 담는 캐시가 되므로, 저장·다운로드·수식 계산은 항상
    * 이 필드를 기준으로 한다. docx/pptx 룸에서는 항상 null. */
   canonicalGrid: GridDocument | null;
-  /** xlsx 룸에서만 쓰인다 — 룸이 처음 시딩될 때 canonicalGrid를 깊은 복사해 둔 것("원본
-   * 그대로"). canonicalGrid는 편집을 따라 계속 바뀌지만 이 필드는 룸이 사는 동안 절대 바뀌지
-   * 않는다 — exportXlsxFromGrid가 "한 번도 편집되지 않은 셀(수식 셀 포함)"을 가려내는 기준선
-   * 으로 쓴다(예전 Yjs baseline/stylesBaseline 맵과 같은 역할). docx/pptx 룸에서는 항상 null. */
-  baselineGrid: GridDocument | null;
+  /**
+   * xlsx 룸에서만 쓰인다 — 룸이 처음 시딩될 때 각 시트의 (rowCount, colCount)만 남겨 둔 가벼운
+   * 스냅샷("원본 그대로"의 크기만). 협업 중 새로 추가된 시트는 이 배열에 자리가 없다(원래
+   * 존재하지 않았으므로 — undefined로 판별).
+   *
+   * **왜 canonicalGrid 전체를 깊은 복사해 두던 것(옛 baselineGrid)을 없앴는가**: 대용량 문서(29만
+   * 행급)에서 이 전체 복제본이 룸 메모리의 상당 부분을 차지했다(진단 문서 docs/TODO.md 참고).
+   * exportXlsxFromGrid는 이제 셀 단위 값 비교 대신 dirtyCells(실제로 편집된 칸의 좌표만)와
+   * structuralOps(행/열 삽입·삭제 연산 기록)로 "무엇이 바뀌었는지"를 재구성한다 — 이 필드는 그
+   * 재구성에서 "시트 끝을 직접 늘리거나 줄인" 변경(구조 연산 없이 rowCount/colCount만 바뀌는
+   * 경로, grid-editor.ts의 +/- 버튼)을 감지하는 데만 쓰인다.
+   */
+  baselineSheetExtents: ReadonlyArray<{ readonly rowCount: number; readonly colCount: number }> | null;
+  /**
+   * xlsx 룸에서만 쓰인다 — 룸이 열린 뒤 값 또는 서식이 실제로 편집된 칸의 좌표 키(gridCellKey
+   * 형식, "시트:행:열") 집합. cells.observe/styles.observe가 채우고, applyGridStructureOp가
+   * 행/열을 밀 때마다 같은 좌표 이동을 이 집합에도 그대로 적용한다(shiftDirtyCellKeys).
+   *
+   * 한 번 편집된 칸은 이후 원래 값으로 되돌려도 이 집합에서 빠지지 않는다(다시 "한 번도 안
+   * 건드린 척"으로 되돌리지 않음) — 그 칸이 원래 수식이었다면 이 시점부터는 정적 값으로 저장된다.
+   * 이건 옛 전체-비교 방식과의 알려진 차이이고, 메모리 절감을 위해 받아들인 트레이드오프다.
+   */
+  readonly dirtyCells: Set<string>;
+  /**
+   * xlsx 룸에서만 쓰인다 — 협업 중 적용된 행/열 삽입·삭제 연산(MESSAGE_GRID_STRUCTURE_OP)을
+   * 순서대로 쌓아 둔 기록. exportXlsxFromGrid가 원본을 다시 로드한 워크북에 이 기록을 같은
+   * 순서로 재생(spliceRows/spliceColumns)해 canonicalGrid와 같은 물리적 행/열 위치를 맞춘다.
+   * 룸이 여러 번 저장돼도(자동저장마다) 항상 같은 원본(originalXlsxBytes)에서 다시 시작하므로
+   * 이 기록은 룸이 사는 동안 계속 누적돼야 멱등이 유지된다(originalXlsxBytes 주석과 같은 이유).
+   */
+  readonly structuralOps: GridStructureOpRecord[];
   /**
    * xlsx 룸에서만 쓰인다 — 룸을 처음 열 때 읽은 **원본 바이트 그대로**. 이후 모든 내보내기
    * (자동저장·다운로드)는 디스크의 현재 파일이 아니라 항상 이 바이트를 기준으로 한다.
    *
-   * **왜 매번 store.readOriginal을 다시 읽으면 안 되는가**: baselineGrid(= 이 바이트를 파싱한
-   * 결과)와 removedSheetIndices/sheetDisplayOrder는 전부 "룸이 열린 시점의 원본"을 기준으로 한
+   * **왜 매번 store.readOriginal을 다시 읽으면 안 되는가**: baselineSheetExtents/structuralOps/
+   * dirtyCells(= 이 바이트를 기준으로 한 상대적 변경 기록)와 removedSheetIndices/sheetDisplayOrder는
+   * 전부 "룸이 열린 시점의 원본"을 기준으로 한
    * 상대적 표현이다. 자동저장이 한 번 돌고 나면 디스크의 파일은 이미 그 변경이 반영된 상태라,
    * 다음 저장에서 같은 removedSheetIndices를 다시 적용하면 **이미 지워진 시트 대신 그 뒤의
    * 멀쩡한 시트를 지운다**(두 번째 저장에서 데이터가 조용히 사라지는 버그). 항상 같은 원본에서
@@ -204,6 +233,44 @@ interface Room {
 }
 
 const rooms = new Map<string, Room>();
+
+/**
+ * 대용량으로 취급하는 xlsx 원본 파일 크기 기준(바이트) — 이 이상이면 동시에 열 수 있는 룸 개수에
+ * 상한을 둔다. 작은 파일은 룸당 메모리 사용이 미미해 상한 대상이 아니다.
+ *
+ * **왜 행 수가 아니라 바이트 크기인가**: 상한 검사는 룸을 실제로 열기(seedRoom으로 파싱) 전에
+ * 해야 의미가 있다 — 파싱까지 해봐야 행 수를 아는 거라면 "상한을 검사하려고 이미 상한을 넘는
+ * 메모리를 써버리는" 모순이 생긴다. 파일 바이트 크기는 파싱 없이 디스크에서 바로 알 수 있는
+ * 유일한 저비용 대리 지표다.
+ */
+const LARGE_XLSX_BYTE_THRESHOLD = 5 * 1024 * 1024;
+
+/** 동시에 열 수 있는 "대용량 xlsx 룸" 개수 상한 — 이미 열려 있는 문서에 대한 추가 접속자(같은
+ * docId)는 상한과 무관하게 항상 받는다(그 룸은 이미 세어져 있으므로 추가 메모리 비용이 없다). */
+const MAX_CONCURRENT_LARGE_XLSX_ROOMS = 3;
+
+/** 지금 대용량으로 카운트되고 있는 xlsx 문서 id 집합 — 룸이 완전히 닫히면(closeConn) 함께 뺀다. */
+const largeRoomDocIds = new Set<string>();
+
+/**
+ * 새 편집/열람 세션(joinEditSession)을 시작하기 전에 호출한다 — 이미 열려 있는 문서면 항상
+ * 허용하고, 새로 열어야 하는 대용량 xlsx 문서인데 이미 상한만큼 열려 있으면 거부한다.
+ * 허용되는 경우 그 자리에서 카운트를 예약한다(같은 docId를 두 번 세지는 않는다 — Set).
+ */
+export async function checkRoomCapacity(
+  docId: string,
+  ext: string,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> {
+  if (rooms.has(docId) || largeRoomDocIds.has(docId)) return { ok: true };
+  if (ext !== 'xlsx') return { ok: true };
+  const size = await store.originalSize(docId, ext);
+  if (size === null || size < LARGE_XLSX_BYTE_THRESHOLD) return { ok: true };
+  if (largeRoomDocIds.size >= MAX_CONCURRENT_LARGE_XLSX_ROOMS) {
+    return { ok: false, reason: '사용자가 많습니다. 잠시 후 다시 시도해주세요.' };
+  }
+  largeRoomDocIds.add(docId);
+  return { ok: true };
+}
 
 function send(room: Room, conn: WebSocket, message: Uint8Array): void {
   if (conn.readyState !== conn.CONNECTING && conn.readyState !== conn.OPEN) {
@@ -651,9 +718,9 @@ function recomputeSubscribedPagesInBackground(room: Room, sheetIndices: Iterable
   });
 }
 
-type GridStructureOpKind = 'insertRows' | 'deleteRows' | 'insertCols' | 'deleteCols';
-
-/** MESSAGE_GRID_STRUCTURE_OP의 페이로드 — "이 시트의 at 자리에 행/열 count개를 넣거나 뺀다". */
+/** MESSAGE_GRID_STRUCTURE_OP의 페이로드 — "이 시트의 at 자리에 행/열 count개를 넣거나 뺀다".
+ * gridShared.ts의 GridStructureOpRecord와 모양이 같다(같은 타입을 재사용해도 되지만, 이건
+ * "지금 막 도착한, 아직 적용 안 된 메시지"라는 의미를 이름으로 구분해 둔다). */
 interface GridStructureOp {
   readonly sheet: number;
   readonly kind: GridStructureOpKind;
@@ -763,6 +830,49 @@ async function refreshSeededPagesAfterShift(
  * isAutosaveExemptOrigin에 들어 있지 않으므로, 위 쓰기들이 그대로 ydoc 'update'를 타고
  * scheduleAutosave를 건다.
  */
+/**
+ * room.dirtyCells의 좌표를 행/열 삽입·삭제에 맞춰 그대로 옮긴다 — gridShift.ts가 canonical
+ * 그리드의 실제 배열에 하는 것과 똑같은 좌표 변환을, "이 칸이 편집된 적 있다"는 표시에도 적용하는
+ * 것뿐이다. 다른 시트의 키, 그리고 파싱할 수 없는 키는 그대로 둔다.
+ *
+ * 삭제 범위 [at, at+count) 안의 좌표는 그 칸 자체가 사라졌으므로 표시도 함께 버린다. dirtyCells는
+ * 실제로 편집된 칸의 개수에 비례하므로(시트 전체 크기와 무관), 이 함수는 시트가 아무리 커도
+ * 편집된 칸 수만큼만 훑는다 — 30만 행짜리 시트에서 행 하나를 삽입해도 dirtyCells가 비어 있으면
+ * 할 일이 없다.
+ */
+function shiftDirtyCellKeys(
+  dirtyCells: Set<string>,
+  sheetIdx: number,
+  axis: 'row' | 'col',
+  at: number,
+  count: number,
+  insert: boolean,
+): void {
+  if (dirtyCells.size === 0) return;
+  const shifted: string[] = [];
+  for (const key of dirtyCells) {
+    const parsed = parseGridCellKey(key);
+    if (!parsed || parsed.sheetIdx !== sheetIdx) continue;
+    let { row, col } = parsed;
+    const coord = axis === 'row' ? row : col;
+    dirtyCells.delete(key);
+    if (insert) {
+      if (coord >= at) {
+        if (axis === 'row') row += count;
+        else col += count;
+      }
+    } else {
+      if (coord >= at && coord < at + count) continue; // 삭제된 칸 — 표시도 함께 버린다
+      if (coord >= at + count) {
+        if (axis === 'row') row -= count;
+        else col -= count;
+      }
+    }
+    shifted.push(gridCellKey(sheetIdx, row, col));
+  }
+  for (const key of shifted) dirtyCells.add(key);
+}
+
 async function applyGridStructureOp(room: Room, op: GridStructureOp): Promise<void> {
   if (rooms.get(room.docId) !== room) return; // 룸이 이미 닫혔다(체인에 줄 서 있는 동안)
   const grid = room.canonicalGrid;
@@ -807,6 +917,12 @@ async function applyGridStructureOp(room: Room, op: GridStructureOp): Promise<vo
   }
   // 열 방향은 청크마다 양보하므로 그 사이에 룸이 닫혔을 수 있다.
   if (rooms.get(room.docId) !== room) return;
+
+  // 이 연산을 기록·반영한다 — 내보내기(exportXlsxFromGrid)가 원본을 다시 로드한 워크북에 같은
+  // 순서로 재생하기 위한 로그(structuralOps)와, "이 칸이 편집된 적 있다"는 표시(dirtyCells)도
+  // canonical과 똑같이 옮겨야 한다(Room.dirtyCells 주석 참고).
+  room.structuralOps.push({ sheet: op.sheet, kind: op.kind, at: op.at, count: op.count });
+  shiftDirtyCellKeys(room.dirtyCells, op.sheet, onRows ? 'row' : 'col', op.at, op.count, insert);
 
   // 1) 병합 — canonical 쪽은 gridShift가 이미 보정했고, 클라이언트가 렌더링에 쓰는 Yjs 맵도
   //    같은 값으로 맞춘다(이 맵은 윈도잉 대상이 아니라 항상 전체가 들어 있다).
@@ -864,9 +980,8 @@ async function seedRoom(room: Room): Promise<void> {
       room.canonicalGrid = grid;
       // 이후 모든 내보내기의 기준 원본 — 왜 매번 디스크를 다시 읽지 않는지는 Room.originalXlsxBytes 주석 참고.
       room.originalXlsxBytes = new Uint8Array(original);
-      // Node 20+(package.json engines)이라 내장 structuredClone을 그대로 쓴다 — GridDocument는
-      // 함수·순환참조·Map/Set이 전혀 없는 순수 JSON 모양 데이터라 깊은 복사에 안전하다.
-      room.baselineGrid = structuredClone(grid);
+      // 전체 그리드가 아니라 시트별 크기만 남긴다 — Room.baselineSheetExtents 주석 참고.
+      room.baselineSheetExtents = grid.sheets.map((s) => ({ rowCount: s.rowCount, colCount: s.colCount }));
       // 셀 데이터는 여기서 채우지 않는다(윈도잉 컷오버) — 구조/병합 메타데이터만 전량 채우고,
       // 실제 셀은 클라이언트가 "이 페이지들을 보고 있다"고 알려올 때 그 페이지만 채운다
       // (reconcilePageSubscriptions). 룸이 막 생긴 이 시점에는 구독자가 하나도 없으므로 채울
@@ -889,6 +1004,9 @@ async function seedRoom(room: Room): Promise<void> {
         // 다시 걸 필요도 없다.
         if (event.transaction.origin === GRID_WINDOW_SEED_ORIGIN) return;
         applyCellsChangeToCanonical(grid, cells, event);
+        // 내보내기가 "무엇을 다시 써야 하는지" 알 수 있도록 실제로 편집된 좌표를 기록한다 —
+        // Room.dirtyCells 주석 참고. 키 형식이 gridCellKey와 동일하므로 그대로 담는다.
+        for (const key of event.changes.keys.keys()) room.dirtyCells.add(key);
         // 이번 배치에서 실제로 바뀐 셀이 속한 시트만 재계산한다 — event.changes.keys가
         // "시트:행:열" 키별로 add/update/delete를 알려주므로 거기서 시트 인덱스를 뽑아낸다.
         // 재계산 대상은 그 시트 전체가 아니라 "지금 구독 중인 페이지들"이다 — 수식이 창 밖의
@@ -919,6 +1037,7 @@ async function seedRoom(room: Room): Promise<void> {
         // 같은 이동이 두 번 적용된다(shiftGridStyleKeys / GRID_STRUCTURE_SHIFT_ORIGIN 주석 참고).
         if (event.transaction.origin === GRID_STRUCTURE_SHIFT_ORIGIN) return;
         applyStylesChangeToCanonical(grid, styles, event);
+        for (const key of event.changes.keys.keys()) room.dirtyCells.add(key);
       });
       const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
       structure.observe((event) => {
@@ -956,7 +1075,7 @@ async function flushToStore(room: Room): Promise<void> {
     // 디스크의 현재 파일이 아니라 룸을 열 때의 원본을 쓴다 — 이유는 Room.originalXlsxBytes 주석 참고
     // (안 그러면 두 번째 저장부터 시트 삭제가 엉뚱한 시트에 적용된다).
     const original = room.originalXlsxBytes ?? (await store.readOriginal(docId, meta.ext));
-    if (!room.canonicalGrid || !room.baselineGrid) {
+    if (!room.canonicalGrid || !room.baselineSheetExtents) {
       console.error(`동시편집 저장 실패 — canonical 그리드 없음 (문서 ${docId})`);
     } else {
       // 진행 중인 행/열 이동이 끝난 뒤에 읽는다 — 반쪽 상태를 저장하지 않기 위해(리뷰 지적 I-1,
@@ -965,7 +1084,9 @@ async function flushToStore(room: Room): Promise<void> {
       const newXlsxBytes = await exportXlsxFromGrid(
         original,
         room.canonicalGrid,
-        room.baselineGrid,
+        room.baselineSheetExtents,
+        room.dirtyCells,
+        room.structuralOps,
         exportOptionsFor(room),
       );
       await store.saveOriginal(docId, meta.ext, Buffer.from(newXlsxBytes));
@@ -1124,7 +1245,7 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
   if (!meta) return null;
   const original = await store.readOriginal(docId, meta.ext);
   if (room.kind === 'xlsx') {
-    if (!room.canonicalGrid || !room.baselineGrid) return null;
+    if (!room.canonicalGrid || !room.baselineSheetExtents) return null;
     // flushToStore와 같은 이유로 진행 중인 행/열 이동을 먼저 기다린다 — 이 경로는 사용자가 방금
     // 누른 다운로드라 반쪽 상태가 그대로 손에 들어간다(리뷰 지적 I-1).
     await drainCanonicalGrowth(room);
@@ -1132,7 +1253,9 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
     return exportXlsxFromGrid(
       room.originalXlsxBytes ?? original,
       room.canonicalGrid,
-      room.baselineGrid,
+      room.baselineSheetExtents,
+      room.dirtyCells,
+      room.structuralOps,
       exportOptionsFor(room),
     );
   }
@@ -1181,7 +1304,9 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     ready: Promise.resolve(), // 아래에서 즉시 덮어씀 — seedRoom(room)이 room 자신을 참조해야 해서
     suppressAutosaveReschedule: false,
     canonicalGrid: null,
-    baselineGrid: null,
+    baselineSheetExtents: null,
+    dirtyCells: new Set<string>(),
+    structuralOps: [],
     originalXlsxBytes: null,
     removedSheetIndices: new Set<number>(),
     sheetDisplayOrder: new Map<number, number>(),
@@ -1210,7 +1335,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     // 시딩 도중(청크 사이 양보 틈)에 도착한 진짜 편집의 자동저장 예약을 놓치는 일은 없다.
     //
     // 수식 계산값 쓰기(GRID_COMPUTED_WRITE_ORIGIN)도 같은 이유로 자동저장을 예약하지 않는다:
-    // exportXlsxFromGrid는 canonicalGrid/baselineGrid만 읽고 computed 맵은 아예 보지 않으므로
+    // exportXlsxFromGrid는 canonicalGrid/dirtyCells/structuralOps만 읽고 computed 맵은 아예 보지 않으므로
     // 그 맵에 무엇이 쓰여도 저장될 바이트는 달라지지 않는다. 표식이 없으면 새 페이지를 스크롤로
     // 열기만 해도(구독 → 그 페이지 재계산 → computed 쓰기) 자동저장이 걸려, 아무도 편집하지 않은
     // 문서를 읽는 동안 전체 export + 재파싱이 반복된다. 진짜 편집은 GRID_CELLS_MAP 쓰기로
@@ -1263,6 +1388,7 @@ function closeConn(room: Room, conn: WebSocket): void {
       // 건드리려 하며 그동안 Room과 canonicalGrid(대형 시트 전체)를 GC에서 붙잡아 둔다.
       cancelPendingUnseeds(room.docId);
       rooms.delete(room.docId);
+      largeRoomDocIds.delete(room.docId);
       void room.ready
         .then(() => queueFlush(room))
         .catch((error) => console.error(`동시편집 종료 저장 실패 (문서 ${room.docId}):`, error))
