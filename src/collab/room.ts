@@ -189,15 +189,9 @@ interface Room {
    */
   baselineSheetExtents: ReadonlyArray<{ readonly rowCount: number; readonly colCount: number }> | null;
   /**
-   * xlsx 룸에서만 쓰인다 — Task 11 이전 세대의 유물. 값 또는 서식이 편집된 칸의 좌표를 이제
-   * `lazyGrid.dirtyOverlay`(값까지 담는 Map)가 대체했으므로 이 필드는 더 이상 읽거나 쓰지
-   * 않는다(죽은 필드 — Task 12에서 완전히 제거 예정, `docs/superpowers/plans/...` Task 12 참고).
-   */
-  readonly dirtyCells: Set<string>;
-  /**
    * xlsx 룸에서만 쓰인다 — 협업 중 적용된 행/열 삽입·삭제 연산(MESSAGE_GRID_STRUCTURE_OP)을
    * 순서대로 쌓아 둔 기록. exportXlsxFromGrid가 원본을 다시 로드한 워크북에 이 기록을 같은
-   * 순서로 재생(spliceRows/spliceColumns)해 canonicalGrid와 같은 물리적 행/열 위치를 맞춘다.
+   * 순서로 재생(spliceRows/spliceColumns)해 lazyGrid와 같은 물리적 행/열 위치를 맞춘다.
    * 룸이 여러 번 저장돼도(자동저장마다) 항상 같은 원본(originalXlsxBytes)에서 다시 시작하므로
    * 이 기록은 룸이 사는 동안 계속 누적돼야 멱등이 유지된다(originalXlsxBytes 주석과 같은 이유).
    */
@@ -207,7 +201,7 @@ interface Room {
    * (자동저장·다운로드)는 디스크의 현재 파일이 아니라 항상 이 바이트를 기준으로 한다.
    *
    * **왜 매번 store.readOriginal을 다시 읽으면 안 되는가**: baselineSheetExtents/structuralOps/
-   * dirtyCells(= 이 바이트를 기준으로 한 상대적 변경 기록)와 removedSheetIndices/sheetDisplayOrder는
+   * lazyGrid.dirtyOverlay(= 이 바이트를 기준으로 한 상대적 변경 기록)와 removedSheetIndices/sheetDisplayOrder는
    * 전부 "룸이 열린 시점의 원본"을 기준으로 한
    * 상대적 표현이다. 자동저장이 한 번 돌고 나면 디스크의 파일은 이미 그 변경이 반영된 상태라,
    * 다음 저장에서 같은 removedSheetIndices를 다시 적용하면 **이미 지워진 시트 대신 그 뒤의
@@ -216,8 +210,8 @@ interface Room {
    */
   originalXlsxBytes: Uint8Array | null;
   /**
-   * xlsx 룸에서만 쓰인다 — 협업 중 삭제된 시트의 "자리 번호"(canonicalGrid.sheets의 인덱스).
-   * canonicalGrid.sheets에서 splice하지 않는 이유는 XlsxExportOptions의 주석 참고(인덱스가 곧
+   * xlsx 룸에서만 쓰인다 — 협업 중 삭제된 시트의 "자리 번호"(lazyGrid.sheetMeta의 인덱스).
+   * lazyGrid.sheetMeta에서 splice하지 않는 이유는 XlsxExportOptions의 주석 참고(인덱스가 곧
    * Yjs 셀 키의 시트 번호라 밀리면 셀 데이터 전체가 다른 시트를 가리킨다).
    */
   readonly removedSheetIndices: Set<number>;
@@ -323,9 +317,6 @@ const MAX_CANONICAL_COLS = MAX_COLS;
 /** 한 워크북이 가질 수 있는 시트 자리 수 상한 — 위와 같은 이유(구조 맵 키도 클라이언트 입력이다). */
 const MAX_CANONICAL_SHEETS = 512;
 
-type MutableGridSheet = { -readonly [K in keyof GridSheet]: GridSheet[K] };
-type MutableGridRow = Array<GridCell | 0>;
-
 /** row/col 둘 다 신뢰할 수 있는 좌표 범위 안에 있는지 — 셀·서식 관찰자가 각자 시트를 넓히기
  * 전에 반드시 거치는 보안 경계다(위 MAX_CANONICAL_ROWS/COLS 주석 참고, 옛 ensureCanonicalCellSlot의
  * 바로 그 검사). */
@@ -418,33 +409,6 @@ async function applyCellsChangeToCanonical(
       c.col,
       value === '' ? 0 : { v: value, ...(keptStyle !== undefined ? { s: keptStyle } : {}) },
     );
-  }
-}
-
-/**
- * canonical 시트의 행 배열을 targetRowCount까지 늘린다 — YIELD_EVERY_N_ROWS행마다 실제로 이벤트
- * 루프에 양보한다. 상한(30만 행)까지 갈 수 있는 유일한 대형 할당이라, 이 코드베이스의 다른 모든
- * 대형 루프와 똑같은 청크+양보 구조를 쓴다(spreadsheet.ts yieldToEventLoop 주석 참고).
- */
-async function growCanonicalRows(sheet: MutableGridSheet, targetRowCount: number): Promise<void> {
-  const rows = sheet.rows as MutableGridRow[];
-  while (rows.length < targetRowCount) {
-    const end = Math.min(rows.length + YIELD_EVERY_N_ROWS, targetRowCount);
-    while (rows.length < end) rows.push(new Array<GridCell | 0>(sheet.colCount).fill(0));
-    await yieldToEventLoop();
-  }
-}
-
-/** 위와 같은 이유로 청크+양보로 도는 열 방향 패딩(기존 행들을 targetColCount까지 넓힌다). */
-async function widenCanonicalRows(sheet: MutableGridSheet, targetColCount: number): Promise<void> {
-  const rows = sheet.rows as MutableGridRow[];
-  for (let start = 0; start < rows.length; start += YIELD_EVERY_N_ROWS) {
-    const end = Math.min(start + YIELD_EVERY_N_ROWS, rows.length);
-    for (let r = start; r < end; r += 1) {
-      const row = rows[r];
-      while (row.length < targetColCount) row.push(0);
-    }
-    await yieldToEventLoop();
   }
 }
 
@@ -962,49 +926,6 @@ async function refreshSeededPagesAfterShift(
  * isAutosaveExemptOrigin에 들어 있지 않으므로, 위 쓰기들이 그대로 ydoc 'update'를 타고
  * scheduleAutosave를 건다.
  */
-/**
- * room.dirtyCells의 좌표를 행/열 삽입·삭제에 맞춰 그대로 옮긴다 — gridShift.ts가 canonical
- * 그리드의 실제 배열에 하는 것과 똑같은 좌표 변환을, "이 칸이 편집된 적 있다"는 표시에도 적용하는
- * 것뿐이다. 다른 시트의 키, 그리고 파싱할 수 없는 키는 그대로 둔다.
- *
- * 삭제 범위 [at, at+count) 안의 좌표는 그 칸 자체가 사라졌으므로 표시도 함께 버린다. dirtyCells는
- * 실제로 편집된 칸의 개수에 비례하므로(시트 전체 크기와 무관), 이 함수는 시트가 아무리 커도
- * 편집된 칸 수만큼만 훑는다 — 30만 행짜리 시트에서 행 하나를 삽입해도 dirtyCells가 비어 있으면
- * 할 일이 없다.
- */
-function shiftDirtyCellKeys(
-  dirtyCells: Set<string>,
-  sheetIdx: number,
-  axis: 'row' | 'col',
-  at: number,
-  count: number,
-  insert: boolean,
-): void {
-  if (dirtyCells.size === 0) return;
-  const shifted: string[] = [];
-  for (const key of dirtyCells) {
-    const parsed = parseGridCellKey(key);
-    if (!parsed || parsed.sheetIdx !== sheetIdx) continue;
-    let { row, col } = parsed;
-    const coord = axis === 'row' ? row : col;
-    dirtyCells.delete(key);
-    if (insert) {
-      if (coord >= at) {
-        if (axis === 'row') row += count;
-        else col += count;
-      }
-    } else {
-      if (coord >= at && coord < at + count) continue; // 삭제된 칸 — 표시도 함께 버린다
-      if (coord >= at + count) {
-        if (axis === 'row') row -= count;
-        else col -= count;
-      }
-    }
-    shifted.push(gridCellKey(sheetIdx, row, col));
-  }
-  for (const key of shifted) dirtyCells.add(key);
-}
-
 async function applyGridStructureOp(room: Room, op: GridStructureOp): Promise<void> {
   if (rooms.get(room.docId) !== room) return; // 룸이 이미 닫혔다(체인에 줄 서 있는 동안)
   const store = room.lazyGrid;
@@ -1435,7 +1356,6 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     suppressAutosaveReschedule: false,
     lazyGrid: null,
     baselineSheetExtents: null,
-    dirtyCells: new Set<string>(),
     structuralOps: [],
     originalXlsxBytes: null,
     removedSheetIndices: new Set<number>(),
@@ -1459,13 +1379,13 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     //
     // 창을 채우고 비우는 것(GRID_WINDOW_SEED_ORIGIN)도 자동저장을 예약하지 않는다: 그건 사용자
     // 편집이 아니라 "누가 어디를 보고 있는지"에 따른 캐시 조작일 뿐이고, 저장의 유일한 기준인
-    // canonicalGrid는 그로 인해 한 글자도 바뀌지 않는다. 예약을 걸면 아무도 편집하지 않은 문서를
+    // lazyGrid는 그로 인해 한 글자도 바뀌지 않는다. 예약을 걸면 아무도 편집하지 않은 문서를
     // 스크롤만 해도 8초마다 파일 전체를 다시 내보내고 뷰어 캐시를 재생성한다(편집 없는 무한
     // 재저장 루프와 같은 클래스의 낭비). 이 억제는 플래그가 아니라 트랜잭션 origin으로 판별하므로
     // 시딩 도중(청크 사이 양보 틈)에 도착한 진짜 편집의 자동저장 예약을 놓치는 일은 없다.
     //
     // 수식 계산값 쓰기(GRID_COMPUTED_WRITE_ORIGIN)도 같은 이유로 자동저장을 예약하지 않는다:
-    // exportXlsxFromGrid는 canonicalGrid/dirtyCells/structuralOps만 읽고 computed 맵은 아예 보지 않으므로
+    // exportXlsxFromGrid는 lazyGrid/structuralOps만 읽고 computed 맵은 아예 보지 않으므로
     // 그 맵에 무엇이 쓰여도 저장될 바이트는 달라지지 않는다. 표식이 없으면 새 페이지를 스크롤로
     // 열기만 해도(구독 → 그 페이지 재계산 → computed 쓰기) 자동저장이 걸려, 아무도 편집하지 않은
     // 문서를 읽는 동안 전체 export + 재파싱이 반복된다. 진짜 편집은 GRID_CELLS_MAP 쓰기로
@@ -1515,7 +1435,7 @@ function closeConn(room: Room, conn: WebSocket): void {
       }
       // 룸이 닫히면 남은 지연 제거 예약은 전부 취소한다 — 이제 Yjs를 비울 이유가 없고(문서
       // 전체가 메모리에서 사라진다), 살아 있는 타이머는 10초 뒤 이미 destroy된 Y.Doc을
-      // 건드리려 하며 그동안 Room과 canonicalGrid(대형 시트 전체)를 GC에서 붙잡아 둔다.
+      // 건드리려 하며 그동안 Room과 lazyGrid를 GC에서 붙잡아 둔다.
       cancelPendingUnseeds(room.docId);
       rooms.delete(room.docId);
       largeRoomDocIds.delete(room.docId);
@@ -1542,7 +1462,7 @@ function closeConn(room: Room, conn: WebSocket): void {
  * 있으면 모든 연결을 강제로 끊어 즉시 정리한다.
  *
  * **왜 필요했는가**: 이 호출이 없으면 삭제 API가 디스크의 원본·파생 파일만 지우고, 이미 열려
- * 있던 협업 Room(canonicalGrid 등 대용량 메모리를 그대로 붙잡고 있음)은 마지막 참여자가 스스로
+ * 있던 협업 Room(lazyGrid 등 대용량 메모리를 그대로 붙잡고 있음)은 마지막 참여자가 스스로
  * 나갈 때까지 계속 살아 있었다 — 대용량 xlsx 룸이라면 삭제 후에도 한동안(또는 브라우저 탭을 안
  * 닫으면 무기한) 메모리를 계속 점유하고, `checkRoomCapacity`의 상한 슬롯도 계속 차지한다.
  *
@@ -1830,7 +1750,7 @@ function cancelPendingUnseed(docId: string, sheet: number, page: number): void {
 /**
  * 그 문서에 예약된 지연 제거를 전부 취소한다 — 마지막 참여자가 나가 룸을 닫을 때 반드시 불러야
  * 한다. 남겨두면 (1) 10초 뒤 이미 destroy된 Y.Doc에 쓰기를 시도하고, (2) 그동안 살아 있는
- * 타이머가 Room과 canonicalGrid(대형 시트 전체) 전체를 GC 대상에서 붙잡아 둔다.
+ * 타이머가 Room과 lazyGrid 전체를 GC 대상에서 붙잡아 둔다.
  */
 function cancelPendingUnseeds(docId: string): void {
   const perDoc = pendingPageUnseeds.get(docId);
@@ -1937,8 +1857,9 @@ export function getSubscribedPageUnionForTest(docId: string, sheet: number): Set
  *
  * getSubscribedPageUnionForTest(누가 무엇을 보고 있다고 말했는지)와 다르다: 이쪽은 그 의도가
  * 실제 Yjs 내용에 반영됐는지, 특히 유예 시간 뒤 정말로 비워졌는지를 본다. 유예 제거는
- * canonicalGrid에는 아무 영향이 없어(그쪽은 항상 전체를 담는다) 클라이언트 mirror만으로는
- * "지워짐"을 관찰하기 어렵기 때문에 서버 내부 상태를 직접 확인할 창구가 필요하다.
+ * lazyGrid에는 아무 영향이 없어(편집된 칸은 dirtyOverlay에 남고, 나머지는 언제든 디스크에서 다시
+ * 읽을 수 있다) 클라이언트 mirror만으로는 "지워짐"을 관찰하기 어렵기 때문에 서버 내부 상태를
+ * 직접 확인할 창구가 필요하다.
  *
  * GRID_CELLS_MAP의 키에서 행 번호를 뽑아 페이지 번호로 환산한다 — 값이 있는 셀이 하나도 없는
  * 페이지는(예: 전부 빈 칸인 500행) 채워져 있어도 여기 나타나지 않으므로, 테스트 픽스처는 페이지마다

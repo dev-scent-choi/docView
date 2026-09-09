@@ -1544,20 +1544,38 @@ git commit -m "refactor(collab): wire a real persistent Room.lazyGrid; migrate a
 **이 태스크를 시작하기 전에 Task 11이 실제로 완료·커밋돼 있는지 먼저 확인**(`git log`로 Task 11의
 커밋 존재 확인) — Task 11 없이 이 태스크만 진행하면 아직 쓰이고 있는 코드를 지우게 된다.
 
-- [ ] **Step 1**: 위 각 후보에 대해 `grep -rn`으로 실제 호출부가 남아있지 않은지 확인 후 삭제.
+**계획 대비 실제로 다른 점**: `Room.baselineSheetExtents`는 삭제 후보가 아니었다 — Task 11에서
+실제로 확인한 대로, export의 축소-감지가 "룸이 열렸을 때 원래 크기"라는 고정 기준선을 필요로 해서
+`lazyGrid.sheetMeta`(계속 바뀌는 현재값)로 대체할 수 없다. `Room.dirtyCells`/`shiftDirtyCellKeys`
+(옛 `Set<string>` 전용 버전)만 실제로 죽어 있었다.
+
+- [x] **Step 1**: 위 각 후보에 대해 `grep -rn`으로 실제 호출부가 남아있지 않은지 확인 후 삭제.
   하나씩 지우고 그때마다 타입체크를 돌려, 어딘가 여전히 참조하고 있었다면(즉 Task 11이 그
   참조를 놓쳤다면) 이 태스크에서 바로 잡을지 Task 11로 돌아가 고칠지 판단한다(단순 참조 누락이면
   이 자리에서 마저 고치는 게 낫다).
 
+  삭제한 것: `gridShift.ts`의 `insertCanonicalRows`/`deleteCanonicalRows`/`insertCanonicalCols`/
+  `deleteCanonicalCols`(`shiftMerges`는 유지), `room.ts`의 `growCanonicalRows`/`widenCanonicalRows`
+  와 그 전용 타입(`MutableGridSheet`/`MutableGridRow`), `Room.dirtyCells` 필드(선언+초기화),
+  `shiftDirtyCellKeys`. `tests/roomRowColShift.test.ts`의 "gridShift.ts: pure canonical shift
+  primitives" 블록도 죽은 함수 4개를 직접 단위 테스트하던 5개 테스트(삽입/삭제 행·열 + 양보 증명)를
+  함께 지우고 `shiftMerges` 테스트만 남겼다(그 함수는 여전히 살아 있다). 관련 주석의 `canonicalGrid`
+  현재형 서술도 `lazyGrid` 기준으로 바로잡았다.
+
 Run: `npx tsc --noEmit` (삭제할 때마다)
 Expected: 클린 — 에러가 나면 그 참조부를 실제 대체 함수로 먼저 고친 뒤 다시 삭제 시도
 
-- [ ] **Step 2: 전체 테스트**
+결과: 클린.
+
+- [x] **Step 2: 전체 테스트**
 
 Run: `npx vitest run`
 Expected: 전부 PASS, 특히 `tests/roomStructureSync.test.ts`/`tests/roomRowColShift.test.ts`(34개)
 
-- [ ] **커밋**
+결과: 41 files / 296 tests 전부 PASS(죽은 코드 전용 단위 테스트 5개를 지웠으므로 Task 11 직후의
+301개에서 5개 줄었다 — 구조연산 회귀 34개는 그대로 유지).
+
+- [x] **커밋**
 
 ```bash
 git add -A

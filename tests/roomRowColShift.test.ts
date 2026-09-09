@@ -147,20 +147,6 @@ function countInColumn(sheet: ExcelJS.Worksheet, col: number, marker: string): n
   return found;
 }
 
-function startTicker(): { count: () => number; stop: () => void } {
-  let ticks = 0;
-  let running = true;
-  function schedule(): void {
-    setImmediate(() => {
-      if (!running) return;
-      ticks += 1;
-      schedule();
-    });
-  }
-  schedule();
-  return { count: () => ticks, stop: () => { running = false; } };
-}
-
 describe('room.ts: server-side row/column insert and delete (canonical shift)', () => {
   let tmpDir: string;
 
@@ -532,61 +518,6 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
 
 // --------------------------------------------------------------------- 순수 연산 단위 테스트
 describe('gridShift.ts: pure canonical shift primitives', () => {
-  function makeSheet(rowCount: number, colCount: number) {
-    const rows: Array<Array<{ v: string } | 0>> = [];
-    for (let r = 0; r < rowCount; r += 1) {
-      const row: Array<{ v: string } | 0> = [];
-      for (let c = 0; c < colCount; c += 1) row.push({ v: `${r}:${c}` });
-      rows.push(row);
-    }
-    return { name: 'S', rowCount, colCount, colWidths: new Array<number>(colCount).fill(64), merges: [], freezeRows: 0, freezeCols: 0, rows };
-  }
-
-  test('inserting rows uses the sheet\'s real height, with no hardcoded 1000 bound', async () => {
-    const { insertCanonicalRows } = await import('../src/xlsx/gridShift.js');
-    const sheet = makeSheet(2500, 2);
-    insertCanonicalRows(sheet as never, 5, 1);
-    expect(sheet.rowCount).toBe(2501);
-    expect(sheet.rows[5]).toEqual([0, 0]); // 새 빈 행
-    expect(sheet.rows[6]).toEqual([{ v: '5:0' }, { v: '5:1' }]);
-    // 옛 하드코딩 상한(1000)의 양쪽 — 모두 정확히 한 칸씩 밀렸어야 한다.
-    expect(sheet.rows[1000]).toEqual([{ v: '999:0' }, { v: '999:1' }]);
-    expect(sheet.rows[1001]).toEqual([{ v: '1000:0' }, { v: '1000:1' }]);
-    expect(sheet.rows[2400]).toEqual([{ v: '2399:0' }, { v: '2399:1' }]);
-    expect(sheet.rows[2500]).toEqual([{ v: '2499:0' }, { v: '2499:1' }]); // 마지막 행도 살아 있다
-    expect(sheet.rows.length).toBe(2501);
-  });
-
-  test('deleting rows removes exactly the requested range', async () => {
-    const { deleteCanonicalRows } = await import('../src/xlsx/gridShift.js');
-    const sheet = makeSheet(2500, 2);
-    deleteCanonicalRows(sheet as never, 998, 3);
-    expect(sheet.rowCount).toBe(2497);
-    expect(sheet.rows[997]).toEqual([{ v: '997:0' }, { v: '997:1' }]);
-    expect(sheet.rows[998]).toEqual([{ v: '1001:0' }, { v: '1001:1' }]);
-    expect(sheet.rows.length).toBe(2497);
-  });
-
-  test('inserting a column shifts every row and inherits the displaced column width', async () => {
-    const { insertCanonicalCols } = await import('../src/xlsx/gridShift.js');
-    const sheet = makeSheet(50, 3);
-    sheet.colWidths[1] = 200;
-    await insertCanonicalCols(sheet as never, 1, 1);
-    expect(sheet.colCount).toBe(4);
-    expect(sheet.rows[0]).toEqual([{ v: '0:0' }, 0, { v: '0:1' }, { v: '0:2' }]);
-    expect(sheet.rows[49]).toEqual([{ v: '49:0' }, 0, { v: '49:1' }, { v: '49:2' }]);
-    expect(sheet.colWidths).toEqual([64, 200, 200, 64]);
-  });
-
-  test('deleting a column removes it from every row', async () => {
-    const { deleteCanonicalCols } = await import('../src/xlsx/gridShift.js');
-    const sheet = makeSheet(50, 3);
-    await deleteCanonicalCols(sheet as never, 1, 1);
-    expect(sheet.colCount).toBe(2);
-    expect(sheet.rows[0]).toEqual([{ v: '0:0' }, { v: '0:2' }]);
-    expect(sheet.rows[49]).toEqual([{ v: '49:0' }, { v: '49:2' }]);
-  });
-
   test('merge ranges shift, grow, shrink and vanish as the data moves', async () => {
     const { shiftMerges } = await import('../src/xlsx/gridShift.js');
     // 삽입 지점(0-based 4) 아래의 병합은 통째로 밀린다.
@@ -622,40 +553,4 @@ describe('gridShift.ts: pure canonical shift primitives', () => {
     ]);
   });
 
-  // ----------------------------------------------------------------- 양보 증거(열 방향)
-  /**
-   * 열 삽입은 **행 수만큼의 개별 배열 조작**이라 진짜로 O(rowCount)다(실측: 30만 행 × 120열
-   * 시트에서 약 197ms의 통째 정지). 그래서 이 경로만 청크+양보로 돈다 — 그 양보가 실제로
-   * 일어나는지 직접 증명한다.
-   *
-   * **측정 방법**(xlsxExportYielding/roomCanonicalGrowthYielding와 같은 방식): 절대 틱 수 같은
-   * 불안정한 임계값을 쓰지 않는다. 각 행의 splice가 불린 시점의 "지금까지 이벤트 루프가 몇 번
-   * 돌았는지"를 기록해, 양보가 전혀 없으면 **모든 기록이 같은 값**이 된다는 사실을 본다.
-   */
-  test('the column-insert path actually yields to the event loop between chunks', async () => {
-    const { insertCanonicalCols } = await import('../src/xlsx/gridShift.js');
-    const { YIELD_EVERY_N_ROWS } = await import('../src/spreadsheet.js');
-    const rowCount = YIELD_EVERY_N_ROWS * 3; // 청크가 여러 개 나오도록
-    const ticker = startTicker();
-    const observed: number[] = [];
-    const rows = Array.from({ length: rowCount }, () => {
-      const row = [{ v: 'a' }, { v: 'b' }] as unknown as Array<unknown> & { splice: unknown };
-      row.splice = function (this: unknown[], ...args: unknown[]) {
-        observed.push(ticker.count());
-        return (Array.prototype.splice as (...a: unknown[]) => unknown[]).apply(this, args);
-      };
-      return row;
-    });
-    const sheet = { name: 'S', rowCount, colCount: 2, colWidths: [64, 64], merges: [], freezeRows: 0, freezeCols: 0, rows };
-
-    await insertCanonicalCols(sheet as never, 1, 1);
-    ticker.stop();
-
-    expect(observed.length).toBe(rowCount); // 모든 행을 실제로 건드렸다
-    // 양보가 없으면 전부 같은 틱이다 — 서로 다른 틱이 나온다는 것이 곧 양보의 증거.
-    expect(new Set(observed).size).toBeGreaterThan(1);
-    // 그리고 데이터는 정확히 밀렸다(계측용 splice를 자체 속성으로 붙여 뒀으므로 배열 내용만 비교).
-    expect([...rows[0]]).toEqual([{ v: 'a' }, 0, { v: 'b' }]);
-    expect([...rows[rowCount - 1]]).toEqual([{ v: 'a' }, 0, { v: 'b' }]);
-  }, 120_000);
 });
