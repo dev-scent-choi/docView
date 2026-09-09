@@ -9,6 +9,8 @@ import * as encoding from 'lib0/encoding';
 import * as Y from 'yjs';
 import { messageYjsSyncStep2, messageYjsUpdate, readUpdate, writeUpdate } from 'y-protocols/sync';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { computeGridCellDisplayAsync } from '../src/xlsx/formulas.js';
+import { ingestXlsxLazily, setDirtyCell } from '../src/xlsx/lazyGridStore.js';
 
 const MESSAGE_SYNC = 0;
 const MESSAGE_PAGE_SUBSCRIBE = 2;
@@ -280,4 +282,40 @@ describe('room.ts: formula cells recompute into GRID_COMPUTED_MAP', () => {
     },
     20_000,
   );
+});
+
+describe('xlsx/formulas.ts: computeGridCellDisplayAsync (LazyGridStore, cache-miss retry)', () => {
+  test('a formula referencing a row far outside any cached page is still evaluated correctly (forces at least one cache-miss retry)', async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Sheet1');
+    sheet.getCell('A1').value = { formula: 'A1000' }; // 1000번째 행을 참조
+    sheet.getCell('A1000').value = 42;
+    const bytes = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    // A1의 원본 텍스트는 파싱 시 '=A1000'으로 저장돼 있어야 함(이미 검증된 기존 규칙) — 캐시는
+    // 비어 있는 상태로 시작(강제로 미스가 나게 함).
+    expect(store.readCache.size).toBe(0);
+
+    const result = await computeGridCellDisplayAsync(store, 0, 0, 0);
+    expect(result).toBe(42);
+
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('IF() with a value-dependent branch resolves only the branch actually taken, without prefetching the other branch', async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Sheet1');
+    sheet.getCell('A1').value = 1; // 조건이 참이 되게
+    sheet.getCell('B1').value = { formula: 'IF(A1>0, C1, D1)' };
+    sheet.getCell('C1').value = 'yes';
+    sheet.getCell('D1').value = 'no';
+    const bytes = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    const result = await computeGridCellDisplayAsync(store, 0, 0, 1); // B1
+    expect(result).toBe('yes');
+
+    await fs.rm(store.rowStorePath, { force: true });
+  });
 });
