@@ -173,6 +173,59 @@ function extractFrozenSplitFromSheetXml(xml: string): { xSplit: number; ySplit: 
   return { xSplit, ySplit };
 }
 
+interface RawColSpec {
+  min: number;
+  max: number;
+  width: number | undefined;
+}
+
+/**
+ * 스트리밍 WorksheetReader의 `.columns` 게터는 이 프로젝트에서 고정한 exceljs@4.4.0에서 항상 빈
+ * 배열을 반환한다 — worksheet-reader.js가 `this._columns = Column.fromModel(cols)`를 인자 1개로
+ * 호출하는데(267행), `Column.fromModel(worksheet, cols)`(doc/column.js:295)는 인자 2개를 기대해서
+ * 실제 `cols` 배열이 `worksheet` 자리로 밀려 들어가고 진짜 `cols`는 사라진다(`cols = cols || []`가
+ * `undefined || []`로 항상 `[]`가 됨). 그래서 컬럼 너비는 `worksheetReader.columns`를 믿지 않고,
+ * merges/freeze pane과 같은 방식으로 원본 시트 XML의 `<col min max width>`를 직접 파싱해서 얻는다.
+ */
+function extractColSpecsFromSheetXml(xml: string): RawColSpec[] {
+  const specs: RawColSpec[] = [];
+  for (const m of xml.matchAll(/<col\s+([^>]*?)\/?>/g)) {
+    const attrs = m[1];
+    const min = Number(attrs.match(/\bmin="([^"]*)"/)?.[1] ?? '0');
+    const max = Number(attrs.match(/\bmax="([^"]*)"/)?.[1] ?? '0');
+    if (!(min > 0) || !(max > 0)) continue;
+    const widthStr = attrs.match(/\bwidth="([^"]*)"/)?.[1];
+    specs.push({ min, max, width: widthStr === undefined ? undefined : Number(widthStr) });
+  }
+  return specs;
+}
+
+/**
+ * exceljs의 `Column.fromModel(worksheet, cols)`(doc/column.js:295-312)와 동일한 순서로 min 기준
+ * 정렬된 col 스펙을 순회하며 컬럼별 너비를 배정한다 — 겹치지 않는 정상 XML에서는 결과가 같고,
+ * 다만 `count`가 `colCount`를 넘어서면 더 볼 필요가 없으니 그 지점에서 순회를 멈춘다(원본은
+ * col.max까지, 예: 16384까지 무조건 순회함).
+ */
+function computeColWidthsPx(colSpecs: readonly RawColSpec[], colCount: number): number[] {
+  const sorted = [...colSpecs].sort((a, b) => a.min - b.min);
+  const widthAt: Array<number | undefined> = new Array(colCount + 1).fill(undefined); // 1-based
+  let count = 1;
+  for (const spec of sorted) {
+    if (count > colCount) break;
+    while (count < spec.min && count <= colCount) count += 1;
+    while (count <= spec.max && count <= colCount) {
+      widthAt[count] = spec.width;
+      count += 1;
+    }
+  }
+  const colWidths: number[] = [];
+  for (let c = 1; c <= colCount; c += 1) {
+    const width = widthAt[c];
+    colWidths.push(width ? Math.round(width * 7.2) : 100);
+  }
+  return colWidths;
+}
+
 export async function ingestXlsxLazily(docId: string, xlsxBytes: Buffer): Promise<LazyGridStore> {
   const themeColors = await extractThemeColorsFromZip(xlsxBytes);
   const zip = await JSZip.loadAsync(xlsxBytes);
@@ -209,7 +262,6 @@ export async function ingestXlsxLazily(docId: string, xlsxBytes: Buffer): Promis
       const rawWorksheetReader = worksheetReader as unknown as {
         name: string;
         id?: number;
-        columns?: ReadonlyArray<{ width?: number } | undefined> | null;
         dataValidations?: { find(address: string): unknown };
       };
 
@@ -292,11 +344,8 @@ export async function ingestXlsxLazily(docId: string, xlsxBytes: Buffer): Promis
       const merges = rawMerges.filter((m) => m.r <= rowCount && m.c <= colCount);
       const frozen = sheetXml ? extractFrozenSplitFromSheetXml(sheetXml) : undefined;
 
-      const colWidths: number[] = [];
-      for (let c = 1; c <= colCount; c += 1) {
-        const width = rawWorksheetReader.columns?.[c - 1]?.width;
-        colWidths.push(width ? Math.round(width * 7.2) : 100);
-      }
+      const colSpecs = sheetXml ? extractColSpecsFromSheetXml(sheetXml) : [];
+      const colWidths = computeColWidthsPx(colSpecs, colCount);
 
       sheetMeta.push({
         name: rawWorksheetReader.name,
@@ -318,7 +367,7 @@ export async function ingestXlsxLazily(docId: string, xlsxBytes: Buffer): Promis
     sheetMeta,
     styles: palette.toArray(),
     rowIndex,
-    logicalToOriginalRow: sheetMeta.map((_, i) => identityArray(rowIndex[i]?.length ?? 0)),
+    logicalToOriginalRow: sheetMeta.map((meta) => identityArray(meta.rowCount)),
     logicalToOriginalCol: sheetMeta.map((meta) => identityArray(meta.colCount)),
     dirtyOverlay: new Map(),
     readCache: new Map(),
