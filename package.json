@@ -26,6 +26,7 @@
     "fastify": "^5.2.0",
     "fflate": "^0.8.3",
     "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.2",
     "lib0": "^0.2.99",
     "orderedmap": "^2.1.1",
     "pdf-lib": "^1.17.1",
