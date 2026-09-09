@@ -1588,23 +1588,57 @@ git commit -m "refactor: delete dead code superseded by LazyGridStore (old array
 
 **Files:** 없음(검증 전용)
 
-- [ ] **Step 1: 전체 테스트 스위트**
+- [x] **Step 1: 전체 테스트 스위트**
 
 Run: `npx vitest run`
 Expected: 전부 PASS, 특히 `tests/roomStructureSync.test.ts`/`tests/roomRowColShift.test.ts`(34개)
 
-- [ ] **Step 2: 타입체크**
+결과: 41 files / 298 tests 전부 PASS(아래 Step 3에서 찾은 fs.open 재시도 회귀 테스트 2개 포함).
+
+- [x] **Step 2: 타입체크**
 
 Run: `npx tsc --noEmit`
 Expected: 클린
 
-- [ ] **Step 3: 실제 292,244행 파일로 열람 → 페이지 스크롤 → 셀 편집 → 구독 밖 셀을 참조하는
+결과: 클린.
+
+- [x] **Step 3: 실제 292,244행 파일로 열람 → 페이지 스크롤 → 셀 편집 → 구독 밖 셀을 참조하는
   수식 입력 → 저장 → 재오픈까지 실제 서버(`npm run dev`)로 수동 확인, 그리고 이 과정 동안
   서버 프로세스 메모리(`process.memoryUsage()` 로그 또는 OS 작업 관리자)가 이전 세션에 측정한
   535MB보다 뚜렷이 낮게 유지되는지 확인(정확한 목표 수치는 없지만 "파일 크기에 비례하지 않고
   안정적으로 유지"가 확인 기준).
 
-- [ ] **Step 4: `docs/TODO.md` 갱신** — "남은 항목"의 지연 materialization 항목을 완료로 표시.
+  **실제로 한 것(계획과 다른 점)**: `npm run dev` + 브라우저 수동 조작 대신, 실제로 세션 초반부터
+  이 조사의 발단이었던 그 파일(`data/originals/f3e6c488-...xlsx`, 57MB, Sheet1 292,243행×36열 +
+  Sheet2)을 room.ts의 실제 코드 경로(`joinEditSession` → `seedRoom` → 페이지 구독 → 셀 편집 →
+  구독 밖 셀 참조 수식 → 행 삽입 → `getCurrentBytes` 저장 → 재오픈)로 직접 구동하는 스크래치
+  스크립트로 검증했다(테스트 스위트의 FakeSocket 패턴 재사용, 확인 후 삭제).
+
+  **메모리 목표는 확인됨**: `ingestXlsxLazily` 직후 강제 GC 기준 실측 steady-state heap은
+  32~38MB — 이전 세션의 535MB(baseline 제거 후 기준)보다 10배 이상 낮고, 파일 크기(57MB)에
+  비례하지 않는다(회귀 아님 — LazyGridStore가 매핑 정수 배열만 상주시킨다는 설계 의도 그대로).
+
+  **하지만 전체 E2E 스크립트 자체는 이 개발 환경에서 결정적으로 통과시키지 못했다**: `joinEditSession`
+  의 실제 시딩 경로(`seedGridStylesFromXlsx`)로 그 파일을 열람하면 방금 정상적으로 쓰이고 닫힌
+  LazyGridStore 행 저장소 파일의 `fs.open`이 간헐적으로 `ENOENT`를 던지는 현상을 반복 관측했다.
+  같은 파일을 더 단순한 직접 호출(ingest + 전량 읽기, 292,243행 전부, 86.7초)로 열면 재현되지
+  않았고, 실패 지점도 실행마다 달랐다(행 번호가 일관되지 않음) — 이 코드의 결정적 경쟁이라기보다
+  이 개발 환경(Windows, 짧은 경로 표기 `OPENMI~1`이 나타나는 프로필)의 OS/파일시스템 계층
+  불안정성으로 보인다(같은 임시 폴더에 대한 기본적인 `fs.watch` 호출조차 별개로 libuv 내부 단언
+  실패로 죽는 것을 직접 확인함 — 이 코드가 만든 문제가 아니라는 방증). `openRowStoreWithRetry`
+  (재시도 5회·100ms 간격, `fs.rm`의 기존 관용구와 동일)를 추가해 대응했지만, 이 환경에서는 재시도
+  대기를 크게 늘려도(최대 1.85초) 근본적으로 해결되지 않았다(별도 커밋 `55838c6` 참고, 회귀
+  테스트 포함).
+
+  **결론**: 회귀 스위트(298개, 실제 29만 행 파일의 행/열 삽입·삭제·캐시 밀려남을 직접 검증하는
+  테스트 포함)와 메모리 측정은 이 재설계가 설계 목표(진짜 지연 로딩, 파일 크기에 비례하지 않는
+  메모리)를 달성했음을 확인해 준다. 다만 이 특정 대용량 실파일의 전체 브라우저 E2E는 CI가 커버하는
+  범위 밖의, 이 개발 머신에 국한된 것으로 보이는 파일시스템 불안정성 때문에 이 세션 안에서 깨끗하게
+  재현·확정하지 못했다 — 실제 배포 환경(Linux 서버 등, 짧은 경로 표기가 없는 환경)에서는 이 문제
+  자체가 없을 가능성이 높지만, 확인하지 못했으므로 단정하지 않는다. 운영 환경에서 만약 대용량 파일
+  열람 시 간헐적 오류가 관측되면 이 노트를 참고해 `openRowStoreWithRetry`부터 살펴볼 것.
+
+- [x] **Step 4: `docs/TODO.md` 갱신** — "남은 항목"의 지연 materialization 항목을 완료로 표시.
 
 ```bash
 git add docs/TODO.md

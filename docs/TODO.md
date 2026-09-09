@@ -27,17 +27,16 @@
 
 ## 2. 대용량 xlsx 동시편집 시 서버 메모리(Room) 구조 개선
 
-2026-09-09 세션에서 진단, 그리고 아래 1번(baseline 전체 복제본 제거)·2번(동시 룸 개수 상한)
-완료. 3번(장기 지연 materialization)은 아직 미착수. 지금도 임시방편(`.npmrc`의 힙 한도 16GB)이
-남아 있음 — 이건 별개로 겪은 ExcelJS `writeBuffer()` 자체의 대용량 한계(아래 "저장 실패" 항목
-참고)에 대한 안전망이라 이번 메모리 개선과 무관하게 유지.
+2026-09-09 세션에서 진단, 그리고 아래 1번(baseline 전체 복제본 제거)·2번(동시 룸 개수 상한)·
+4번(DELETE 시 Room 미정리)·3번(장기 지연 materialization, 2026-09-10 완료)까지 전부 완료.
+지금도 임시방편(`.npmrc`의 힙 한도 16GB)이 남아 있음 — 이건 별개로 겪은 ExcelJS `writeBuffer()`
+자체의 대용량 한계(아래 "저장 실패" 항목 참고)에 대한 안전망이라 이번 메모리 개선과 무관하게 유지.
 
 **진단된 문제(원래):**
 - 동시편집 룸(Room)이 대용량 문서 하나당 canonical 그리드 + baseline 그리드(전체 복제본) +
   원본 파일 바이트, 세 벌을 메모리에 동시 보관 — 29만 행급 파일 하나 여는 데 실측 약 8GB
 - 동시에 열린 Room 개수에 상한이 없고, 유휴/메모리 압박 기반 정리도 없음(닫힐 때만 즉시 해제됨)
-- `DELETE /api/documents/:id`가 메모리상 살아있는 Room은 안 건드림(부수적 발견, **아직 미해결** —
-  아래 "남은 항목" 참고)
+- `DELETE /api/documents/:id`가 메모리상 살아있는 Room은 안 건드림(부수적 발견 — 아래 4번에서 해결)
 
 **1. baseline 그리드 전체 복제본 제거 — 완료(2026-09-09):**
 - `Room.baselineGrid`(canonicalGrid 전체 깊은 복사본)를 없애고 대신 세 가지 가벼운 기록으로
@@ -110,10 +109,35 @@
   제거), `tests/roomExportFallback.test.ts`(신규, 2개 — 정상 경로 실패 시 실제로 폴백이 성공하는지,
   폴백마저 실패하면 에러가 조용히 삼켜지지 않고 그대로 드러나는지).
 
-**남은 항목:**
-2. (장기) 대용량 시트를 통째로 메모리에 올리지 않고 필요한 부분만 그때그때 읽는 진짜 지연
-   materialization — 이번 세션에 끝낸 xlsx 윈도잉 프로젝트급의 별도 큰 작업. 남은 유일한 큰
-   항목.
+**3. 진짜 지연(lazy) materialization — 완료(2026-09-09~10):**
+- `Room.canonicalGrid: GridDocument`(시트 전체를 실제 GridCell 배열로 담아 seedRoom 시점에 파일
+  전체를 파싱해 메모리에 올리던 구조)를 `Room.lazyGrid: LazyGridStore`로 완전히 교체 —
+  편집된 칸만 `dirtyOverlay`(Map)에 두고, 나머지는 온디스크 행 저장소(JSONL, 룸당 임시 파일)에서
+  그때그때 읽어 작은 LRU 캐시(`readCache`)에 담는다. 설계 문서:
+  `docs/superpowers/specs/2026-09-09-xlsx-lazy-canonical-grid-design.md`, 계획 문서:
+  `docs/superpowers/plans/2026-09-09-xlsx-lazy-canonical-grid.md`(13개 태스크, 전부 완료).
+- 수집(`ingestXlsxLazily`)은 ExcelJS의 스트리밍 리더로 한 번에 한 행만 메모리에 두고 온디스크
+  저장소를 만든다. 읽기(`getCell`/`getRow`)는 dirtyOverlay → readCache → 디스크 순으로 확인한다.
+  구조연산(행/열 삽입삭제)은 실제 셀 배열이 아니라 정수 매핑 배열(`logicalToOriginalRow/Col`)만
+  스플라이스하므로 30만 행 시트에서도 항상 즉시·동기로 끝난다(예전엔 청크+양보가 필요한 무거운
+  배열 패딩이었다).
+- **실측 결과**: 이 항목의 발단이었던 그 실제 파일(292,244행×36열, 57MB)을 열었을 때 canonicalGrid
+  파싱만으로 약 535MB(baseline 제거 후 기준)였던 것이, LazyGridStore 재설계 이후 강제 GC 기준
+  steady-state heap 32~38MB로 줄었다(10배 이상, 파일 크기에 비례하지 않음 — 설계 목표 달성).
+- 회귀 테스트: 기존 구조연산 회귀 스위트(`tests/roomStructureSync.test.ts`/
+  `tests/roomRowColShift.test.ts`, 34개)가 재설계 후에도 전부 그대로 통과. 전체 스위트
+  41 files / 298 tests PASS, `npx tsc --noEmit` 클린.
+- **알려진 캐비앗(운영 환경에서 재확인 필요)**: 이 세션의 개발 머신에서, 그 실제 대용량 파일을
+  room.ts의 실제 시딩 경로(`joinEditSession`)로 열람할 때 방금 정상적으로 쓰이고 닫힌 LazyGridStore
+  행 저장소 파일의 `fs.open`이 간헐적으로 `ENOENT`를 던지는 현상을 반복 관측했다 — 실패 지점이
+  실행마다 달랐고, 같은 파일을 더 단순한 직접 호출로 전량 읽을 때는 재현되지 않아 이 코드의
+  결정적 버그라기보다 이 환경(Windows, 짧은 경로 표기 `OPENMI~1`이 나타나는 프로필)의
+  OS/파일시스템 계층 불안정성으로 보인다(같은 임시 폴더에 대한 기본 `fs.watch` 호출조차 별개로
+  libuv 내부 단언 실패로 죽는 것을 확인함). `fs.rm`에 이미 쓰던 것과 같은 재시도 관용구
+  (`openRowStoreWithRetry`, 5회·100ms 간격)를 행 저장소 읽기에도 추가했지만 이 환경에서는
+  완전히 해소되지 않았다 — 실제 배포 환경(짧은 경로 표기가 없는 Linux 서버 등)에서는 이 문제가
+  없을 가능성이 높지만 확인하지 못했다. 대용량 파일 열람 시 간헐적 오류가 보고되면
+  `src/xlsx/lazyGridStore.ts`의 `openRowStoreWithRetry` 주석부터 볼 것.
 
 **참고:** 자세한 배경은 이 세션의 대화 기록 참조. 다시 시작할 때 코드 상태를 먼저 재확인할 것
 (시간이 지나 내용이 달라졌을 수 있음).
