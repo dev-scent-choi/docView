@@ -541,6 +541,16 @@ export async function closeLazyGridStore(store: LazyGridStore): Promise<void> {
   });
 }
 
+/** sweepOrphanedLazyGridFiles가 "충분히 오래됐다"고 볼 나이(ms) — 이보다 최근에 수정된 파일은
+ * 건드리지 않는다. 서버 비정상 종료로 남은 파일은 이 서버 프로세스가 시작하기 전부터 있었던
+ * 것이라 항상 이 값보다 훨씬 오래됐다(재시작까지 걸린 시간만큼) — 그러니 안전망 성격은 그대로
+ * 유지된다. 반면 같은 프로세스(또는 같은 테스트 스위트의 다른 워커)가 방금 막 만든, 지금 실제로
+ * 쓰이고 있는 파일은 이 값보다 훨씬 최근이라 스윕 대상에서 제외된다 — 파일마다 매 읽기 호출 사이에
+ * 핸들을 열고 닫으므로(readRowFromDisk) Windows에서도 파일이 항상 잠겨 있지는 않아, 나이 확인 없이
+ * 무조건 지우면 다른 워커가 마침 그 순간 사이에 읽고 있던 파일이 사라지는 경쟁이 실제로 있었다.
+ */
+const ORPHAN_SWEEP_MIN_AGE_MS = 60_000;
+
 /** 서버 비정상 종료로 남은 이 프로젝트의 임시 행 저장소 파일을 정리한다 — 정상 종료라면 이미
  * closeLazyGridStore가 다 지웠을 것이므로, 이건 그 경우를 복구하는 안전망일 뿐이다. */
 export async function sweepOrphanedLazyGridFiles(): Promise<void> {
@@ -551,9 +561,19 @@ export async function sweepOrphanedLazyGridFiles(): Promise<void> {
   } catch {
     return;
   }
+  const now = Date.now();
   await Promise.all(
     entries
       .filter((name) => name.startsWith('docview-lazygrid-'))
-      .map((name) => fs.rm(path.join(dir, name), { force: true }).catch(() => undefined)),
+      .map(async (name) => {
+        const filePath = path.join(dir, name);
+        try {
+          const stat = await fs.stat(filePath);
+          if (now - stat.mtimeMs < ORPHAN_SWEEP_MIN_AGE_MS) return; // 최근 파일 — 지금 쓰이고 있을 수 있다
+          await fs.rm(filePath, { force: true });
+        } catch {
+          /* 이미 없어졌거나 stat/rm이 실패해도 이 안전망은 다음 서버 시작 때 다시 시도된다 */
+        }
+      }),
   );
 }

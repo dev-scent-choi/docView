@@ -235,15 +235,31 @@ describe('xlsx/lazyGridStore.ts: cleanup', () => {
     await expect(fs.access(store.rowStorePath)).rejects.toThrow();
   });
 
-  test('sweepOrphanedLazyGridFiles removes leftover docview-lazygrid-* files in the OS temp dir', async () => {
+  test('sweepOrphanedLazyGridFiles removes leftover docview-lazygrid-* files old enough to be orphans', async () => {
     const os = await import('node:os');
     const path = await import('node:path');
     const orphanPath = path.join(os.tmpdir(), `docview-lazygrid-orphan-${randomUUID()}.jsonl`);
     await fs.writeFile(orphanPath, 'leftover');
+    // 서버 비정상 종료로 남은 파일을 흉내낸다 — 충분히 오래된 mtime으로 되돌려 둔다(실제로는
+    // 이전 서버 프로세스가 죽은 시점부터의 나이다).
+    const old = new Date(Date.now() - 5 * 60_000);
+    await fs.utimes(orphanPath, old, old);
 
     await sweepOrphanedLazyGridFiles();
 
     await expect(fs.access(orphanPath)).rejects.toThrow();
+  });
+
+  test('sweepOrphanedLazyGridFiles does NOT remove a docview-lazygrid-* file created moments ago (still in active use elsewhere)', async () => {
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const freshPath = path.join(os.tmpdir(), `docview-lazygrid-fresh-${randomUUID()}.jsonl`);
+    await fs.writeFile(freshPath, 'still being read by another worker');
+
+    await sweepOrphanedLazyGridFiles();
+
+    await expect(fs.access(freshPath)).resolves.toBeUndefined();
+    await fs.rm(freshPath, { force: true });
   });
 
   test('sweepOrphanedLazyGridFiles does not touch unrelated temp files', async () => {
