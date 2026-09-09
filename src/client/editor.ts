@@ -433,6 +433,15 @@ async function main(): Promise<void> {
       event.status === 'connected' ? '연결됨' : event.status === 'disconnected' ? '연결 끊김 — 재연결 중…' : event.status;
     statusEl.dataset.status = event.status;
   });
+  // 서버가 편집 세션 자체를 거부한 경우(edit.ts의 socket.close(4xxx, 이유)) — 4400대는 재시도해도
+  // 같은 이유로 다시 거부될 뿐인 영구 거부다(잘못된 토큰, 문서 없음 등). 기본 동작(지수 백오프로
+  // 계속 재연결 시도)을 멈추고 서버가 준 이유를 그대로 보여준다 — grid-editor.ts와 동일한 처리.
+  provider.on('connection-close', (event: CloseEvent | null) => {
+    if (event && event.code >= 4400) {
+      provider.shouldConnect = false;
+      showFatalError(event.reason || '서버가 연결을 거부했습니다.');
+    }
+  });
   provider.on('sync', (isSynced: boolean) => {
     if (isSynced) statusEl.dataset.status = 'synced';
   });

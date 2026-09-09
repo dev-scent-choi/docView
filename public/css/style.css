@@ -1843,7 +1843,6 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 /* 그리드/툴바는 그대로 둔 채(g-render-pending이 그리드만 visibility:hidden으로 감춤) 그 위를
    덮는 오버레이라, error-screen과 달리 문서 흐름이 아니라 position:fixed로 화면 중앙에 띄운다. */
 #loading-screen { position: fixed; inset: 0; z-index: 10000; }
-.loading-spinner { animation: save-status-spin 0.9s linear infinite; color: var(--v-accent); }
 .loading-hint { font-size: 0.85rem; color: var(--v-text-dim); }
 #loading-percent { font-variant-numeric: tabular-nums; color: var(--v-text-dim); }
 .loading-gauge {
