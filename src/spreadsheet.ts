@@ -285,7 +285,7 @@ function formatDate(value: Date): string {
     : `${y}-${m}-${d} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
-function displayValue(cell: ExcelJS.Cell): string {
+export function displayValue(cell: ExcelJS.Cell): string {
   const value = cell.value;
   if (value === null || value === undefined) return '';
   if (value instanceof Date) return formatDate(value);
@@ -311,7 +311,7 @@ function displayValue(cell: ExcelJS.Cell): string {
   return String(value);
 }
 
-function parseMergeRange(range: string): GridMerge | null {
+export function parseMergeRange(range: string): GridMerge | null {
   const match = range.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
   if (!match) return null;
   const colNum = (letters: string) =>
@@ -323,7 +323,7 @@ function parseMergeRange(range: string): GridMerge | null {
   return { r: r1, c: c1, rs: r2 - r1 + 1, cs: c2 - c1 + 1 };
 }
 
-class StylePalette {
+export class StylePalette {
   private readonly styles: GridStyle[] = [];
   private readonly index = new Map<string, number>();
 
@@ -364,7 +364,7 @@ function classifyNumFmt(numFmt?: string): { nf?: NumberFormatKind; nd?: number }
   return {};
 }
 
-function extractStyle(
+export function extractStyle(
   cell: ExcelJS.Cell,
   palette: StylePalette,
   themeColors: readonly string[],
