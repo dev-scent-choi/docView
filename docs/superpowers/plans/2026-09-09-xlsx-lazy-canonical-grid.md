@@ -1482,27 +1482,43 @@ Task 11이 원래 계획의 Task 11+12+13+14(진짜 배선 부분)를 모두 흡
 if (room.lazyGrid) void closeLazyGridStore(room.lazyGrid);
 ```
 
-- [ ] **검증 순서(각 단계마다, 특히 3·4·6·8을 마칠 때마다 아래를 돌려 회귀를 조기에 잡을 것)**
+- [x] **검증 순서(각 단계마다, 특히 3·4·6·8을 마칠 때마다 아래를 돌려 회귀를 조기에 잡을 것)**
 
 Run: `npx vitest run tests/roomStructureSync.test.ts tests/roomRowColShift.test.ts`
 Expected: PASS (34개 전부) — 이게 이 태스크의 진짜 완료 기준이다. 이전 두 번의 시도가 정확히
 이 스위트에서 12/34 실패로 문제를 발견했으니, 여기서 전부 통과해야만 어댑터 문제가 실제로
 해결된 것이다.
 
-- [ ] **전체 회귀**
+결과: 34/34 PASS. 통과 과정에서 실제 버그 둘을 발견해 함께 고쳤다 — (1) `applyStructureChangeToCanonical`
+호출을 `enqueueCanonicalGrowth`로 감쌌더니 시트 이름변경·추가·삭제·순서변경 4개 테스트가 깨져
+직접 호출로 되돌림(주석도 실제 동작에 맞게 수정), (2) `tests/roomRowColShift.test.ts`의 "malformed
+or out-of-bounds" 테스트가 `parseXlsxToGrid`(actualRowCount, "값 있는 행 개수")와
+`ingestXlsxLazily`(진짜 최대 행 번호)의 rowCount 계산 차이 때문에 우연히 통과하던 낡은 경계값을
+쓰고 있어 실제 크기(1501)에 맞게 교정.
+
+- [x] **전체 회귀**
 
 Run: `npx tsc --noEmit && npx vitest run`
 Expected: 클린, 전부 PASS(특히 위에 나열한 6개 테스트 파일)
 
+결과: `npx tsc --noEmit` 클린. `npx vitest run` 41 files / 301 tests 전부 PASS. (테스트 파일
+목록이 처음 계획과 달라진 이유: `tests/roomExportFallback.test.ts`는 이미 LazyGridStore
+시그니처로 작성돼 있었고, 이번에 함께 손볼 필요가 있었던 건 `tests/roomCanonicalGrid.test.ts`·
+`tests/roomCanonicalGrowthYielding.test.ts`·`tests/xlsx-collab.test.ts`·
+`tests/xlsxExportStreaming.test.ts`·`tests/xlsxExportYielding.test.ts`였다 — 전부 옮김.)
+
 - [ ] **실제 대용량 파일로 재검증** — 이전 세션에서 스트리밍 저장 폴백을 검증했던 것과 같은 방식
   (임시 scratch 스크립트, 확인 후 삭제)으로 292,244행 파일을 열람 → 페이지 스크롤 → 셀 편집 →
   행 삽입 → 저장 → 재오픈까지 end-to-end 확인한다. 이 파일 자체가 이번 세션 전체 조사의 발단이었던
-  실제 사용자 파일이다.
+  실제 사용자 파일이다. **Task 13(최종 회귀 검증 + 실제 대용량 파일 end-to-end)으로 이월** — Task 13이
+  같은 검증을 다시 요구하므로 중복 작업을 피하기 위해 거기서 함께 한다.
 
-- [ ] **커밋** — 이 태스크는 하나의 큰 커밋이어도 되고(여러 파일이 동시에 일관돼야 서로 안
+- [x] **커밋** — 이 태스크는 하나의 큰 커밋이어도 되고(여러 파일이 동시에 일관돼야 서로 안
   깨지므로), 만약 3~10을 각각 독립적으로 커밋할 수 있는 지점이 실제로 있다면(예: 3·4를 끝내고
   구조연산은 아직 어댑터를 쓰는 중간 상태가 실제로 테스트를 통과한다면) 더 잘게 나눠도 좋다 —
   단, **중간 커밋이 기존 34개 구조연산 테스트를 깨는 상태로 남아서는 절대 안 된다.**
+
+커밋: `8d5c9a5`.
 
 ```bash
 git add -A
