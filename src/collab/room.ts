@@ -63,6 +63,7 @@ import {
   insertCanonicalCols,
   insertCanonicalRows,
 } from '../xlsx/gridShift.js';
+import type { LazyGridStore } from '../xlsx/lazyGridStore.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { computeGridCellDisplay, formatComputedValueForStorage } from '../xlsx/formulas.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
@@ -234,6 +235,68 @@ interface Room {
 }
 
 const rooms = new Map<string, Room>();
+
+/**
+ * Task 8 임시 어댑터 — `seedGridPageFromXlsx`/`seedGridStylesFromXlsx`(xlsx/collab.ts)는 이제
+ * `LazyGridStore`를 읽는 시그니처지만, room.ts는 아직 `room.canonicalGrid: GridDocument`(항상
+ * 완전히 메모리에 상주하는 실제 데이터)를 그대로 쓰고 있다 — 진짜 지연 ingestion(`LazyGridStore`,
+ * Task 3-7)을 room.ts에 연결하는 것은 Task 14 몫이다. 그때까지 호출부는 이 함수로 canonicalGrid를
+ * 감싸 넘긴다.
+ *
+ * 이 어댑터는 디스크를 절대 건드리지 않는다: readCache를 `GridDocumentBackedRowCache`로 만들어
+ * `getRow`가 항상 "캐시 히트"로 보게 하고(canonicalGrid.sheets[..].rows에서 즉시 값을 꺼내
+ * 돌려준다), rowIndex는 시트마다 빈 배열로 둔다 — 그래서 이 캐시가 우연히라도 미스를 내는
+ * 극단적인 경우에도(예: rowCount 밖의 좌표) lazyGridStore.ts의 readRowFromDisk는 rowIndex에서
+ * 아무 항목도 못 찾아 빈 행([])만 돌려줄 뿐, 존재하지 않는 rowStorePath를 열려고 시도하지 않는다
+ * (readRowFromDisk의 `if (!entry) return [];` 가드).
+ *
+ * logicalToOriginalRow/Col은 항등 매핑이다 — canonicalGrid 자체가 이미 (gridShift.ts를 통해)
+ * 구조연산 결과를 반영한 "현재" 배열이라, 논리 좌표와 원본 좌표가 애초에 같다. dirtyOverlay는
+ * 항상 비어 있다 — canonicalGrid.rows가 이미 편집된 최신 값을 직접 담고 있으므로(room.ts의
+ * applyCellsChangeToCanonical이 그 자리에서 바로 반영한다), 별도 오버레이로 덮어쓸 것이 없다.
+ */
+class GridDocumentBackedRowCache extends Map<string, ReadonlyArray<GridCell | 0>> {
+  constructor(private readonly grid: GridDocument) {
+    super();
+  }
+
+  override get(key: string): ReadonlyArray<GridCell | 0> | undefined {
+    const cached = super.get(key);
+    if (cached) return cached;
+    const sep = key.indexOf(':');
+    if (sep < 0) return undefined;
+    const sheetIdx = Number(key.slice(0, sep));
+    const originalRow = Number(key.slice(sep + 1));
+    return this.grid.sheets[sheetIdx]?.rows[originalRow];
+  }
+}
+
+function identityIndexArray(length: number): number[] {
+  return Array.from({ length }, (_, i) => i);
+}
+
+function lazyGridStoreAdapterForCanonicalGrid(grid: GridDocument): LazyGridStore {
+  return {
+    docId: 'canonical-grid-adapter',
+    rowStorePath: '',
+    sheetMeta: grid.sheets.map((sheet) => ({
+      name: sheet.name,
+      rowCount: sheet.rowCount,
+      colCount: sheet.colCount,
+      colWidths: sheet.colWidths,
+      merges: sheet.merges,
+      freezeRows: sheet.freezeRows,
+      freezeCols: sheet.freezeCols,
+    })),
+    styles: [...grid.styles],
+    rowIndex: grid.sheets.map(() => []),
+    logicalToOriginalRow: grid.sheets.map((sheet) => identityIndexArray(sheet.rowCount)),
+    logicalToOriginalCol: grid.sheets.map((sheet) => identityIndexArray(sheet.colCount)),
+    dirtyOverlay: new Map(),
+    readCache: new GridDocumentBackedRowCache(grid),
+    readCacheLimit: Number.MAX_SAFE_INTEGER,
+  };
+}
 
 /**
  * 대용량으로 취급하는 xlsx 원본 파일 크기 기준(바이트) — 이 이상이면 동시에 열 수 있는 룸 개수에
@@ -847,7 +910,7 @@ async function refreshSeededPagesAfterShift(
       cancelPendingUnseed(room.docId, sheetIdx, page);
       continue;
     }
-    await seedGridPageFromXlsx(room.ydoc, grid, sheetIdx, page);
+    await seedGridPageFromXlsx(room.ydoc, lazyGridStoreAdapterForCanonicalGrid(grid), sheetIdx, page);
     await recomputeFormulasForPage(room, sheetIdx, page);
     if (rooms.get(room.docId) !== room) return;
   }
@@ -1029,7 +1092,7 @@ async function seedRoom(room: Room): Promise<void> {
       // canonical로 되반영하는 경로가 없기 때문에 페이지가 비워졌다 다시 채워지는 순간 사용자가
       // 적용해 둔 굵게·색·표시 형식이 조용히 원본 서식으로 되돌아간다
       // (seedGridStylesFromXlsx 주석 참고).
-      await seedGridStylesFromXlsx(ydoc, grid);
+      await seedGridStylesFromXlsx(ydoc, lazyGridStoreAdapterForCanonicalGrid(grid));
       const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
       cells.observe((event) => {
         // 서버 자신이 창을 채우거나(seed) 비운(unseed) 변경은 사용자 편집이 아니므로 canonical에
@@ -1754,7 +1817,7 @@ async function reconcilePageSubscriptions(
   // 2) 새로 구독된 페이지를 채운다.
   for (const page of after) {
     if (before.has(page)) continue;
-    await seedGridPageFromXlsx(room.ydoc, room.canonicalGrid, sheet, page);
+    await seedGridPageFromXlsx(room.ydoc, lazyGridStoreAdapterForCanonicalGrid(room.canonicalGrid), sheet, page);
     await recomputeFormulasForPage(room, sheet, page);
   }
 

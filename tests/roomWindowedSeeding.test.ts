@@ -660,3 +660,72 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
     60_000,
   );
 });
+
+/**
+ * Task 8 — seedGridPageFromXlsx/seedGridStylesFromXlsx가 GridDocument 대신 LazyGridStore를
+ * 읽는 새 시그니처로 동작하는지 직접(room.ts를 거치지 않고) 검증한다. room.ts는 아직
+ * canonicalGrid(GridDocument)를 임시 어댑터로 감싸 이 함수들을 호출하므로(Task 14 이전), 위
+ * describe 블록의 room 통합 테스트들은 이 태스크 이후에도 정확히 같은 결과를 내야 한다(회귀
+ * 없음) — 이 블록은 그 어댑터를 거치지 않고 실제 LazyGridStore(ingestXlsxLazily)를 바로 물려
+ * "디스크에서 처음 읽는 캐시 미스 경로"까지 실제로 타는지 확인한다.
+ */
+describe('xlsx/collab.ts: seedGridPageFromXlsx/seedGridStylesFromXlsx read through LazyGridStore', () => {
+  test('subscribing a page fills exactly that page\'s cells, including a row not yet warmed in the read cache (forces a disk read)', async () => {
+    const { ingestXlsxLazily, closeLazyGridStore } = await import('../src/xlsx/lazyGridStore.js');
+    const { seedGridPageFromXlsx } = await import('../src/xlsx/collab.js');
+    const { GRID_CELLS_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Sheet1');
+    for (let r = 1; r <= 600; r += 1) sheet.getCell(r, 1).value = `row-${r}`; // 페이지 0(0~499)과 페이지 1의 일부
+    const bytes = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    // ingestion만으로는 읽기 캐시가 데워지지 않는다 — 아래 seedGridPageFromXlsx 호출이 실제로
+    // 디스크에서 처음 읽어야 한다(캐시 히트가 아니라 미스 경로를 강제로 태운다).
+    expect(store.readCache.size).toBe(0);
+
+    try {
+      const ydoc = new Y.Doc();
+      await seedGridPageFromXlsx(ydoc, store, 0, 0); // 페이지 0(0~499행)만 구독
+
+      const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
+      expect(cells.get(gridCellKey(0, 0, 0))).toBe('row-1');
+      expect(cells.get(gridCellKey(0, 499, 0))).toBe('row-500'); // 페이지 경계 마지막 행 — 디스크에서 새로 읽힘
+      expect(cells.get(gridCellKey(0, 500, 0))).toBeUndefined(); // 다음 페이지(1번) — 구독하지 않았으므로 없어야 함
+      expect(cells.size).toBe(500);
+      // 방금 읽은 페이지 0의 행들은 이제 캐시에 남아 있어야 한다(다음 구독에서 재사용).
+      expect(store.readCache.size).toBeGreaterThan(0);
+    } finally {
+      await closeLazyGridStore(store);
+    }
+  }, 30_000);
+
+  test('seedGridStylesFromXlsx fills the whole sheet\'s styles regardless of any page window, sourced from LazyGridStore', async () => {
+    const { ingestXlsxLazily, closeLazyGridStore } = await import('../src/xlsx/lazyGridStore.js');
+    const { seedGridStylesFromXlsx } = await import('../src/xlsx/collab.js');
+    const { GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Sheet1');
+    for (let r = 1; r <= 600; r += 1) sheet.getCell(r, 1).value = `row-${r}`;
+    // 굵게 서식을 페이지 0 밖(600행, 0-based 599 = 페이지 1)에 둔다 — 서식은 페이지 구독과
+    // 무관하게 항상 전량 채워져야 한다는 것을 증명하기 위함.
+    sheet.getCell(600, 1).font = { bold: true };
+    const bytes = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+
+    try {
+      const ydoc = new Y.Doc();
+      await seedGridStylesFromXlsx(ydoc, store);
+
+      const styles = ydoc.getMap<{ b?: 1 }>(GRID_STYLES_MAP);
+      expect(styles.get(gridCellKey(0, 599, 0))?.b).toBe(1);
+      // 서식 없는 칸은 여전히 안 심긴다(희소 유지).
+      expect(styles.get(gridCellKey(0, 0, 0))).toBeUndefined();
+    } finally {
+      await closeLazyGridStore(store);
+    }
+  }, 30_000);
+});

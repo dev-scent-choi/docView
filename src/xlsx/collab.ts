@@ -18,6 +18,8 @@ import {
 } from '../collab/gridShared.js';
 import type { GridCell, GridDocument, GridStyle } from '../spreadsheet.js';
 import { parseXlsxToGrid, yieldToEventLoop, YIELD_EVERY_N_ROWS } from '../spreadsheet.js';
+import type { LazyGridStore } from './lazyGridStore.js';
+import { getRow } from './lazyGridStore.js';
 
 
 export function toCellStyleAttrs(style: GridStyle): CellStyleAttrs {
@@ -242,12 +244,41 @@ export function isAutosaveExemptOrigin(origin: unknown): boolean {
 }
 
 /**
+ * LazyGridStore의 원본 행(getRow가 돌려주는, **원본 열 번호로 인덱싱된** 배열)에서 논리 좌표
+ * (r, c)의 셀을 뽑는다 — lazyGridStore.ts의 getCell과 완전히 같은 규칙(더티 오버레이 우선 →
+ * 논리 열을 원본 열로 변환해 인덱싱)이지만, 이미 getRow로 받아 둔 행을 재사용해 셀마다 다시
+ * getRow를 호출하지 않는다(호출부가 청크 단위로 Promise.all 배치 읽기를 한 뒤 이 함수로 각 셀을
+ * 뽑아 쓰는 구조 — Task 8 "구현 순서 메모" 참고).
+ *
+ * 이 조회가 dirtyOverlay를 확인하는 이유: seedGridPageFromXlsx/seedGridStylesFromXlsx는 나중에
+ * (Task 11+) 실제 편집 중인 LazyGridStore에도 그대로 쓰이게 된다 — 편집된 칸은 디스크의 원본이
+ * 아니라 dirtyOverlay에만 최신 값이 있으므로, 이걸 빼먹으면 창을 벗어났다 되돌아온 페이지에서
+ * 사용자의 편집이 조용히 원본 값으로 되돌아간다(GRID_WINDOW_SEED_ORIGIN 주석이 경고하는 것과
+ * 같은 클래스의 데이터 손실).
+ */
+function resolveGridCell(
+  store: LazyGridStore,
+  sheetIdx: number,
+  row: number,
+  col: number,
+  originalRow: ReadonlyArray<GridCell | 0>,
+): GridCell | 0 {
+  const key = gridCellKey(sheetIdx, row, col);
+  if (store.dirtyOverlay.has(key)) return store.dirtyOverlay.get(key) ?? 0;
+  const originalCol = store.logicalToOriginalCol[sheetIdx]?.[col];
+  if (originalCol === undefined || originalCol < 0) return 0;
+  return originalRow[originalCol] ?? 0;
+}
+
+/**
  * 시트 하나의 페이지 하나(PAGE_SIZE_ROWS행)만 Yjs에 채운다 — seedGridFromXlsx의 내부 행 루프와
  * 같은 로직을 한 페이지 범위로 좁힌 것.
  *
- * 데이터 출처는 원본 파일이 아니라 **canonicalGrid**다: 사용자가 편집한 뒤 스크롤로 화면에서
- * 밀려났다가(unseed) 다시 돌아온 페이지도 편집된 값 그대로 되살아나야 한다(원본에서 다시 읽으면
- * 그 편집이 조용히 되돌려진다).
+ * 데이터 출처는 원본 파일이 아니라 **LazyGridStore**다(Task 3-7이 만든 지연 읽기 계층 — 아직
+ * room.ts는 실제 room.canonicalGrid: GridDocument를 이 store 모양으로 감싸는 어댑터를 통해
+ * 호출한다, Task 14에서 정식 전환): 사용자가 편집한 뒤 스크롤로 화면에서 밀려났다가(unseed) 다시
+ * 돌아온 페이지도 편집된 값 그대로 되살아나야 한다(원본에서 다시 읽으면 그 편집이 조용히
+ * 되돌려진다) — resolveGridCell의 dirtyOverlay 확인이 그걸 보장한다.
  *
  * **서식(GRID_STYLES_MAP/GRID_STYLES_BASELINE_MAP)은 여기서 채우지 않는다** — 서식은 구조
  * 메타데이터와 마찬가지로 절대 윈도잉하지 않고 룸을 열 때 전량 한 번만 채운다
@@ -255,33 +286,38 @@ export function isAutosaveExemptOrigin(origin: unknown): boolean {
  */
 export async function seedGridPageFromXlsx(
   ydoc: Y.Doc,
-  canonicalGrid: GridDocument,
+  store: LazyGridStore,
   sheetIdx: number,
   page: number,
 ): Promise<void> {
-  const sheet = canonicalGrid.sheets[sheetIdx];
-  if (!sheet) return;
+  const meta = store.sheetMeta[sheetIdx];
+  if (!meta) return;
   const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
   const baseline = ydoc.getMap<string>(GRID_BASELINE_MAP);
-  const covered = mergeCoveredCells(sheet.merges);
+  const covered = mergeCoveredCells(meta.merges);
   const pageStart = page * PAGE_SIZE_ROWS;
-  const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, sheet.rows.length);
+  const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, meta.rowCount);
 
   // 페이지(500행)가 지금은 YIELD_EVERY_N_ROWS(2000행)보다 작아 실제로는 청크가 하나뿐이지만,
   // 두 상수 중 어느 쪽이 나중에 바뀌어도 "큰 시트가 이벤트 루프를 막지 않는다"는 보장이 유지되도록
   // 다른 대형 루프와 같은 청크+양보 구조를 그대로 쓴다(spreadsheet.ts yieldToEventLoop 주석 참고).
   for (let start = pageStart; start < pageEnd; start += YIELD_EVERY_N_ROWS) {
     const end = Math.min(start + YIELD_EVERY_N_ROWS, pageEnd);
+    const rowNumbers: number[] = [];
+    for (let r = start; r < end; r += 1) rowNumbers.push(r);
+    // 청크 안의 행들을 한 번에 기다린다 — 이미 캐시가 데워진 행은 즉시 resolve되고, 캐시에 없던
+    // 행만 실제 디스크 I/O가 나가되 그 I/O들이 병렬화된다(Task 8 "구현 순서 메모" 참고).
+    const rows = await Promise.all(rowNumbers.map((r) => getRow(store, sheetIdx, r)));
     ydoc.transact(() => {
-      for (let r = start; r < end; r += 1) {
-        const row = sheet.rows[r];
-        if (!row) continue;
-        for (let c = 0; c < row.length; c += 1) {
-          const cell = row[c];
+      for (let i = 0; i < rowNumbers.length; i += 1) {
+        const r = rowNumbers[i];
+        const originalRow = rows[i];
+        for (let c = 0; c < meta.colCount; c += 1) {
+          const cell = resolveGridCell(store, sheetIdx, r, c, originalRow);
           if (cell === 0) continue;
           if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커의 중복 값이라 시딩하지 않는다
           const key = gridCellKey(sheetIdx, r, c);
-          const style = cell.s !== undefined ? canonicalGrid.styles[cell.s] : undefined;
+          const style = cell.s !== undefined ? store.styles[cell.s] : undefined;
           if (cell.v !== '') {
             const value = seedableCellValue(cell.v, style);
             cells.set(key, value);
@@ -317,25 +353,31 @@ export async function seedGridPageFromXlsx(
  * 머리글 행·합계 열 정도). 그래도 만약을 위해 다른 대형 루프와 같은 YIELD_EVERY_N_ROWS 청크 +
  * yieldToEventLoop() 구조를 그대로 쓴다 — 이 코드베이스에서 시트 행을 도는 모든 루프의 관례다.
  */
-export async function seedGridStylesFromXlsx(ydoc: Y.Doc, grid: GridDocument): Promise<void> {
+export async function seedGridStylesFromXlsx(ydoc: Y.Doc, store: LazyGridStore): Promise<void> {
   const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
   const stylesBaseline = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP);
 
-  for (let sheetIdx = 0; sheetIdx < grid.sheets.length; sheetIdx += 1) {
-    const sheet = grid.sheets[sheetIdx];
-    const covered = mergeCoveredCells(sheet.merges);
+  for (let sheetIdx = 0; sheetIdx < store.sheetMeta.length; sheetIdx += 1) {
+    const meta = store.sheetMeta[sheetIdx];
+    const covered = mergeCoveredCells(meta.merges);
 
-    for (let start = 0; start < sheet.rows.length; start += YIELD_EVERY_N_ROWS) {
-      const end = Math.min(start + YIELD_EVERY_N_ROWS, sheet.rows.length);
+    for (let start = 0; start < meta.rowCount; start += YIELD_EVERY_N_ROWS) {
+      const end = Math.min(start + YIELD_EVERY_N_ROWS, meta.rowCount);
+      const rowNumbers: number[] = [];
+      for (let r = start; r < end; r += 1) rowNumbers.push(r);
+      // seedGridPageFromXlsx와 같은 이유로 청크 안의 행들을 Promise.all로 한 번에 기다린다 —
+      // 이 함수는 페이지가 아니라 시트 전체를 도므로(윈도잉 대상이 아님, 아래 함수 주석 참고)
+      // 이 병렬화가 특히 중요하다.
+      const rows = await Promise.all(rowNumbers.map((r) => getRow(store, sheetIdx, r)));
       ydoc.transact(() => {
-        for (let r = start; r < end; r += 1) {
-          const row = sheet.rows[r];
-          if (!row) continue;
-          for (let c = 0; c < row.length; c += 1) {
-            const cell = row[c];
-            if (cell === 0) continue;
+        for (let i = 0; i < rowNumbers.length; i += 1) {
+          const r = rowNumbers[i];
+          const originalRow = rows[i];
+          for (let c = 0; c < meta.colCount; c += 1) {
             if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커의 중복이라 시딩하지 않는다
-            const style = cell.s !== undefined ? grid.styles[cell.s] : undefined;
+            const cell = resolveGridCell(store, sheetIdx, r, c, originalRow);
+            if (cell === 0) continue;
+            const style = cell.s !== undefined ? store.styles[cell.s] : undefined;
             if (!style) continue;
             const attrs = toCellStyleAttrs(style);
             if (Object.keys(attrs).length === 0) continue;
