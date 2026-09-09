@@ -176,7 +176,8 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
 
   test('canonical grid matches the original file immediately after seeding, before any edit', async () => {
     const { store } = await import('../src/storage.js');
-    const { joinEditSession, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { joinEditSession, getRoomLazyGridForTest } = await import('../src/collab/room.js');
+    const { getCell } = await import('../src/xlsx/lazyGridStore.js');
 
     const docId = randomUUID();
     const original = await makeSampleXlsx();
@@ -195,18 +196,19 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
     const socket = new FakeSocket();
     await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
 
-    const canonical = getRoomCanonicalGridForTest(docId);
-    expect(canonical).not.toBeNull();
-    expect(canonical!.sheets[0].rows[0][0]).toEqual({ v: 'Name' });
-    expect(canonical!.sheets[0].rows[1][0]).toEqual({ v: 'Alice' });
+    const lazyGrid = getRoomLazyGridForTest(docId);
+    expect(lazyGrid).not.toBeNull();
+    expect(await getCell(lazyGrid!, 0, 0, 0)).toEqual({ v: 'Name' });
+    expect(await getCell(lazyGrid!, 0, 1, 0)).toEqual({ v: 'Alice' });
   });
 
   test('an edit is reflected in the canonical grid immediately, without waiting for autosave', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 
     const { store } = await import('../src/storage.js');
-    const { joinEditSession, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { joinEditSession, getRoomLazyGridForTest } = await import('../src/collab/room.js');
     const { gridCellKey } = await import('../src/collab/gridShared.js');
+    const { getCell } = await import('../src/xlsx/lazyGridStore.js');
 
     const docId = randomUUID();
     const original = await makeSampleXlsx();
@@ -227,17 +229,22 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
 
     // A2("Alice")를 "Alice Kim"으로 편집 — 자동저장(8초)을 전혀 기다리지 않는다.
     sendCellEdit(socket, gridCellKey(0, 1, 0), 'Alice Kim');
+    // applyCellsChangeToCanonical은 async(서식 보존을 위해 getCell로 현재 값을 먼저 읽는다) —
+    // cells.observe 콜백은 이를 void로 흘려보내므로, dirtyOverlay에 실제로 쓰이기까지 최소
+    // 한 틱 이상 걸린다(과거의 완전 동기 GridDocument 대입과 다른 점).
+    await flushEventLoop();
 
-    const canonical = getRoomCanonicalGridForTest(docId);
-    expect(canonical!.sheets[0].rows[1][0]).toEqual({ v: 'Alice Kim' });
+    const lazyGrid = getRoomLazyGridForTest(docId);
+    expect(await getCell(lazyGrid!, 0, 1, 0)).toEqual({ v: 'Alice Kim' });
   });
 
   test('deleting a cell (Y.Map key delete, not set to "") clears it to 0 in the canonical grid', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 
     const { store } = await import('../src/storage.js');
-    const { joinEditSession, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { joinEditSession, getRoomLazyGridForTest } = await import('../src/collab/room.js');
     const { gridCellKey } = await import('../src/collab/gridShared.js');
+    const { getCell } = await import('../src/xlsx/lazyGridStore.js');
 
     const docId = randomUUID();
     const original = await makeSampleXlsx();
@@ -257,8 +264,8 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
     await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
 
     // 편집 전 확인: A2는 "Alice"를 담고 있어야 한다.
-    const before = getRoomCanonicalGridForTest(docId);
-    expect(before!.sheets[0].rows[1][0]).toEqual({ v: 'Alice' });
+    const before = getRoomLazyGridForTest(docId);
+    expect(await getCell(before!, 0, 1, 0)).toEqual({ v: 'Alice' });
 
     // 실제 클라이언트처럼 먼저 보고 있는 페이지를 구독한다 — 그래야 그 페이지의 셀이 Yjs에
     // 채워지고, 아래 syncMirrorWithRoom이 mirror에 그 셀을 가져올 수 있다(윈도잉 이후 구독
@@ -270,17 +277,19 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
     // cells.delete(key)를 수행한다 — cells.set(key, '')가 아니다.
     syncMirrorWithRoom(socket);
     deleteCellViaClient(socket, gridCellKey(0, 1, 0));
+    await flushEventLoop();
 
-    const canonical = getRoomCanonicalGridForTest(docId);
-    expect(canonical!.sheets[0].rows[1][0]).toBe(0);
+    const lazyGrid = getRoomLazyGridForTest(docId);
+    expect(await getCell(lazyGrid!, 0, 1, 0)).toBe(0);
   });
 
   test('editing a cell that already has a style preserves its style (.s) in the canonical grid', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 
     const { store } = await import('../src/storage.js');
-    const { joinEditSession, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { joinEditSession, getRoomLazyGridForTest } = await import('../src/collab/room.js');
     const { gridCellKey } = await import('../src/collab/gridShared.js');
+    const { getCell } = await import('../src/xlsx/lazyGridStore.js');
 
     const docId = randomUUID();
     const original = await makeStyledSampleXlsx();
@@ -299,22 +308,24 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
     const socket = new FakeSocket();
     await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
 
-    const before = getRoomCanonicalGridForTest(docId);
-    const beforeCell = before!.sheets[0].rows[1][0];
+    const before = getRoomLazyGridForTest(docId);
+    const beforeCell = await getCell(before!, 0, 1, 0);
     expect(beforeCell).not.toBe(0);
     const styleIndex = (beforeCell as { v: string; s?: number }).s;
     expect(styleIndex).toBeDefined();
 
     // 텍스트만 바꾸는 편집 — 스타일은 건드리지 않는다.
     sendCellEdit(socket, gridCellKey(0, 1, 0), 'Alice Kim');
+    await flushEventLoop();
 
-    const canonical = getRoomCanonicalGridForTest(docId);
-    expect(canonical!.sheets[0].rows[1][0]).toEqual({ v: 'Alice Kim', s: styleIndex });
+    const lazyGrid = getRoomLazyGridForTest(docId);
+    expect(await getCell(lazyGrid!, 0, 1, 0)).toEqual({ v: 'Alice Kim', s: styleIndex });
   });
 
   test('seeding does not corrupt the canonical grid with the stripped (editable) cell text', async () => {
     const { store } = await import('../src/storage.js');
-    const { joinEditSession, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { joinEditSession, getRoomLazyGridForTest } = await import('../src/collab/room.js');
+    const { getCell } = await import('../src/xlsx/lazyGridStore.js');
 
     const docId = randomUUID();
     const original = await makeNumberFormattedXlsx();
@@ -343,8 +354,8 @@ describe('room.ts: xlsx room keeps a canonical grid in sync with edits', () => {
     // 표시 텍스트("1,000")를 담고 있어야 한다. seedGridPageFromXlsx가 Yjs cells 맵에 심는 편집용
     // 스트립 값("1000")으로 오염되면 안 된다(그 시딩 트랜잭션은 GRID_WINDOW_SEED_ORIGIN 표식을
     // 달고 있어 cells.observe가 canonical 되반영을 건너뛴다).
-    const canonical = getRoomCanonicalGridForTest(docId);
-    const cell = canonical!.sheets[0].rows[1][0];
+    const lazyGrid = getRoomLazyGridForTest(docId);
+    const cell = await getCell(lazyGrid!, 0, 1, 0);
     expect(cell).not.toBe(0);
     expect((cell as { v: string }).v).toBe('1,000');
   });

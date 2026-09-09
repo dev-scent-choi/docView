@@ -266,7 +266,8 @@ describe('room.ts: style-only and structural edits reach the canonical grid (and
   });
 
   test('a style-only edit does not clobber the cell text in the canonical grid', async () => {
-    const { getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { getRoomLazyGridForTest } = await import('../src/collab/room.js');
+    const { getCell } = await import('../src/xlsx/lazyGridStore.js');
     const { GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
     const { docId, socket } = await openRoom(await makeSampleXlsx());
 
@@ -275,8 +276,8 @@ describe('room.ts: style-only and structural edits reach the canonical grid (and
     });
     await flushEventLoop();
 
-    const canonical = getRoomCanonicalGridForTest(docId)!;
-    const cell = canonical.sheets[0].rows[1][0];
+    const lazyGrid = getRoomLazyGridForTest(docId)!;
+    const cell = await getCell(lazyGrid, 0, 1, 0);
     expect(cell).not.toBe(0);
     expect((cell as { v: string }).v).toBe('Alice');
     expect((cell as { s?: number }).s).toBeDefined();

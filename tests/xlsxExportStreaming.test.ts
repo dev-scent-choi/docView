@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import ExcelJS from 'exceljs';
 import { describe, expect, test } from 'vitest';
 import { gridCellKey } from '../src/collab/gridShared.js';
-import { parseXlsxToGrid } from '../src/spreadsheet.js';
+import { findOrAddGridStyleIndex } from '../src/xlsx/collab.js';
 import { exportXlsxFromGridStreaming } from '../src/xlsx/exportStreaming.js';
-import type { GridCell, GridDocument, GridSheet, GridStyle } from '../src/spreadsheet.js';
+import { growSheet, ingestXlsxLazily, setDirtyCell } from '../src/xlsx/lazyGridStore.js';
 
 async function makeSampleXlsx(): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
@@ -21,19 +22,17 @@ async function makeSampleXlsx(): Promise<Buffer> {
 describe('xlsx/exportStreaming.ts: exportXlsxFromGridStreaming (large-file fallback)', () => {
   test('rejects when structuralOps is non-empty (unsupported scope, fail loud instead of corrupting)', async () => {
     const original = await makeSampleXlsx();
-    const grid = await parseXlsxToGrid(original);
+    const store = await ingestXlsxLazily(randomUUID(), original);
     await expect(
-      exportXlsxFromGridStreaming(original, grid, new Set<string>(), [
-        { sheet: 0, kind: 'insertRows', at: 0, count: 1 },
-      ]),
+      exportXlsxFromGridStreaming(original, store, [{ sheet: 0, kind: 'insertRows', at: 0, count: 1 }]),
     ).rejects.toThrow(/구조 변경 없이|structuralOps|삽입.*삭제/);
   });
 
   test('an unedited file round-trips with all original values and styles intact', async () => {
     const original = await makeSampleXlsx();
-    const grid = await parseXlsxToGrid(original);
+    const store = await ingestXlsxLazily(randomUUID(), original);
 
-    const exported = await exportXlsxFromGridStreaming(original, grid, new Set<string>(), []);
+    const exported = await exportXlsxFromGridStreaming(original, store, []);
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const sheet = reopened.getWorksheet('Sheet1')!;
@@ -48,16 +47,10 @@ describe('xlsx/exportStreaming.ts: exportXlsxFromGridStreaming (large-file fallb
 
   test('only cells marked dirty are overwritten; untouched cells keep their original value', async () => {
     const original = await makeSampleXlsx();
-    const grid = await parseXlsxToGrid(original);
-    const canonicalGrid = structuredClone(grid) as GridDocument;
-    (canonicalGrid.sheets[0].rows[1] as Array<GridCell | 0>)[0] = { v: 'Alice Kim' }; // A2
+    const store = await ingestXlsxLazily(randomUUID(), original);
+    setDirtyCell(store, 0, 1, 0, { v: 'Alice Kim' }); // A2만 편집됨
 
-    const exported = await exportXlsxFromGridStreaming(
-      original,
-      canonicalGrid,
-      new Set([gridCellKey(0, 1, 0)]), // A2만 편집됨
-      [],
-    );
+    const exported = await exportXlsxFromGridStreaming(original, store, []);
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const sheet = reopened.getWorksheet('Sheet1')!;
@@ -69,19 +62,11 @@ describe('xlsx/exportStreaming.ts: exportXlsxFromGridStreaming (large-file fallb
 
   test('applies style for a dirty cell using the canonical style palette', async () => {
     const original = await makeSampleXlsx();
-    const grid = await parseXlsxToGrid(original);
-    const canonicalGrid = structuredClone(grid) as GridDocument;
-    const styles = canonicalGrid.styles as GridStyle[];
-    const styleIndex = styles.length;
-    styles.push({ b: 1, col: '#ff0000' });
-    (canonicalGrid.sheets[0].rows[0] as Array<GridCell | 0>)[0] = { v: 'Name', s: styleIndex }; // A1
+    const store = await ingestXlsxLazily(randomUUID(), original);
+    const styleIndex = findOrAddGridStyleIndex(store, { b: 1, col: '#ff0000' });
+    setDirtyCell(store, 0, 0, 0, { v: 'Name', s: styleIndex }); // A1
 
-    const exported = await exportXlsxFromGridStreaming(
-      original,
-      canonicalGrid,
-      new Set([gridCellKey(0, 0, 0)]),
-      [],
-    );
+    const exported = await exportXlsxFromGridStreaming(original, store, []);
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const a1 = reopened.getWorksheet('Sheet1')!.getCell('A1');
@@ -93,9 +78,10 @@ describe('xlsx/exportStreaming.ts: exportXlsxFromGridStreaming (large-file fallb
 
   test('a sheet added during collab (not present in the original file) is written in full', async () => {
     const original = await makeSampleXlsx();
-    const grid = await parseXlsxToGrid(original);
-    const canonicalGrid = structuredClone(grid) as GridDocument;
-    (canonicalGrid.sheets as GridSheet[]).push({
+    const store = await ingestXlsxLazily(randomUUID(), original);
+
+    // room.ts의 ensureLazySheetSlot이 새 시트를 만들 때 하는 것과 동일한 자리 맞추기.
+    store.sheetMeta.push({
       name: 'Sheet2',
       rowCount: 1,
       colCount: 1,
@@ -103,15 +89,14 @@ describe('xlsx/exportStreaming.ts: exportXlsxFromGridStreaming (large-file fallb
       merges: [],
       freezeRows: 0,
       freezeCols: 0,
-      rows: [[{ v: 'brand-new' }]],
     });
+    store.rowIndex.push([]);
+    store.logicalToOriginalRow.push([]);
+    store.logicalToOriginalCol.push([]);
+    growSheet(store, 1, 1, 1);
+    setDirtyCell(store, 1, 0, 0, { v: 'brand-new' });
 
-    const exported = await exportXlsxFromGridStreaming(
-      original,
-      canonicalGrid,
-      new Set([gridCellKey(1, 0, 0)]),
-      [],
-    );
+    const exported = await exportXlsxFromGridStreaming(original, store, []);
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
 
@@ -121,12 +106,10 @@ describe('xlsx/exportStreaming.ts: exportXlsxFromGridStreaming (large-file fallb
 
   test('a direct rowCount shrink (no structural op) truncates the sheet in the output', async () => {
     const original = await makeSampleXlsx();
-    const grid = await parseXlsxToGrid(original);
-    const canonicalGrid = structuredClone(grid) as GridDocument;
-    const sheet = canonicalGrid.sheets[0] as unknown as { rowCount: number };
-    sheet.rowCount = 2; // 3행짜리를 2행으로 직접 축소(그리드-에디터 툴바 버튼과 같은 모양)
+    const store = await ingestXlsxLazily(randomUUID(), original);
+    store.sheetMeta[0].rowCount = 2; // 3행짜리를 2행으로 직접 축소(그리드-에디터 툴바 버튼과 같은 모양)
 
-    const exported = await exportXlsxFromGridStreaming(original, canonicalGrid, new Set<string>(), []);
+    const exported = await exportXlsxFromGridStreaming(original, store, []);
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.load(exported as unknown as ArrayBuffer);
     const reopenedSheet = reopened.getWorksheet('Sheet1')!;
@@ -140,9 +123,9 @@ describe('xlsx/exportStreaming.ts: exportXlsxFromGridStreaming (large-file fallb
     workbookIn.addWorksheet('First').getCell('A1').value = 'first';
     workbookIn.addWorksheet('Second').getCell('A1').value = 'second';
     const original = Buffer.from((await workbookIn.xlsx.writeBuffer()) as ArrayBuffer);
-    const grid = await parseXlsxToGrid(original);
+    const store = await ingestXlsxLazily(randomUUID(), original);
 
-    const exported = await exportXlsxFromGridStreaming(original, grid, new Set<string>(), [], {
+    const exported = await exportXlsxFromGridStreaming(original, store, [], {
       sheetDisplayOrder: new Map([
         [0, 1],
         [1, 0],
@@ -159,9 +142,9 @@ describe('xlsx/exportStreaming.ts: exportXlsxFromGridStreaming (large-file fallb
     workbookIn.addWorksheet('First').getCell('A1').value = 'first';
     workbookIn.addWorksheet('Second').getCell('A1').value = 'second';
     const original = Buffer.from((await workbookIn.xlsx.writeBuffer()) as ArrayBuffer);
-    const grid = await parseXlsxToGrid(original);
+    const store = await ingestXlsxLazily(randomUUID(), original);
 
-    const exported = await exportXlsxFromGridStreaming(original, grid, new Set<string>(), [], {
+    const exported = await exportXlsxFromGridStreaming(original, store, [], {
       removedSheetIndices: new Set([0]),
     });
     const reopened = new ExcelJS.Workbook();

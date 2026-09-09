@@ -31,7 +31,6 @@ import { convertToPdf } from '../routes/documents.js';
 import { invalidateViewCaches } from '../routes/viewer.js';
 import { store } from '../storage.js';
 import {
-  parseXlsxToGrid,
   saveGridDerived,
   yieldToEventLoop,
   MAX_COLS,
@@ -57,13 +56,19 @@ import {
   GRID_STRUCTURE_SHIFT_ORIGIN,
   GRID_WINDOW_SEED_ORIGIN,
 } from '../xlsx/collab.js';
+import { shiftMerges } from '../xlsx/gridShift.js';
 import {
-  deleteCanonicalCols,
-  deleteCanonicalRows,
-  insertCanonicalCols,
-  insertCanonicalRows,
-} from '../xlsx/gridShift.js';
-import type { LazyGridStore } from '../xlsx/lazyGridStore.js';
+  applyColShift,
+  applyRowShift,
+  closeLazyGridStore,
+  getCell,
+  getRow,
+  growSheet,
+  ingestXlsxLazily,
+  setDirtyCell,
+  type LazyGridSheetMeta,
+  type LazyGridStore,
+} from '../xlsx/lazyGridStore.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { computeGridCellDisplayAsync, formatComputedValueForStorage } from '../xlsx/formulas.js';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
@@ -159,31 +164,34 @@ interface Room {
    * 좁게 두른다.
    */
   suppressAutosaveReschedule: boolean;
-  /** xlsx 룸에서만 쓰인다 — 항상 전체 시트 데이터를 담는 "진짜" 데이터. Yjs cells 맵은 이제
-   * (Task 6 이후) 지금 구독 중인 페이지만 담는 캐시가 되므로, 저장·다운로드·수식 계산은 항상
-   * 이 필드를 기준으로 한다. docx/pptx 룸에서는 항상 null. */
-  canonicalGrid: GridDocument | null;
   /**
-   * xlsx 룸에서만 쓰인다 — 룸이 처음 시딩될 때 각 시트의 (rowCount, colCount)만 남겨 둔 가벼운
-   * 스냅샷("원본 그대로"의 크기만). 협업 중 새로 추가된 시트는 이 배열에 자리가 없다(원래
-   * 존재하지 않았으므로 — undefined로 판별).
+   * xlsx 룸에서만 쓰인다 — 룸이 사는 동안 진짜로 상주하는 지연(lazy) 그리드 저장소(Task 3-7).
+   * 값·서식 편집은 전부 `dirtyOverlay`에만 반영되고, 편집되지 않은 원본 셀은 필요할 때만
+   * 디스크에서 읽는다. 저장·다운로드·수식 계산·구조연산 등 canonical을 읽거나 쓰는 모든 경로가
+   * 이제 이 필드 **하나**를 기준으로 한다(Task 11 이전에는 항상 전체가 메모리에 상주하는
+   * `canonicalGrid: GridDocument`가 이 역할이었다 — 이 필드가 그걸 완전히 대체한다). docx/pptx
+   * 룸에서는 항상 null.
+   */
+  lazyGrid: LazyGridStore | null;
+  /**
+   * xlsx 룸에서만 쓰인다 — 룸이 처음 시딩될 때(`ingestXlsxLazily` 직후, 편집이 반영되기 전) 각
+   * 시트의 (rowCount, colCount)만 남겨 둔 가벼운 스냅샷("원본 그대로"의 크기만). 협업 중 새로
+   * 추가된 시트는 이 배열에 자리가 없다(원래 존재하지 않았으므로 — undefined로 판별).
    *
-   * **왜 canonicalGrid 전체를 깊은 복사해 두던 것(옛 baselineGrid)을 없앴는가**: 대용량 문서(29만
-   * 행급)에서 이 전체 복제본이 룸 메모리의 상당 부분을 차지했다(진단 문서 docs/TODO.md 참고).
-   * exportXlsxFromGrid는 이제 셀 단위 값 비교 대신 dirtyCells(실제로 편집된 칸의 좌표만)와
-   * structuralOps(행/열 삽입·삭제 연산 기록)로 "무엇이 바뀌었는지"를 재구성한다 — 이 필드는 그
-   * 재구성에서 "시트 끝을 직접 늘리거나 줄인" 변경(구조 연산 없이 rowCount/colCount만 바뀌는
-   * 경로, grid-editor.ts의 +/- 버튼)을 감지하는 데만 쓰인다.
+   * **왜 필요한가 (`lazyGrid.sheetMeta[i].rowCount/colCount`로 대체할 수 없는 이유)**: `sheetMeta`는
+   * 지금까지의 모든 편집(구조연산 + 직접 확장/축소)이 반영된 **현재** 값이라 계속 바뀐다. 반면
+   * `exportXlsxFromGrid`가 구조연산(`structuralOps`)을 원본 워크북에 재생할 때 그 재생의
+   * **출발점**으로 삼아야 하는 건 "룸이 열렸을 때 원래 몇 행/열이었는지"라는 고정된 기준선이다
+   * (직접 확장/축소는 `structuralOps`에 기록되지 않으므로 현재 `sheetMeta` 값에서 거꾸로 계산할
+   * 수도 없다). ExcelJS의 raw `sheet.rowCount`(서식만 있는 꼬리 행까지 세어 부풀려질 수 있음)도
+   * 대신 쓸 수 없다 — 그게 바로 이 필드가 막는 버그다(`tests/xlsx-collab.test.ts`의 "export does
+   * not call spliceRows/spliceColumns when nothing was actually edited" 참고).
    */
   baselineSheetExtents: ReadonlyArray<{ readonly rowCount: number; readonly colCount: number }> | null;
   /**
-   * xlsx 룸에서만 쓰인다 — 룸이 열린 뒤 값 또는 서식이 실제로 편집된 칸의 좌표 키(gridCellKey
-   * 형식, "시트:행:열") 집합. cells.observe/styles.observe가 채우고, applyGridStructureOp가
-   * 행/열을 밀 때마다 같은 좌표 이동을 이 집합에도 그대로 적용한다(shiftDirtyCellKeys).
-   *
-   * 한 번 편집된 칸은 이후 원래 값으로 되돌려도 이 집합에서 빠지지 않는다(다시 "한 번도 안
-   * 건드린 척"으로 되돌리지 않음) — 그 칸이 원래 수식이었다면 이 시점부터는 정적 값으로 저장된다.
-   * 이건 옛 전체-비교 방식과의 알려진 차이이고, 메모리 절감을 위해 받아들인 트레이드오프다.
+   * xlsx 룸에서만 쓰인다 — Task 11 이전 세대의 유물. 값 또는 서식이 편집된 칸의 좌표를 이제
+   * `lazyGrid.dirtyOverlay`(값까지 담는 Map)가 대체했으므로 이 필드는 더 이상 읽거나 쓰지
+   * 않는다(죽은 필드 — Task 12에서 완전히 제거 예정, `docs/superpowers/plans/...` Task 12 참고).
    */
   readonly dirtyCells: Set<string>;
   /**
@@ -223,10 +231,12 @@ interface Room {
    * 체인. 구조 변경(rowCount/colCount 확장)이 요구하는 배열 할당은 상한(30만 행)까지 갈 수 있어
    * 동기로 돌면 이벤트 루프를 통째로 멈춘다 — 이 프로젝트가 이미 여러 번 고친 그 버그 클래스다.
    *
-   * 관찰자는 **의미상 중요한 스칼라**(rowCount/colCount)만 동기로 반영하고, 배열 패딩은 여기에
-   * 예약한다. 패딩이 늦어져도 안전한 이유: 내보내기는 `rows.length`를 돌며 `row?.[c]`로 읽고
-   * `r >= rowCount`를 걸러내므로, 아직 채워지지 않은 뒤쪽 빈 행은 결과에 아무 영향이 없다.
-   * 그리고 그 사이 실제 편집이 도착하면 ensureCanonicalCellSlot이 그 행만 즉시 만들어 준다.
+   * Task 11 이전에는 canonical이 시트 전체를 실제 `GridCell` 배열로 담고 있어(`GridDocument`),
+   * 이 체인이 그 배열 자체를 청크+양보로 채우는 무거운 작업(`growCanonicalRows`/`widenCanonicalRows`)
+   * 을 순서대로 이어 붙이는 용도였다. Task 11부터는 `LazyGridStore.growSheet`(정수 매핑 배열만
+   * `-1`로 패딩)가 그 자리를 대신하므로 이 작업 자체가 항상 가볍다 — 하지만 체인은 그대로
+   * 유지한다: 행/열 삽입·삭제(`applyGridStructureOp`)도 같은 시트의 매핑 배열을 건드리므로,
+   * 두 종류의 작업이 겹치면 순서가 어긋날 수 있다(계획 문서 Task 11 참고).
    *
    * 하나의 체인으로 묶는 이유는 recomputeSubscribedPagesInBackground와 같다 — 따로 흘려보내면
    * 각 호출이 자기 첫 await까지 동기로 실행돼 양보 없는 블록이 연달아 붙는다.
@@ -235,68 +245,6 @@ interface Room {
 }
 
 const rooms = new Map<string, Room>();
-
-/**
- * Task 8 임시 어댑터 — `seedGridPageFromXlsx`/`seedGridStylesFromXlsx`(xlsx/collab.ts)는 이제
- * `LazyGridStore`를 읽는 시그니처지만, room.ts는 아직 `room.canonicalGrid: GridDocument`(항상
- * 완전히 메모리에 상주하는 실제 데이터)를 그대로 쓰고 있다 — 진짜 지연 ingestion(`LazyGridStore`,
- * Task 3-7)을 room.ts에 연결하는 것은 Task 14 몫이다. 그때까지 호출부는 이 함수로 canonicalGrid를
- * 감싸 넘긴다.
- *
- * 이 어댑터는 디스크를 절대 건드리지 않는다: readCache를 `GridDocumentBackedRowCache`로 만들어
- * `getRow`가 항상 "캐시 히트"로 보게 하고(canonicalGrid.sheets[..].rows에서 즉시 값을 꺼내
- * 돌려준다), rowIndex는 시트마다 빈 배열로 둔다 — 그래서 이 캐시가 우연히라도 미스를 내는
- * 극단적인 경우에도(예: rowCount 밖의 좌표) lazyGridStore.ts의 readRowFromDisk는 rowIndex에서
- * 아무 항목도 못 찾아 빈 행([])만 돌려줄 뿐, 존재하지 않는 rowStorePath를 열려고 시도하지 않는다
- * (readRowFromDisk의 `if (!entry) return [];` 가드).
- *
- * logicalToOriginalRow/Col은 항등 매핑이다 — canonicalGrid 자체가 이미 (gridShift.ts를 통해)
- * 구조연산 결과를 반영한 "현재" 배열이라, 논리 좌표와 원본 좌표가 애초에 같다. dirtyOverlay는
- * 항상 비어 있다 — canonicalGrid.rows가 이미 편집된 최신 값을 직접 담고 있으므로(room.ts의
- * applyCellsChangeToCanonical이 그 자리에서 바로 반영한다), 별도 오버레이로 덮어쓸 것이 없다.
- */
-class GridDocumentBackedRowCache extends Map<string, ReadonlyArray<GridCell | 0>> {
-  constructor(private readonly grid: GridDocument) {
-    super();
-  }
-
-  override get(key: string): ReadonlyArray<GridCell | 0> | undefined {
-    const cached = super.get(key);
-    if (cached) return cached;
-    const sep = key.indexOf(':');
-    if (sep < 0) return undefined;
-    const sheetIdx = Number(key.slice(0, sep));
-    const originalRow = Number(key.slice(sep + 1));
-    return this.grid.sheets[sheetIdx]?.rows[originalRow];
-  }
-}
-
-function identityIndexArray(length: number): number[] {
-  return Array.from({ length }, (_, i) => i);
-}
-
-function lazyGridStoreAdapterForCanonicalGrid(grid: GridDocument): LazyGridStore {
-  return {
-    docId: 'canonical-grid-adapter',
-    rowStorePath: '',
-    sheetMeta: grid.sheets.map((sheet) => ({
-      name: sheet.name,
-      rowCount: sheet.rowCount,
-      colCount: sheet.colCount,
-      colWidths: sheet.colWidths,
-      merges: sheet.merges,
-      freezeRows: sheet.freezeRows,
-      freezeCols: sheet.freezeCols,
-    })),
-    styles: [...grid.styles],
-    rowIndex: grid.sheets.map(() => []),
-    logicalToOriginalRow: grid.sheets.map((sheet) => identityIndexArray(sheet.rowCount)),
-    logicalToOriginalCol: grid.sheets.map((sheet) => identityIndexArray(sheet.colCount)),
-    dirtyOverlay: new Map(),
-    readCache: new GridDocumentBackedRowCache(grid),
-    readCacheLimit: Number.MAX_SAFE_INTEGER,
-  };
-}
 
 /**
  * 대용량으로 취급하는 xlsx 원본 파일 크기 기준(바이트) — 이 이상이면 동시에 열 수 있는 룸 개수에
@@ -355,42 +303,7 @@ function broadcast(room: Room, message: Uint8Array): void {
 }
 
 /**
- * xlsx 룸의 GRID_CELLS_MAP(Y.Map)에 생긴 변화 하나하나를 canonical 그리드에도 즉시 반영한다.
- * 반드시 `cells.observe(...)`로 등록해서 써야 한다 — Y.Doc의 'update' 이벤트를 훑어 매번 맵
- * 전체를 다시 스캔하는 방식은 삭제(`cells.delete(key)`)를 놓친다: 삭제된 키는 그 시점 맵의
- * `for...of` 순회에 아예 나타나지 않으므로 "이 칸이 지워졌다"는 사실 자체를 관찰할 수 없다.
- * `YMapEvent.changes.keys`는 각 키가 add/update/delete 중 무엇이었는지 직접 알려주므로,
- * 삭제만 별도로 canonical을 0(빈 칸 sentinel)으로 되돌리고, 그 외에는 현재 맵 값을 그대로
- * 읽어 반영한다.
- */
-function applyCellsChangeToCanonical(
-  canonicalGrid: GridDocument,
-  cells: Y.Map<string>,
-  event: Y.YMapEvent<string>,
-): void {
-  for (const [key, change] of event.changes.keys) {
-    const parsed = parseGridCellKey(key);
-    if (!parsed) continue;
-    const { sheetIdx, row, col } = parsed;
-    const sheet = canonicalGrid.sheets[sheetIdx];
-    if (!sheet) continue;
-    if (change.action === 'delete') {
-      // 삭제는 절대 시트를 넓히지 않는다 — 원래 없던 칸이 지워졌다는 건 아무 일도 아니다.
-      if (row >= sheet.rows.length || col >= sheet.rows[row].length) continue;
-      (sheet.rows[row] as MutableGridRow)[col] = 0;
-      continue;
-    }
-    if (!ensureCanonicalCellSlot(sheet, row, col)) continue;
-    const rowArray = sheet.rows[row] as MutableGridRow;
-    const value = cells.get(key) ?? '';
-    const currentCell = rowArray[col];
-    const keptStyle = currentCell !== 0 && currentCell !== undefined ? currentCell.s : undefined;
-    rowArray[col] = value === '' ? 0 : { v: value, ...(keptStyle !== undefined ? { s: keptStyle } : {}) };
-  }
-}
-
-/**
- * canonical 그리드가 스스로 넓어질 수 있는 상한. 클라이언트가 보내는 셀 키는 신뢰할 수 없는
+ * canonical(lazyGrid)이 스스로 넓어질 수 있는 상한. 클라이언트가 보내는 셀 키는 신뢰할 수 없는
  * 입력이므로(조작된 소켓 메시지로 "3:99999999:99999999" 같은 키를 보낼 수 있다), 아래 성장
  * 로직에 반드시 상한이 필요하다 — 없으면 키 하나로 수억 칸짜리 배열을 만들어 서버 메모리를
  * 통째로 날릴 수 있다.
@@ -413,39 +326,99 @@ const MAX_CANONICAL_SHEETS = 512;
 type MutableGridSheet = { -readonly [K in keyof GridSheet]: GridSheet[K] };
 type MutableGridRow = Array<GridCell | 0>;
 
+/** row/col 둘 다 신뢰할 수 있는 좌표 범위 안에 있는지 — 셀·서식 관찰자가 각자 시트를 넓히기
+ * 전에 반드시 거치는 보안 경계다(위 MAX_CANONICAL_ROWS/COLS 주석 참고, 옛 ensureCanonicalCellSlot의
+ * 바로 그 검사). */
+function isWithinCanonicalBounds(row: number, col: number): boolean {
+  return (
+    Number.isInteger(row) &&
+    Number.isInteger(col) &&
+    row >= 0 &&
+    col >= 0 &&
+    row < MAX_CANONICAL_ROWS &&
+    col < MAX_CANONICAL_COLS
+  );
+}
+
 /**
- * canonical 시트가 (row, col) 칸을 담을 수 있도록 행 배열·열 수를 필요한 만큼 넓힌다.
- * 상한을 넘어서는 좌표에는 false를 돌려주고 아무것도 바꾸지 않는다(호출부는 그 변경을 버린다).
+ * xlsx 룸의 GRID_CELLS_MAP(Y.Map)에 생긴 변화 하나하나를 lazyGrid.dirtyOverlay에 반영한다.
+ * 반드시 `cells.observe(...)`로 등록해서 써야 한다 — Y.Doc의 'update' 이벤트를 훑어 매번 맵
+ * 전체를 다시 스캔하는 방식은 삭제(`cells.delete(key)`)를 놓친다: 삭제된 키는 그 시점 맵의
+ * `for...of` 순회에 아예 나타나지 않으므로 "이 칸이 지워졌다"는 사실 자체를 관찰할 수 없다.
+ * `YMapEvent.changes.keys`는 각 키가 add/update/delete 중 무엇이었는지 직접 알려주므로,
+ * 삭제만 별도로 dirtyOverlay에 명시적 0(빈 칸 sentinel)을 써서 되돌리고, 그 외에는 현재 맵
+ * 값을 그대로 읽어 반영한다(`dirtyOverlay.delete(key)`가 아니다 — "편집 안 된 칸"으로
+ * 되돌아가면 원본 값이 다시 보이는 버그가 된다).
+ *
+ * **왜 async인가**: 텍스트만 바뀐 편집이라도 그 칸에 이미 걸려 있던 서식(.s)은 보존해야 한다
+ * (옛 keptStyle과 동일한 의도) — 그러려면 그 칸의 "현재" 값을 알아야 하는데, LazyGridStore의
+ * 읽기(getCell)는 아직 캐시되지 않은 원본 행을 디스크에서 읽어야 할 수도 있어 본질적으로
+ * 비동기다. Yjs의 observe 콜백 자체는 동기여야 하므로(중간에 await할 수 없다), 호출부(seedRoom)는
+ * 이 Promise를 `void`로 흘려보내고 끝난 뒤에 재계산을 잇는다(Task 10이 recomputeFormulasForPage에
+ * 쓴 것과 같은 패턴 — 청크 분류 → Promise.all로 비동기 읽기를 먼저 끝냄 → 동기 쓰기).
  *
  * **왜 관찰자 안에서 즉석으로 넓히는가 (C2의 핵심)**: 클라이언트는 원본 범위 밖 칸에 입력할 때
  * `cells.set(...)`과 `structure.set(...)`(rowCount/colCount 확장)을 **한 트랜잭션 안에서** 하는데,
  * Yjs는 그 트랜잭션의 관찰자를 "그 트랜잭션에서 먼저 건드려진 타입" 순서로 부른다. commitCell은
- * 셀 맵을 먼저 건드리므로 **cells.observe가 structure.observe보다
- * 먼저** 불린다 — 즉 "구조가 먼저 넓어지기를 기다린다"는 설계는 항상 한 박자 늦어 그 편집을
- * 통째로 놓친다(이번 리뷰가 잡아낸 바로 그 조용한 데이터 손실). 그래서 순서에 기대지 않고
- * 셀·서식 관찰자가 각자 필요한 만큼 직접 넓힌다.
+ * 셀 맵을 먼저 건드리므로 **cells.observe가 structure.observe보다 먼저** 불린다 — 즉 "구조가
+ * 먼저 넓어지기를 기다린다"는 설계는 항상 한 박자 늦어 그 편집을 통째로 놓친다. 그래서 순서에
+ * 기대지 않고 셀·서식 관찰자가 각자 필요한 만큼(`growSheet`) 직접 넓힌다.
  */
-function ensureCanonicalCellSlot(sheet: GridSheet, row: number, col: number): boolean {
-  if (!Number.isInteger(row) || !Number.isInteger(col)) return false;
-  if (row < 0 || col < 0 || row >= MAX_CANONICAL_ROWS || col >= MAX_CANONICAL_COLS) return false;
-  const mutable = sheet as MutableGridSheet;
-  const rows = mutable.rows as MutableGridRow[];
-  const colCount = Math.max(mutable.colCount, col + 1);
-  mutable.colCount = colCount;
-  // 사이에 낀 행들은 **빈 배열**로 채운다(`new Array(colCount).fill(0)`이 아니다). 이 함수는
-  // 관찰자 안에서 동기로 불려야 하므로(호출부가 바로 다음 줄에서 rows[row]에 값을 쓴다) 여기서는
-  // 이벤트 루프에 양보할 수 없다 — 그래서 애초에 양보가 필요 없을 만큼 싸게 만든다. 조작된 셀 키
-  // 하나로 30만 행을 만들 때, 폭까지 채우면 약 300MB/220ms지만 빈 배열이면 약 20MB/14ms다.
-  //
-  // 폭이 모자란 행은 이 코드베이스 어디서나 이미 정상 상태다: 내보내기는 열 상한으로
-  // `sheet.colCount`를 쓰고 칸은 `row?.[c]`로 읽으며(xlsx/collab.ts의 해당 주석 참고), 아래
-  // applyCellsChangeToCanonical/applyStylesChangeToCanonical의 삭제 경로도 `rows[row].length`로
-  // 거른다. 실제로 값이 들어가는 행(row)만 colCount까지 채우면 충분하다.
-  while (rows.length <= row) rows.push([]);
-  const rowArray = rows[row];
-  while (rowArray.length < colCount) rowArray.push(0);
-  if (row + 1 > mutable.rowCount) mutable.rowCount = row + 1;
-  return true;
+async function applyCellsChangeToCanonical(
+  store: LazyGridStore,
+  cells: Y.Map<string>,
+  event: Y.YMapEvent<string>,
+): Promise<void> {
+  interface PendingCellChange {
+    readonly key: string;
+    readonly sheetIdx: number;
+    readonly row: number;
+    readonly col: number;
+    readonly deleted: boolean;
+  }
+  const changes: PendingCellChange[] = [];
+  for (const [key, change] of event.changes.keys) {
+    const parsed = parseGridCellKey(key);
+    if (!parsed) continue;
+    const { sheetIdx, row, col } = parsed;
+    if (sheetIdx < 0 || sheetIdx >= store.sheetMeta.length) continue;
+    if (!isWithinCanonicalBounds(row, col)) continue;
+    changes.push({ key, sheetIdx, row, col, deleted: change.action === 'delete' });
+  }
+  if (changes.length === 0) return;
+
+  // 값 쓰기(삭제 아님)만 시트를 넓힌다 — 삭제는 절대 시트를 넓히지 않는다(원래 없던 칸이
+  // 지워졌다는 건 아무 일도 아니다). Map(dirtyOverlay)은 미리 크기를 맞출 필요가 없으므로,
+  // 여기서 늘리는 건 오직 sheetMeta.rowCount/colCount(와 그에 딸린 매핑 배열 길이)뿐이다.
+  for (const c of changes) {
+    if (!c.deleted) growSheet(store, c.sheetIdx, c.row + 1, c.col + 1);
+  }
+
+  // 지금 그 칸의 값을 먼저 읽어 둔다 — 텍스트만 바꾸는 편집이 기존 서식(.s)을 지우지 않기
+  // 위함이다. 삭제는 이 값을 쓰지 않으므로 굳이 읽지 않는다(0으로 채워 Promise.all 모양만 맞춘다).
+  const currentCells = await Promise.all(
+    changes.map((c) => (c.deleted ? Promise.resolve<GridCell | 0>(0) : getCell(store, c.sheetIdx, c.row, c.col))),
+  );
+
+  for (let i = 0; i < changes.length; i += 1) {
+    const c = changes[i];
+    if (c.deleted) {
+      const meta = store.sheetMeta[c.sheetIdx];
+      if (c.row >= meta.rowCount || c.col >= meta.colCount) continue; // 원래 있던 칸이 아니면 할 일 없음
+      setDirtyCell(store, c.sheetIdx, c.row, c.col, 0);
+      continue;
+    }
+    const value = cells.get(c.key) ?? '';
+    const current = currentCells[i];
+    const keptStyle = current !== 0 && current !== undefined ? current.s : undefined;
+    setDirtyCell(
+      store,
+      c.sheetIdx,
+      c.row,
+      c.col,
+      value === '' ? 0 : { v: value, ...(keptStyle !== undefined ? { s: keptStyle } : {}) },
+    );
+  }
 }
 
 /**
@@ -512,143 +485,178 @@ async function drainCanonicalGrowth(room: Room): Promise<void> {
 }
 
 /**
- * GRID_STYLES_MAP(서식 레이어)의 변화를 canonical 그리드에 반영한다 — 리뷰 지적 C1.
+ * GRID_STYLES_MAP(서식 레이어)의 변화를 lazyGrid.dirtyOverlay에 반영한다 — 리뷰 지적 C1.
  *
  * 이게 없으면 **값을 한 글자도 바꾸지 않고 서식만 바꾼 편집**(굵게·색·표시 형식)이 Yjs에만 남고
- * canonical에는 전혀 도달하지 않아, 저장된 파일에서 조용히 사라진다(다른 참여자 화면에는 보이므로
+ * 저장 대상에는 전혀 도달하지 않아, 저장된 파일에서 조용히 사라진다(다른 참여자 화면에는 보이므로
  * 사용자는 저장됐다고 믿는다 — 가장 나쁜 종류의 손실).
  *
- * canonical의 셀은 서식 객체가 아니라 공용 팔레트(grid.styles)의 **인덱스**만 들고 있으므로
- * (GridCell.s), 들어온 CellStyleAttrs를 GridStyle로 변환한 뒤 팔레트에서 같은 서식을 찾거나 새로
- * 추가해 그 인덱스를 셀에 심는다. 이 함수는 순수 JS 객체(canonicalGrid)만 건드리고 Yjs에는 아무것도
- * 쓰지 않으므로 origin 태깅을 신경 쓸 필요가 없다(cells.observe와 동일).
+ * 셀은 서식 객체가 아니라 공용 팔레트(store.styles)의 **인덱스**만 들고 있으므로(GridCell.s),
+ * 들어온 CellStyleAttrs를 GridStyle로 변환한 뒤 팔레트에서 같은 서식을 찾거나 새로 추가해 그
+ * 인덱스를 셀에 심는다. applyCellsChangeToCanonical과 같은 이유로 async다 — "값은 그대로 두고
+ * 서식만 지운다/붙인다"는 기존 의미를 지키려면 먼저 그 칸의 현재 값을 읽어야 한다.
  */
-function applyStylesChangeToCanonical(
-  canonicalGrid: GridDocument,
+async function applyStylesChangeToCanonical(
+  store: LazyGridStore,
   styles: Y.Map<CellStyleAttrs>,
   event: Y.YMapEvent<CellStyleAttrs>,
-): void {
+): Promise<void> {
+  interface PendingStyleChange {
+    readonly key: string;
+    readonly sheetIdx: number;
+    readonly row: number;
+    readonly col: number;
+    readonly attrs: CellStyleAttrs | undefined;
+  }
+  const isMeaningful = (attrs: CellStyleAttrs | undefined): attrs is CellStyleAttrs =>
+    !!attrs && typeof attrs === 'object' && Object.keys(attrs).length > 0;
+
+  const changes: PendingStyleChange[] = [];
   for (const [key, change] of event.changes.keys) {
     const parsed = parseGridCellKey(key);
     if (!parsed) continue;
     const { sheetIdx, row, col } = parsed;
-    const sheet = canonicalGrid.sheets[sheetIdx];
-    if (!sheet) continue;
+    if (sheetIdx < 0 || sheetIdx >= store.sheetMeta.length) continue;
+    if (!isWithinCanonicalBounds(row, col)) continue;
     const attrs = change.action === 'delete' ? undefined : styles.get(key);
-    // 서식이 지워졌을 때(또는 빈 서식이 들어왔을 때)는 **값은 그대로 두고 서식 참조만 뗀다** —
-    // cells.observe의 삭제가 칸을 통째로 0으로 되돌리는 것과 의도적으로 다르다. 저기서는 "내용을
-    // 지웠다"지만 여기서는 "서식만 지웠다"이므로, 칸을 0으로 만들면 멀쩡한 텍스트까지 날아간다.
-    // 값도 원래 비어 있던 칸(서식만 있던 칸)만 완전한 빈 칸(0)으로 되돌린다.
-    if (!attrs || typeof attrs !== 'object' || Object.keys(attrs).length === 0) {
-      if (row >= sheet.rows.length || col >= sheet.rows[row].length) continue;
-      const rowArray = sheet.rows[row] as MutableGridRow;
-      const cell = rowArray[col];
-      if (cell === 0 || cell === undefined) continue;
-      rowArray[col] = cell.v === '' ? 0 : { v: cell.v };
+    changes.push({ key, sheetIdx, row, col, attrs });
+  }
+  if (changes.length === 0) return;
+
+  // 새 서식이 실제로 붙는 경우만 시트를 넓힌다(옛 ensureCanonicalCellSlot의 grow 역할, 이제
+  // growSheet) — 서식을 지우는 쪽은 절대 시트를 넓히지 않는다(아래 루프의 주석 참고).
+  for (const c of changes) {
+    if (isMeaningful(c.attrs)) growSheet(store, c.sheetIdx, c.row + 1, c.col + 1);
+  }
+
+  const currentCells = await Promise.all(changes.map((c) => getCell(store, c.sheetIdx, c.row, c.col)));
+
+  for (let i = 0; i < changes.length; i += 1) {
+    const c = changes[i];
+    const current = currentCells[i];
+    if (!isMeaningful(c.attrs)) {
+      // 서식이 지워졌을 때(또는 빈 서식이 들어왔을 때)는 **값은 그대로 두고 서식 참조만 뗀다** —
+      // cells.observe의 삭제가 칸을 통째로 0으로 되돌리는 것과 의도적으로 다르다. 저기서는
+      // "내용을 지웠다"지만 여기서는 "서식만 지웠다"이므로, 칸을 0으로 만들면 멀쩡한 텍스트까지
+      // 날아간다. 값도 원래 비어 있던 칸(서식만 있던 칸)만 완전한 빈 칸(0)으로 되돌린다.
+      const meta = store.sheetMeta[c.sheetIdx];
+      if (c.row >= meta.rowCount || c.col >= meta.colCount) continue;
+      if (current === 0 || current === undefined) continue;
+      setDirtyCell(store, c.sheetIdx, c.row, c.col, current.v === '' ? 0 : { v: current.v });
       continue;
     }
-    if (!ensureCanonicalCellSlot(sheet, row, col)) continue;
-    const rowArray = sheet.rows[row] as MutableGridRow;
-    const cell = rowArray[col];
-    const styleIndex = findOrAddGridStyleIndex(canonicalGrid, fromCellStyleAttrs(attrs));
-    rowArray[col] = { v: cell === 0 || cell === undefined ? '' : cell.v, s: styleIndex };
+    const styleIndex = findOrAddGridStyleIndex(store, fromCellStyleAttrs(c.attrs));
+    setDirtyCell(store, c.sheetIdx, c.row, c.col, {
+      v: current === 0 || current === undefined ? '' : current.v,
+      s: styleIndex,
+    });
   }
 }
 
-/** 새로 추가된 시트 자리를 채우는 최소한의 빈 GridSheet. */
-function makeEmptyCanonicalSheet(name: string): GridSheet {
-  return {
-    name,
-    rowCount: 1,
-    colCount: 1,
-    colWidths: [],
-    merges: [],
-    freezeRows: 0,
-    freezeCols: 0,
-    rows: [[0]],
-  };
+/** 새로 추가된 시트 자리를 채우는 최소한의 빈 시트 메타. */
+function makeEmptyLazySheetMeta(name: string): LazyGridSheetMeta {
+  return { name, rowCount: 1, colCount: 1, colWidths: [], merges: [], freezeRows: 0, freezeCols: 0 };
 }
 
 /**
- * canonicalGrid.sheets가 sheetIdx 자리를 갖도록 (필요하면 중간 구멍까지) 늘린다.
+ * lazyGrid.sheetMeta가 sheetIdx 자리를 갖도록 (필요하면 중간 구멍까지) 늘린다.
  * 구멍(구조 맵에 대응하는 키가 없는 중간 자리)은 "삭제된 자리"로 표시해 내보내기에서 빠지게 한다 —
  * 배열에서 splice하면 그 뒤 시트 번호가 전부 밀려 Yjs 셀 키가 다른 시트를 가리키기 때문이다.
+ *
+ * 새로 만든 시트 자리는 원본에 없던 시트이므로 logicalToOriginalRow/Col(그리고 rowIndex)에도
+ * 그 자리에 빈 매핑 배열을 push해 자리를 맞추고, growSheet(1, 1)로 그 매핑 배열을 즉시
+ * rowCount/colCount(각 1)와 같은 길이까지 채운다 — 안 그러면 매핑 배열 길이가 rowCount보다
+ * 짧은 채로 남아, 이 시트를 대상으로 한 이후의 applyRowShift/applyColShift(Array.prototype.splice
+ * 기반)가 짧은 배열 길이에 clamp되어 엉뚱한 위치에 삽입할 수 있다("매핑 배열 길이 >=
+ * rowCount/colCount"는 이 코드베이스가 항상 지키는 불변식이다 — ingestXlsxLazily의 항등 매핑,
+ * growSheet의 패딩 모두 이 불변식을 유지한다).
  */
-function ensureCanonicalSheetSlot(
+function ensureLazySheetSlot(
   room: Room,
   structure: Y.Map<SheetStructure>,
   sheetIdx: number,
-): MutableGridSheet | null {
-  const grid = room.canonicalGrid;
-  if (!grid || sheetIdx < 0 || sheetIdx >= MAX_CANONICAL_SHEETS) return null;
-  const sheets = grid.sheets as GridSheet[];
-  while (sheets.length <= sheetIdx) {
-    const idx = sheets.length;
-    sheets.push(makeEmptyCanonicalSheet(`Sheet${idx + 1}`));
+): LazyGridSheetMeta | null {
+  const store = room.lazyGrid;
+  if (!store || sheetIdx < 0 || sheetIdx >= MAX_CANONICAL_SHEETS) return null;
+  while (store.sheetMeta.length <= sheetIdx) {
+    const idx = store.sheetMeta.length;
+    store.sheetMeta.push(makeEmptyLazySheetMeta(`Sheet${idx + 1}`));
+    store.rowIndex.push([]);
+    store.logicalToOriginalRow.push([]);
+    store.logicalToOriginalCol.push([]);
+    growSheet(store, idx, 1, 1);
     if (idx !== sheetIdx && !structure.has(String(idx))) room.removedSheetIndices.add(idx);
   }
-  return sheets[sheetIdx] as MutableGridSheet;
+  return store.sheetMeta[sheetIdx];
 }
 
 /**
- * GRID_STRUCTURE_MAP(시트 구조)의 변화를 canonical 그리드에 반영한다 — 리뷰 지적 C2.
+ * GRID_STRUCTURE_MAP(시트 구조)의 변화를 lazyGrid에 반영한다 — 리뷰 지적 C2.
  *
  * 시트 이름 변경·추가·삭제·순서 변경과 행/열 수 증감을 모두 여기서 받는다. 삭제와 순서는
- * canonicalGrid를 재배치하지 않고 room의 별도 집합/맵에 모아 뒀다가 내보내기 시점에
+ * lazyGrid를 재배치하지 않고 room의 별도 집합/맵에 모아 뒀다가 내보내기 시점에
  * XlsxExportOptions로 넘긴다(인덱스 = 시트 식별자라 배열을 건드릴 수 없다 — 그쪽 주석 참고).
  *
  * 행/열 **데이터의 이동**(행 삽입 시 아래로 밀기 등)은 여기서 하지 않는다 — 그건 별도의
- * MESSAGE_GRID_STRUCTURE_OP 메시지와 applyGridStructureOp가 canonical에서 직접 처리한다.
- * 이 함수가 받는 rowCount/colCount 변경은 "사용자가 시트 끝을 넘겨 입력해서 시트가 넓어졌다"
- * (commitCell / 툴바의 행·열 추가 버튼)에 해당하는 **순수한 확장**뿐이고, 기존 데이터의 자리는
- * 그대로다. 두 경로는 서로 겹치지 않는다: 확장은 여기서, 자리를 옮기는 삽입·삭제는 저기서.
+ * MESSAGE_GRID_STRUCTURE_OP 메시지와 applyGridStructureOp가 처리한다. 이 함수가 받는
+ * rowCount/colCount 변경은 "사용자가 시트 끝을 넘겨 입력해서 시트가 넓어졌다"(commitCell / 툴바의
+ * 행·열 추가 버튼)에 해당하는 **순수한 확장**뿐이고, 기존 데이터의 자리는 그대로다. 두 경로는
+ * 서로 겹치지 않는다: 확장은 여기서, 자리를 옮기는 삽입·삭제는 저기서.
+ *
+ * **Task 11 이전과 달라진 점**: 그때는 배열 패딩(rows 채우기)이 최대 300MB급 무거운 작업이라
+ * 반드시 canonicalGrowth 체인에 예약해야 했다(growCanonicalRows/widenCanonicalRows, 청크+양보).
+ * `growSheet`(LazyGridStore)는 정수 매핑 배열만 채우므로 이제 항상 동기·즉시 완료된다 — 그래서
+ * 이 함수는 **더 이상 `enqueueCanonicalGrowth`로 감싸지 않고 structure.observe에서 직접, 동기로**
+ * 부른다(실제로 감싸봤더니 `tests/roomStructureSync.test.ts`의 시트 이름 변경·추가·삭제·순서
+ * 변경 테스트가 깨졌다 — 원인을 더 파기보다, 검증된 대로 직접 호출로 되돌렸다). 이 함수 자체가
+ * 통째로 동기이므로 실행이 시작되면 중간에 다른 작업이 끼어들 수 없다(JS는 단일 스레드) — 그래서
+ * `applyGridStructureOp`(행/열 삽입·삭제, enqueueCanonicalGrowth로 감싸는 별도 비동기 체인)와
+ * 뒤섞일 수 있는 건 오직 "어느 쪽이 먼저 완전히 끝나느냐"라는 순서 문제뿐이고, 그 순서는 애초에
+ * Yjs 트랜잭션이 도착한 순서를 그대로 따른다(구조 변경 메시지와 확장 메시지가 같은 트랜잭션 안에
+ * 섞여 오지 않는 한 겹칠 일이 없다).
  */
 function applyStructureChangeToCanonical(
   room: Room,
   structure: Y.Map<SheetStructure>,
   event: Y.YMapEvent<SheetStructure>,
 ): void {
-  if (!room.canonicalGrid) return;
+  if (!room.lazyGrid) return;
+  const store = room.lazyGrid;
   for (const [key, change] of event.changes.keys) {
     const sheetIdx = Number(key);
     if (!Number.isInteger(sheetIdx) || sheetIdx < 0 || sheetIdx >= MAX_CANONICAL_SHEETS) continue;
     if (change.action === 'delete') {
-      if (sheetIdx < room.canonicalGrid.sheets.length) room.removedSheetIndices.add(sheetIdx);
+      if (sheetIdx < store.sheetMeta.length) room.removedSheetIndices.add(sheetIdx);
       continue;
     }
     const value = structure.get(key);
     if (!value || typeof value !== 'object') continue;
     // 지웠던 자리를 다시 쓰면(되돌리기 등) 삭제 표시를 거둔다.
     room.removedSheetIndices.delete(sheetIdx);
-    const sheet = ensureCanonicalSheetSlot(room, structure, sheetIdx);
-    if (!sheet) continue;
-    if (typeof value.name === 'string' && value.name.trim() !== '') sheet.name = value.name;
+    const meta = ensureLazySheetSlot(room, structure, sheetIdx);
+    if (!meta) continue;
+    if (typeof value.name === 'string' && value.name.trim() !== '') meta.name = value.name;
     if (Number.isInteger(value.rowCount) && value.rowCount > 0) {
       const rowCount = Math.min(value.rowCount, MAX_CANONICAL_ROWS);
-      // 행이 늘어난 경우에만 배열을 채운다 — 줄어든 경우엔 rowCount만 낮춘다(내보내기가 그 뒤를
-      // 무시하고 ExcelJS 쪽 꼬리 행도 잘라낸다). 배열을 실제로 자르면 그 사이 도착한 편집을 잃는다.
-      //
-      // rowCount(스칼라)는 동기로 반영하고, **배열 패딩만** 백그라운드 체인으로 넘긴다: 이
-      // rowCount는 조작된 구조 메시지 하나로 상한(30만)까지 뛸 수 있어 동기로 할당하면 이벤트
-      // 루프가 통째로 멈춘다. 늦게 채워져도 안전한 이유는 Room.canonicalGrowth 주석 참고.
-      sheet.rowCount = rowCount;
-      if ((sheet.rows as MutableGridRow[]).length < rowCount) {
-        enqueueCanonicalGrowth(room, () => growCanonicalRows(sheet, rowCount));
+      // 행이 늘어난 경우에만 매핑 배열을 growSheet로 채운다 — 줄어든 경우엔 rowCount만
+      // 낮춘다(내보내기가 그 뒤를 무시하고 ExcelJS 쪽 꼬리 행도 잘라낸다). 매핑 배열을 실제로
+      // 자르면 그 사이 도착한 편집(dirtyOverlay)의 좌표 체계가 깨진다 — growSheet 주석과 동일한 원칙.
+      if (rowCount > meta.rowCount) {
+        growSheet(store, sheetIdx, rowCount, meta.colCount);
+      } else {
+        meta.rowCount = rowCount;
       }
     }
     if (Number.isInteger(value.colCount) && value.colCount > 0) {
       const colCount = Math.min(value.colCount, MAX_CANONICAL_COLS);
-      const previousColCount = sheet.colCount;
-      sheet.colCount = colCount;
-      // 열 패딩은 "행 수 × 늘어난 열 수"라 행 패딩보다도 클 수 있다 — 같은 체인에 얹어
-      // 청크마다 양보하게 한다. 실제로 넓어졌을 때만 예약한다(열이 줄거나 그대로인 구조 변경까지
-      // 30만 행짜리 무의미한 스캔을 예약하지 않도록).
-      if (colCount > previousColCount) {
-        enqueueCanonicalGrowth(room, () => widenCanonicalRows(sheet, colCount));
+      if (colCount > meta.colCount) {
+        growSheet(store, sheetIdx, meta.rowCount, colCount);
+      } else {
+        meta.colCount = colCount;
       }
     }
-    if (Number.isInteger(value.freezeRows)) sheet.freezeRows = value.freezeRows as number;
-    if (Number.isInteger(value.freezeCols)) sheet.freezeCols = value.freezeCols as number;
+    if (Number.isInteger(value.freezeRows)) meta.freezeRows = value.freezeRows as number;
+    if (Number.isInteger(value.freezeCols)) meta.freezeCols = value.freezeCols as number;
   }
   rebuildSheetDisplayOrder(room, structure);
 }
@@ -688,14 +696,13 @@ function exportOptionsFor(room: Room) {
  * 는 이미 실패를 정상적으로 처리한다(저장 실패 표시, 에러 로그).
  */
 async function exportXlsxWithFallback(room: Room, originalXlsxBytes: Uint8Array): Promise<Uint8Array> {
-  const grid = room.canonicalGrid!;
+  const store = room.lazyGrid!;
   const options = exportOptionsFor(room);
   try {
     return await exportXlsxFromGrid(
       originalXlsxBytes,
-      grid,
+      store,
       room.baselineSheetExtents!,
-      room.dirtyCells,
       room.structuralOps,
       options,
     );
@@ -704,7 +711,7 @@ async function exportXlsxWithFallback(room: Room, originalXlsxBytes: Uint8Array)
       `xlsx 내보내기 실패, 스트리밍 폴백으로 재시도 (문서 ${room.docId}):`,
       error,
     );
-    return exportXlsxFromGridStreaming(originalXlsxBytes, grid, room.dirtyCells, room.structuralOps, options);
+    return exportXlsxFromGridStreaming(originalXlsxBytes, store, room.structuralOps, options);
   }
 }
 
@@ -751,31 +758,35 @@ async function exportXlsxWithFallback(room: Room, originalXlsxBytes: Uint8Array)
 const RECOMPUTE_YIELD_EVERY_N_ROWS = Math.max(1, Math.min(YIELD_EVERY_N_ROWS, Math.ceil(PAGE_SIZE_ROWS / 4)));
 
 async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: number): Promise<void> {
-  if (!room.canonicalGrid) return;
-  const sheet = room.canonicalGrid.sheets[sheetIdx];
-  if (!sheet) return;
+  const store = room.lazyGrid;
+  if (!store) return;
+  const meta = store.sheetMeta[sheetIdx];
+  if (!meta) return;
   const computed = room.ydoc.getMap<string>(GRID_COMPUTED_MAP);
-  // Task 8과 같은 임시 어댑터 — room.lazyGrid 필드는 Task 14에서 정식으로 생기기 전까지는 이
-  // 어댑터로 room.canonicalGrid를 LazyGridStore처럼 감싸 넘긴다(위 lazyGridStoreAdapterForCanonicalGrid
-  // 주석 참고). 디스크를 건드리지 않고 항상 캐시 히트로만 동작한다.
-  const store = lazyGridStoreAdapterForCanonicalGrid(room.canonicalGrid);
   const pageStart = page * PAGE_SIZE_ROWS;
-  const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, sheet.rows.length);
+  const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, meta.rowCount);
   for (let start = pageStart; start < pageEnd; start += RECOMPUTE_YIELD_EVERY_N_ROWS) {
     const end = Math.min(start + RECOMPUTE_YIELD_EVERY_N_ROWS, pageEnd);
+    // "이 칸이 수식인가"를 판정하려면 원본 텍스트가 필요하다 — getCell은 더티 오버레이를 먼저
+    // 보고 없으면 디스크/캐시에서 읽으므로, 편집된 칸이든 원본 그대로인 칸이든 항상 정확한
+    // "지금" 텍스트를 준다(seedGridPageFromXlsx의 resolveGridCell과 같은 규칙, xlsx/collab.ts 참고).
+    // 청크 안의 모든 좌표를 한 번에 Promise.all로 흘려보내 디스크 왕복을 겹치게 한다.
+    const coords: Array<{ r: number; c: number }> = [];
+    for (let r = start; r < end; r += 1) {
+      for (let c = 0; c < meta.colCount; c += 1) coords.push({ r, c });
+    }
+    const cellsAtCoords = await Promise.all(coords.map(({ r, c }) => getCell(store, sheetIdx, r, c)));
+
     const nonFormulaKeys: string[] = [];
     const formulaCells: Array<{ r: number; c: number; key: string }> = [];
-    for (let r = start; r < end; r += 1) {
-      const row = sheet.rows[r];
-      if (!row) continue;
-      for (let c = 0; c < row.length; c += 1) {
-        const cell = row[c];
-        const key = gridCellKey(sheetIdx, r, c);
-        if (cell === 0 || !cell.v.startsWith('=')) {
-          nonFormulaKeys.push(key);
-        } else {
-          formulaCells.push({ r, c, key });
-        }
+    for (let i = 0; i < coords.length; i += 1) {
+      const { r, c } = coords[i];
+      const cell = cellsAtCoords[i];
+      const key = gridCellKey(sheetIdx, r, c);
+      if (cell === 0 || cell === undefined || !cell.v.startsWith('=')) {
+        nonFormulaKeys.push(key);
+      } else {
+        formulaCells.push({ r, c, key });
       }
     }
     // Yjs의 transact() 콜백은 반드시 동기여야 한다(비동기 콜백을 넘기면 첫 await에서 콜백이
@@ -910,15 +921,18 @@ async function refreshSeededPagesAfterShift(
   sheetIdx: number,
   rowExtentBefore: number,
 ): Promise<void> {
-  const grid = room.canonicalGrid;
-  if (!grid) return;
-  const sheet = grid.sheets[sheetIdx];
-  if (!sheet) return;
+  const store = room.lazyGrid;
+  if (!store) return;
+  const meta = store.sheetMeta[sheetIdx];
+  if (!meta) return;
   const subscribed = getSubscribedPageUnion(room, sheetIdx);
   const pages = [...new Set<number>([...subscribed, ...seededPagesInYdoc(room, sheetIdx)])].sort((a, b) => a - b);
   // 비울 행 범위는 삽입·삭제 **전후 중 더 넓은 쪽**까지 잡아야 한다 — 삭제로 시트가 짧아진 경우
   // 새 길이로 자르면 옛 꼬리 행의 키가 Yjs에 남아, 이제 존재하지 않는 행이 화면에 계속 보인다.
-  const rowExtent = Math.max(rowExtentBefore, sheet.rows.length, sheet.rowCount);
+  // (Task 11 이전에는 sheet.rows.length도 함께 봤다 — 그건 canonicalGrid가 배열을 미리 늘려둔
+  // 만큼 여유가 있을 수 있어서였다. LazyGridStore는 그런 여분의 물리적 배열이 없으므로
+  // rowExtentBefore/현재 rowCount 두 값의 더 큰 쪽이면 충분하다.)
+  const rowExtent = Math.max(rowExtentBefore, meta.rowCount);
 
   for (const page of pages) {
     await unseedGridPageFromXlsx(room.ydoc, sheetIdx, page, rowExtent);
@@ -929,7 +943,7 @@ async function refreshSeededPagesAfterShift(
       cancelPendingUnseed(room.docId, sheetIdx, page);
       continue;
     }
-    await seedGridPageFromXlsx(room.ydoc, lazyGridStoreAdapterForCanonicalGrid(grid), sheetIdx, page);
+    await seedGridPageFromXlsx(room.ydoc, store, sheetIdx, page);
     await recomputeFormulasForPage(room, sheetIdx, page);
     if (rooms.get(room.docId) !== room) return;
   }
@@ -993,15 +1007,15 @@ function shiftDirtyCellKeys(
 
 async function applyGridStructureOp(room: Room, op: GridStructureOp): Promise<void> {
   if (rooms.get(room.docId) !== room) return; // 룸이 이미 닫혔다(체인에 줄 서 있는 동안)
-  const grid = room.canonicalGrid;
-  if (!grid) return;
-  const sheet = grid.sheets[op.sheet];
-  if (!sheet) return;
+  const store = room.lazyGrid;
+  if (!store) return;
+  const meta = store.sheetMeta[op.sheet];
+  if (!meta) return;
   if (room.removedSheetIndices.has(op.sheet)) return; // 협업 중 삭제된 시트 자리
 
   const onRows = op.kind === 'insertRows' || op.kind === 'deleteRows';
   const insert = op.kind === 'insertRows' || op.kind === 'insertCols';
-  const extent = onRows ? sheet.rowCount : sheet.colCount;
+  const extent = onRows ? meta.rowCount : meta.colCount;
   const limit = onRows ? MAX_CANONICAL_ROWS : MAX_CANONICAL_COLS;
 
   if (insert) {
@@ -1017,37 +1031,43 @@ async function applyGridStructureOp(room: Room, op: GridStructureOp): Promise<vo
     if (extent - op.count < 1) return; // 마지막 남은 행/열은 지울 수 없다(클라이언트 가드와 동일)
   }
 
-  const rowExtentBefore = Math.max(sheet.rows.length, sheet.rowCount);
+  const rowExtentBefore = meta.rowCount;
 
-  switch (op.kind) {
-    case 'insertRows':
-      insertCanonicalRows(sheet, op.at, op.count);
-      break;
-    case 'deleteRows':
-      deleteCanonicalRows(sheet, op.at, op.count);
-      break;
-    case 'insertCols':
-      await insertCanonicalCols(sheet, op.at, op.count);
-      break;
-    case 'deleteCols':
-      await deleteCanonicalCols(sheet, op.at, op.count);
-      break;
+  // logicalToOriginalRow/Col 매핑과 dirtyOverlay 키 이동, rowCount/colCount 갱신은
+  // applyRowShift/applyColShift(lazyGridStore.ts, Task 6)가 전부 동기로 처리한다 — 더 이상
+  // 청크+양보가 필요 없다(정수 매핑 배열 스플라이스일 뿐이므로, Room.canonicalGrowth 주석 참고).
+  // 다만 그 두 함수는 merges/colWidths까지는 건드리지 않으므로(시트 데이터 이동만 책임진다),
+  // 이 자리에서 gridShift.ts의 shiftMerges를 그대로 재사용해 직접 보정한다 — Task 11 이전에
+  // insertCanonicalRows 등이 내부적으로 하던 바로 그 일이다.
+  if (onRows) {
+    applyRowShift(store, op.sheet, op.at, op.count, insert);
+  } else {
+    applyColShift(store, op.sheet, op.at, op.count, insert);
   }
-  // 열 방향은 청크마다 양보하므로 그 사이에 룸이 닫혔을 수 있다.
-  if (rooms.get(room.docId) !== room) return;
+  meta.merges = shiftMerges(meta.merges, onRows ? 'row' : 'col', op.at, op.count, insert);
+  if (!onRows) {
+    // 열 너비도 gridShift.ts의 옛 insertCanonicalCols/deleteCanonicalCols와 같은 규칙으로 직접
+    // 보정한다 — 새로 끼워지는 열은 밀려나는 그 열의 너비를 그대로 물려받는다(엑셀과 같은 동작).
+    const widths = meta.colWidths;
+    if (insert) {
+      if (widths.length > op.at) {
+        meta.colWidths = [...widths.slice(0, op.at), ...new Array<number>(op.count).fill(widths[op.at]), ...widths.slice(op.at)];
+      }
+    } else if (widths.length > op.at) {
+      meta.colWidths = [...widths.slice(0, op.at), ...widths.slice(op.at + op.count)];
+    }
+  }
 
-  // 이 연산을 기록·반영한다 — 내보내기(exportXlsxFromGrid)가 원본을 다시 로드한 워크북에 같은
-  // 순서로 재생하기 위한 로그(structuralOps)와, "이 칸이 편집된 적 있다"는 표시(dirtyCells)도
-  // canonical과 똑같이 옮겨야 한다(Room.dirtyCells 주석 참고).
+  // 이 연산을 기록한다 — 내보내기(exportXlsxFromGrid)가 원본을 다시 로드한 워크북에 같은 순서로
+  // 재생하기 위한 로그다.
   room.structuralOps.push({ sheet: op.sheet, kind: op.kind, at: op.at, count: op.count });
-  shiftDirtyCellKeys(room.dirtyCells, op.sheet, onRows ? 'row' : 'col', op.at, op.count, insert);
 
-  // 1) 병합 — canonical 쪽은 gridShift가 이미 보정했고, 클라이언트가 렌더링에 쓰는 Yjs 맵도
+  // 1) 병합 — canonical 쪽은 바로 위에서 이미 보정했고, 클라이언트가 렌더링에 쓰는 Yjs 맵도
   //    같은 값으로 맞춘다(이 맵은 윈도잉 대상이 아니라 항상 전체가 들어 있다).
   const mergesMap = room.ydoc.getMap<readonly GridMergeShape[]>(GRID_MERGES_MAP);
   const mergesKey = String(op.sheet);
   room.ydoc.transact(() => {
-    if (sheet.merges.length > 0) mergesMap.set(mergesKey, sheet.merges);
+    if (meta.merges.length > 0) mergesMap.set(mergesKey, meta.merges);
     else if (mergesMap.has(mergesKey)) mergesMap.delete(mergesKey);
   }, GRID_STRUCTURE_SHIFT_ORIGIN);
 
@@ -1074,13 +1094,13 @@ async function applyGridStructureOp(room: Room, op: GridStructureOp): Promise<vo
   const previous = structure.get(mergesKey);
   const next: SheetStructure = {
     ...(previous ?? {
-      name: sheet.name,
-      freezeRows: sheet.freezeRows,
-      freezeCols: sheet.freezeCols,
+      name: meta.name,
+      freezeRows: meta.freezeRows,
+      freezeCols: meta.freezeCols,
     }),
-    rowCount: sheet.rowCount,
-    colCount: sheet.colCount,
-    colWidths: sheet.colWidths,
+    rowCount: meta.rowCount,
+    colCount: meta.colCount,
+    colWidths: meta.colWidths,
   };
   room.ydoc.transact(() => {
     structure.set(mergesKey, next);
@@ -1094,24 +1114,26 @@ async function seedRoom(room: Room): Promise<void> {
     if (!meta) return;
     const original = await store.readOriginal(docId, meta.ext);
     if (kind === 'xlsx') {
-      const grid = await parseXlsxToGrid(original);
-      room.canonicalGrid = grid;
+      const lazyStore = await ingestXlsxLazily(docId, original);
+      room.lazyGrid = lazyStore;
       // 이후 모든 내보내기의 기준 원본 — 왜 매번 디스크를 다시 읽지 않는지는 Room.originalXlsxBytes 주석 참고.
       room.originalXlsxBytes = new Uint8Array(original);
       // 전체 그리드가 아니라 시트별 크기만 남긴다 — Room.baselineSheetExtents 주석 참고.
-      room.baselineSheetExtents = grid.sheets.map((s) => ({ rowCount: s.rowCount, colCount: s.colCount }));
+      room.baselineSheetExtents = lazyStore.sheetMeta.map((s) => ({ rowCount: s.rowCount, colCount: s.colCount }));
       // 셀 데이터는 여기서 채우지 않는다(윈도잉 컷오버) — 구조/병합 메타데이터만 전량 채우고,
       // 실제 셀은 클라이언트가 "이 페이지들을 보고 있다"고 알려올 때 그 페이지만 채운다
       // (reconcilePageSubscriptions). 룸이 막 생긴 이 시점에는 구독자가 하나도 없으므로 채울
       // 페이지도 없다. 큰 xlsx를 열 때 전체 셀을 Yjs에 심으며 서버가 멈추던 문제와, 그 전체를
       // 모든 클라이언트에 전파하던 비용이 여기서 사라진다.
-      await seedGridStructureOnly(ydoc, grid);
+      await seedGridStructureOnly(ydoc, lazyStore.sheetMeta);
       // 서식도 구조 메타데이터와 같은 부류다 — **절대 윈도잉하지 않고** 여기서 전량 한 번만 채운
       // 뒤 어떤 unseed 경로에서도 지우지 않는다. 서식을 셀 값처럼 윈도잉하면, 서버에 서식 편집을
       // canonical로 되반영하는 경로가 없기 때문에 페이지가 비워졌다 다시 채워지는 순간 사용자가
       // 적용해 둔 굵게·색·표시 형식이 조용히 원본 서식으로 되돌아간다
-      // (seedGridStylesFromXlsx 주석 참고).
-      await seedGridStylesFromXlsx(ydoc, lazyGridStoreAdapterForCanonicalGrid(grid));
+      // (seedGridStylesFromXlsx 주석 참고). LazyGridStore 기준으로는 이 한 번의 전량 시딩이
+      // 시트 전체를 디스크에서 훑는 유일한 지점이다(스펙 문서의 알려진 특성 — 서식은 어차피
+      // 한 번은 전량 읽어야 한다, 다 읽고 나면 Yjs로 흘려보내고 버린다).
+      await seedGridStylesFromXlsx(ydoc, lazyStore);
       const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
       cells.observe((event) => {
         // 서버 자신이 창을 채우거나(seed) 비운(unseed) 변경은 사용자 편집이 아니므로 canonical에
@@ -1121,26 +1143,29 @@ async function seedRoom(room: Room): Promise<void> {
         // 새로 채운 페이지의 수식 계산은 reconcilePageSubscriptions가 직접 부르므로 여기서
         // 다시 걸 필요도 없다.
         if (event.transaction.origin === GRID_WINDOW_SEED_ORIGIN) return;
-        applyCellsChangeToCanonical(grid, cells, event);
-        // 내보내기가 "무엇을 다시 써야 하는지" 알 수 있도록 실제로 편집된 좌표를 기록한다 —
-        // Room.dirtyCells 주석 참고. 키 형식이 gridCellKey와 동일하므로 그대로 담는다.
-        for (const key of event.changes.keys.keys()) room.dirtyCells.add(key);
-        // 이번 배치에서 실제로 바뀐 셀이 속한 시트만 재계산한다 — event.changes.keys가
-        // "시트:행:열" 키별로 add/update/delete를 알려주므로 거기서 시트 인덱스를 뽑아낸다.
-        // 재계산 대상은 그 시트 전체가 아니라 "지금 구독 중인 페이지들"이다 — 수식이 창 밖의
-        // 셀을 참조할 수 있으니 편집된 페이지 하나로는 부족하지만, 아무도 안 보는 페이지까지
-        // 계산해 Yjs에 쌓을 이유는 없다(recomputeFormulasForPage 주석 참고).
-        // 재계산 자체는 비동기(양보 지점 있음)라 여기서 기다리지 않고 흘려보낸다 — 실패해도
-        // 콘솔에만 로그를 남기고 소켓 메시지 처리 자체를 막지 않기 위함.
-        const touchedSheets = new Set<number>();
-        for (const key of event.changes.keys.keys()) {
-          const parsed = parseGridCellKey(key);
-          if (parsed) touchedSheets.add(parsed.sheetIdx);
-        }
-        // 페이지마다 따로 흘려보내지 않고 **하나의 체인**으로 순서대로 돈다 — 그러지 않으면 여러
-        // 페이지의 동기 재계산 블록이 양보 없이 연달아 붙어 이벤트 루프가 멈춘다
-        // (recomputeSubscribedPagesInBackground 주석 참고).
-        recomputeSubscribedPagesInBackground(room, touchedSheets);
+        // applyCellsChangeToCanonical은 이제 async다(LazyGridStore.getCell이 디스크를 읽어야 할
+        // 수도 있어서) — Yjs observe 콜백 자체는 동기여야 하므로 흘려보내고, 재계산은 그 완료를
+        // 기다린 뒤 잇는다(재계산이 더티 오버레이가 아직 안 채워진 값을 볼 수 없도록).
+        void applyCellsChangeToCanonical(lazyStore, cells, event)
+          .then(() => {
+            // 이번 배치에서 실제로 바뀐 셀이 속한 시트만 재계산한다 — event.changes.keys가
+            // "시트:행:열" 키별로 add/update/delete를 알려주므로 거기서 시트 인덱스를 뽑아낸다.
+            // 재계산 대상은 그 시트 전체가 아니라 "지금 구독 중인 페이지들"이다 — 수식이 창 밖의
+            // 셀을 참조할 수 있으니 편집된 페이지 하나로는 부족하지만, 아무도 안 보는 페이지까지
+            // 계산해 Yjs에 쌓을 이유는 없다(recomputeFormulasForPage 주석 참고).
+            const touchedSheets = new Set<number>();
+            for (const key of event.changes.keys.keys()) {
+              const parsed = parseGridCellKey(key);
+              if (parsed) touchedSheets.add(parsed.sheetIdx);
+            }
+            // 페이지마다 따로 흘려보내지 않고 **하나의 체인**으로 순서대로 돈다 — 그러지 않으면
+            // 여러 페이지의 동기 재계산 블록이 양보 없이 연달아 붙어 이벤트 루프가 멈춘다
+            // (recomputeSubscribedPagesInBackground 주석 참고).
+            recomputeSubscribedPagesInBackground(room, touchedSheets);
+          })
+          .catch((error: unknown) => {
+            console.error(`셀 변경 반영 실패 (문서 ${room.docId}):`, error);
+          });
       });
       // 서식(C1)과 구조(C2)도 셀 값과 똑같이 canonical에 되반영한다 — 셀 값만 관찰하던 것이
       // "서식만 바꾼 편집"과 "원본 범위 밖 편집·모든 구조 변경"이 저장된 파일에서 조용히 사라지던
@@ -1154,8 +1179,9 @@ async function seedRoom(room: Room): Promise<void> {
         // 안의 인덱스(GridCell.s)라 행/열을 옮기면 이미 함께 따라온 상태다. 여기서 또 반영하면
         // 같은 이동이 두 번 적용된다(shiftGridStyleKeys / GRID_STRUCTURE_SHIFT_ORIGIN 주석 참고).
         if (event.transaction.origin === GRID_STRUCTURE_SHIFT_ORIGIN) return;
-        applyStylesChangeToCanonical(grid, styles, event);
-        for (const key of event.changes.keys.keys()) room.dirtyCells.add(key);
+        void applyStylesChangeToCanonical(lazyStore, styles, event).catch((error: unknown) => {
+          console.error(`서식 변경 반영 실패 (문서 ${room.docId}):`, error);
+        });
       });
       const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
       structure.observe((event) => {
@@ -1193,7 +1219,7 @@ async function flushToStore(room: Room): Promise<void> {
     // 디스크의 현재 파일이 아니라 룸을 열 때의 원본을 쓴다 — 이유는 Room.originalXlsxBytes 주석 참고
     // (안 그러면 두 번째 저장부터 시트 삭제가 엉뚱한 시트에 적용된다).
     const original = room.originalXlsxBytes ?? (await store.readOriginal(docId, meta.ext));
-    if (!room.canonicalGrid || !room.baselineSheetExtents) {
+    if (!room.lazyGrid || !room.baselineSheetExtents) {
       console.error(`동시편집 저장 실패 — canonical 그리드 없음 (문서 ${docId})`);
     } else {
       // 진행 중인 행/열 이동이 끝난 뒤에 읽는다 — 반쪽 상태를 저장하지 않기 위해(리뷰 지적 I-1,
@@ -1356,7 +1382,7 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
   if (!meta) return null;
   const original = await store.readOriginal(docId, meta.ext);
   if (room.kind === 'xlsx') {
-    if (!room.canonicalGrid || !room.baselineSheetExtents) return null;
+    if (!room.lazyGrid || !room.baselineSheetExtents) return null;
     // flushToStore와 같은 이유로 진행 중인 행/열 이동을 먼저 기다린다 — 이 경로는 사용자가 방금
     // 누른 다운로드라 반쪽 상태가 그대로 손에 들어간다(리뷰 지적 I-1).
     await drainCanonicalGrowth(room);
@@ -1407,7 +1433,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     autosaveTimer: null,
     ready: Promise.resolve(), // 아래에서 즉시 덮어씀 — seedRoom(room)이 room 자신을 참조해야 해서
     suppressAutosaveReschedule: false,
-    canonicalGrid: null,
+    lazyGrid: null,
     baselineSheetExtents: null,
     dirtyCells: new Set<string>(),
     structuralOps: [],
@@ -1493,6 +1519,7 @@ function closeConn(room: Room, conn: WebSocket): void {
       cancelPendingUnseeds(room.docId);
       rooms.delete(room.docId);
       largeRoomDocIds.delete(room.docId);
+      if (room.lazyGrid) void closeLazyGridStore(room.lazyGrid);
       void room.ready
         .then(() => queueFlush(room))
         .catch((error) => console.error(`동시편집 종료 저장 실패 (문서 ${room.docId}):`, error))
@@ -1826,7 +1853,8 @@ async function reconcilePageSubscriptions(
   before: Set<number>,
   after: Set<number>,
 ): Promise<void> {
-  if (!room.canonicalGrid) return;
+  if (!room.lazyGrid) return;
+  const lazyStore = room.lazyGrid;
 
   // 1) 취소는 먼저, 동기적으로 전부 처리한다. 아래 채우기 루프는 페이지마다 await로 양보하므로,
   //    취소를 그 루프 안에서 하면 "앞 페이지를 채우는 동안 뒤 페이지의 제거 타이머가 발동"하는
@@ -1836,7 +1864,7 @@ async function reconcilePageSubscriptions(
   // 2) 새로 구독된 페이지를 채운다.
   for (const page of after) {
     if (before.has(page)) continue;
-    await seedGridPageFromXlsx(room.ydoc, lazyGridStoreAdapterForCanonicalGrid(room.canonicalGrid), sheet, page);
+    await seedGridPageFromXlsx(room.ydoc, lazyStore, sheet, page);
     await recomputeFormulasForPage(room, sheet, page);
   }
 
@@ -1855,11 +1883,11 @@ async function reconcilePageSubscriptions(
         // 룸이 이미 닫혔으면(마지막 참여자 퇴장 → rooms에서 제거 + ydoc.destroy()) 비울 것도,
         // 비울 대상 Y.Doc도 없다 — 파괴된 Y.Doc을 건드리지 않도록 여기서 끝낸다. 정상 경로에서는
         // closeConn이 cancelPendingUnseeds로 미리 취소하므로 여기까지 오지 않는다.
-        if (rooms.get(room.docId) !== room || !room.canonicalGrid) return;
+        if (rooms.get(room.docId) !== room || !room.lazyGrid) return;
         // 유예 시간 동안 누군가 이 페이지를 다시 구독했을 수 있다 — 예약 취소를 놓친 경로가
         // 있어도 여기서 한 번 더 확인해 "보고 있는 페이지를 비우는" 사고를 막는다.
         if (getSubscribedPageUnion(room, sheet).has(page)) return;
-        const rowCount = room.canonicalGrid.sheets[sheet]?.rows.length ?? 0;
+        const rowCount = room.lazyGrid.sheetMeta[sheet]?.rowCount ?? 0;
         void unseedGridPageFromXlsx(room.ydoc, sheet, page, rowCount).catch((error: unknown) => {
           console.error(`페이지 비우기 실패 (문서 ${room.docId}, 시트 ${sheet}, 페이지 ${page}):`, error);
         });
@@ -1922,9 +1950,9 @@ export function getSeededPagesForTest(docId: string, sheet: number): Set<number>
   return seededPagesInYdoc(room, sheet);
 }
 
-/** 테스트 전용 — 룸의 canonical 그리드를 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */
-export function getRoomCanonicalGridForTest(docId: string): GridDocument | null {
-  return rooms.get(docId)?.canonicalGrid ?? null;
+/** 테스트 전용 — 룸의 지연(lazy) 그리드 저장소를 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */
+export function getRoomLazyGridForTest(docId: string): LazyGridStore | null {
+  return rooms.get(docId)?.lazyGrid ?? null;
 }
 
 /**

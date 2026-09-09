@@ -228,8 +228,8 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
     expect(sheet.getCell('A1001').value).not.toBe('row1000');
     expect(sheet.getCell('A1501').value).not.toBe('row1500');
     // 시트 높이도 정확히 한 행만 늘었다.
-    const canonical = (await import('../src/collab/room.js')).getRoomCanonicalGridForTest(docId)!;
-    expect(canonical.sheets[0].rowCount).toBe(1601);
+    const lazyGrid = (await import('../src/collab/room.js')).getRoomLazyGridForTest(docId)!;
+    expect(lazyGrid.sheetMeta[0].rowCount).toBe(1601);
   }, 120_000);
 
   test('deleting a row on a 1600-row sheet pulls up every row below it, including unloaded rows 1000+', async () => {
@@ -247,8 +247,8 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
     for (const marker of ['top', 'mid500', 'row999', 'row1000', 'row1500']) {
       expect(countInColumn(sheet, 1, marker)).toBe(1);
     }
-    const canonical = (await import('../src/collab/room.js')).getRoomCanonicalGridForTest(docId)!;
-    expect(canonical.sheets[0].rowCount).toBe(1599);
+    const lazyGrid = (await import('../src/collab/room.js')).getRoomLazyGridForTest(docId)!;
+    expect(lazyGrid.sheetMeta[0].rowCount).toBe(1599);
     // 꼬리 행이 실제로 사라졌는지 — 예전엔 rowCount만 줄고 파일 꼬리가 그대로 남았다.
     expect(sheet.getCell(1600, 2).value).toBeFalsy();
   }, 120_000);
@@ -293,8 +293,8 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
     expect(sheet.getCell('C1501').value).toBe('b');
     expect(countInColumn(sheet, 1, 'row1500')).toBe(0); // 옛 A열에는 아무것도 남지 않았다
     expect(countInColumn(sheet, 2, 'row1500')).toBe(1);
-    const canonical = (await import('../src/collab/room.js')).getRoomCanonicalGridForTest(docId)!;
-    expect(canonical.sheets[0].colCount).toBe(3);
+    const lazyGrid = (await import('../src/collab/room.js')).getRoomLazyGridForTest(docId)!;
+    expect(lazyGrid.sheetMeta[0].colCount).toBe(3);
   }, 120_000);
 
   test('deleting a column removes it in every row, loaded or not', async () => {
@@ -308,8 +308,8 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
     expect(countInColumn(sheet, 1, 'top')).toBe(0); // 지워진 A열
     expect(countInColumn(sheet, 1, 'row1500')).toBe(0);
     expect(sheet.getCell('A1501').value).toBe('b'); // 구독 밖의 행도 같이 당겨졌다
-    const canonical = (await import('../src/collab/room.js')).getRoomCanonicalGridForTest(docId)!;
-    expect(canonical.sheets[0].colCount).toBe(1);
+    const lazyGrid = (await import('../src/collab/room.js')).getRoomLazyGridForTest(docId)!;
+    expect(lazyGrid.sheetMeta[0].colCount).toBe(1);
   }, 120_000);
 
   // ------------------------------------------------------------------ 살아 있는 협업 화면(Yjs)
@@ -411,18 +411,18 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
     await settleStructureOp(docId);
 
     const shifted = [{ r: 2, c: 1, rs: 1, cs: 2 }];
-    const canonical = (await import('../src/collab/room.js')).getRoomCanonicalGridForTest(docId)!;
-    expect(canonical.sheets[0].merges).toEqual(shifted);
+    const lazyGrid = (await import('../src/collab/room.js')).getRoomLazyGridForTest(docId)!;
+    expect(lazyGrid.sheetMeta[0].merges).toEqual(shifted);
     expect(socket.mirror.getMap<readonly { r: number }[]>(GRID_MERGES_MAP).get('0')).toEqual(shifted);
   }, 120_000);
 
   // ------------------------------------------------------------------ 잘못된/조작된 입력
   test('malformed or out-of-bounds structure ops are rejected without crashing or corrupting state', async () => {
-    const { getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { getRoomLazyGridForTest } = await import('../src/collab/room.js');
     const { docId, socket } = await openRoom(await makeTallXlsx(600), [0]);
-    const before = getRoomCanonicalGridForTest(docId)!;
-    const rowCountBefore = before.sheets[0].rowCount;
-    const colCountBefore = before.sheets[0].colCount;
+    const before = getRoomLazyGridForTest(docId)!;
+    const rowCountBefore = before.sheetMeta[0].rowCount;
+    const colCountBefore = before.sheetMeta[0].colCount;
 
     const bad: unknown[] = [
       null,
@@ -444,7 +444,9 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
       { sheet: 1, kind: 'insertRows', at: 0, count: 1 }, // 존재하지 않는 시트
       { sheet: 0, kind: 'insertRows', at: 10_000, count: 1 }, // 시트 끝보다 뒤
       { sheet: 0, kind: 'deleteRows', at: 10_000, count: 1 },
-      { sheet: 0, kind: 'deleteRows', at: 599, count: 5 }, // 시트 끝을 넘는 삭제 범위
+      // 시트 끝을 넘는 삭제 범위. makeTallXlsx(600)이라도 A1000/A1001/A1501에 값을 직접 써서 실제
+      // 행 수는 1501까지 간다(뒤쪽 여유를 크게 둬 그 실제 크기에 안전하게 못 미친다).
+      { sheet: 0, kind: 'deleteRows', at: 1499, count: 100 },
       { sheet: 0, kind: 'deleteCols', at: 0, count: 2 }, // 마지막 남은 열까지 지우려는 시도
     ];
     for (const payload of bad) {
@@ -457,26 +459,26 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
     socket.emit('message', encoding.toUint8Array(rawEncoder));
     await settleStructureOp(docId);
 
-    const after = getRoomCanonicalGridForTest(docId)!;
-    expect(after.sheets[0].rowCount).toBe(rowCountBefore);
-    expect(after.sheets[0].colCount).toBe(colCountBefore);
-    expect(after.sheets.length).toBe(1); // 없는 시트 번호가 자리를 만들어내지 않았다
+    const after = getRoomLazyGridForTest(docId)!;
+    expect(after.sheetMeta[0].rowCount).toBe(rowCountBefore);
+    expect(after.sheetMeta[0].colCount).toBe(colCountBefore);
+    expect(after.sheetMeta.length).toBe(1); // 없는 시트 번호가 자리를 만들어내지 않았다
     // 룸이 여전히 정상 동작한다 — 거부 뒤에도 올바른 연산은 받아들여야 한다.
     sendStructureOp(socket, { sheet: 0, kind: 'insertRows', at: 0, count: 1 });
     await settleStructureOp(docId);
-    expect(getRoomCanonicalGridForTest(docId)!.sheets[0].rowCount).toBe(rowCountBefore + 1);
+    expect(getRoomLazyGridForTest(docId)!.sheetMeta[0].rowCount).toBe(rowCountBefore + 1);
   }, 120_000);
 
   test('a read-only connection cannot insert or delete rows', async () => {
-    const { getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { getRoomLazyGridForTest } = await import('../src/collab/room.js');
     const { docId, socket } = await openRoom(await makeTallXlsx(600), [0], true);
-    const rowCountBefore = getRoomCanonicalGridForTest(docId)!.sheets[0].rowCount;
+    const rowCountBefore = getRoomLazyGridForTest(docId)!.sheetMeta[0].rowCount;
 
     sendStructureOp(socket, { sheet: 0, kind: 'insertRows', at: 0, count: 1 });
     sendStructureOp(socket, { sheet: 0, kind: 'deleteRows', at: 0, count: 1 });
     await settleStructureOp(docId);
 
-    expect(getRoomCanonicalGridForTest(docId)!.sheets[0].rowCount).toBe(rowCountBefore);
+    expect(getRoomLazyGridForTest(docId)!.sheetMeta[0].rowCount).toBe(rowCountBefore);
   }, 120_000);
 
   /**

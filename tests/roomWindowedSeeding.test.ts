@@ -351,9 +351,10 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
     async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 
-      const { joinEditSession, getRoomCanonicalGridForTest, getSeededPagesForTest } = await import(
+      const { joinEditSession, getRoomLazyGridForTest, getSeededPagesForTest } = await import(
         '../src/collab/room.js'
       );
+      const { getCell } = await import('../src/xlsx/lazyGridStore.js');
 
       const docId = randomUUID();
       await seedDoc(docId, await makeBigXlsx(1000));
@@ -373,10 +374,10 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
       // …canonical 그리드(저장·다운로드의 유일한 기준)에는 그대로 남아 있어야 한다. 여기서
       // 0으로 비워지면 "스크롤만 했는데 500행이 파일에서 사라지는" 조용한 데이터 손실이 된다
       // (unseed의 키 삭제를 cells.observe가 "사용자가 지웠다"로 오해하는 경로).
-      const canonical = getRoomCanonicalGridForTest(docId);
-      expect(canonical).not.toBeNull();
-      expect(canonical!.sheets[0].rows[0][0]).toEqual({ v: 'row-1' });
-      expect(canonical!.sheets[0].rows[499][0]).toEqual({ v: 'row-500' });
+      const lazyGrid = getRoomLazyGridForTest(docId);
+      expect(lazyGrid).not.toBeNull();
+      expect(await getCell(lazyGrid!, 0, 0, 0)).toEqual({ v: 'row-1' });
+      expect(await getCell(lazyGrid!, 0, 499, 0)).toEqual({ v: 'row-500' });
     },
     30_000,
   );

@@ -15,15 +15,17 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
  *
  * canonical 그리드는 **신뢰할 수 없는 클라이언트 입력**을 따라 스스로 넓어진다 — 범위 밖 셀 키
  * ("0:299999:1023") 하나, 또는 GRID_STRUCTURE_MAP에 쓴 거대한 rowCount/colCount 하나면 된다.
- * 그런데 그 성장 루프에는 양보 지점이 하나도 없었고 상한(MAX_CANONICAL_COLS=1024)도 이 코드베이스가
- * 실제로 파싱하는 열 수(MAX_COLS=120)보다 8.5배 넉넉해서, 메시지 한 통으로 약 2.4GB를 할당하며
- * 이벤트 루프를 1초 넘게 통째로 멈출 수 있었다 — 이 프로젝트의 윈도잉 작업이 없애려는 바로 그
- * 버그 클래스(6355a17, Task 4의 onRange 상한과 같은 계열)다.
+ * 예전(canonical이 시트 전체를 실제 GridCell 배열로 담던 시절)에는 그 성장 루프에 양보 지점이
+ * 하나도 없었고 상한(MAX_CANONICAL_COLS=1024)도 이 코드베이스가 실제로 파싱하는 열 수
+ * (MAX_COLS=120)보다 8.5배 넉넉해서, 메시지 한 통으로 약 2.4GB를 할당하며 이벤트 루프를 1초 넘게
+ * 통째로 멈출 수 있었다.
  *
- * **측정 방법**: xlsxExportYielding.test.ts와 같은 방식으로, 절대 틱 수 같은 불안정한 임계값을 쓰지
- * 않는다. canonical 시트의 rows 배열을 Proxy로 감싸 `push` 한 번마다 "그 시점까지 이벤트 루프가 몇 번
- * 돌았는지"를 기록한다 — 양보가 전혀 없으면 모든 push가 **같은 틱 값**을 가진다(그 사이 루프가 한
- * 번도 돌지 못했다는 직접 증거).
+ * **LazyGridStore 재설계(2026-09-09) 이후**: `growSheet`는 더 이상 실제 `GridCell` 행을 채우지
+ * 않는다 — `logicalToOriginalRow/Col`(정수 하나씩만 담는 매핑 배열)에 -1을 채울 뿐이다. 상한까지
+ * 늘려도 정수 300,000개 push는 그 자체로 이미 충분히 싸서, 예전처럼 청크+양보를 할 이유가
+ * 사라졌다(청크/양보 제거 자체가 이 재설계의 목적 중 하나였다) — 그래서 아래 첫 테스트는 더 이상
+ * "양보하는지"가 아니라 "커진 만큼 매핑 배열도 정확히 자랐는지"만 검증한다. 상한 클램프(열은
+ * MAX_COLS, 행은 MAX_ROWS) 자체는 여전히 유효한 회귀이므로 나머지 테스트는 그대로 유지한다.
  */
 
 const MESSAGE_SYNC = 0;
@@ -46,25 +48,6 @@ class FakeSocket extends EventEmitter {
   }
   close(): void {}
   ping(): void {}
-}
-
-function startTicker(): { count: () => number; stop: () => void } {
-  let ticks = 0;
-  let running = true;
-  function schedule(): void {
-    setImmediate(() => {
-      if (!running) return;
-      ticks += 1;
-      schedule();
-    });
-  }
-  schedule();
-  return {
-    count: () => ticks,
-    stop: () => {
-      running = false;
-    },
-  };
 }
 
 async function flushEventLoop(turns = 60): Promise<void> {
@@ -152,62 +135,31 @@ describe('room.ts: canonical grid growth is bounded and yields to the event loop
   }
 
   test(
-    'a huge rowCount growth request is chunked with real event-loop yields',
+    'a huge rowCount growth request completes immediately (growSheet only pads an integer mapping array)',
     async () => {
-      const { getRoomCanonicalGridForTest, awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
+      const { getRoomLazyGridForTest, awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
       const { GRID_STRUCTURE_MAP } = await import('../src/collab/gridShared.js');
       const { YIELD_EVERY_N_ROWS } = await import('../src/spreadsheet.js');
       const { docId, socket } = await openRoom();
 
-      // 성장 루프가 행을 하나 밀어 넣을 때마다 "지금까지 이벤트 루프가 몇 번 돌았는지"를 기록한다.
-      const canonical = getRoomCanonicalGridForTest(docId)!;
-      const sheet = canonical.sheets[0] as unknown as { rows: unknown[] };
-      const realRows = sheet.rows;
-      const ticker = startTicker();
-      const ticksAtPush: number[] = [];
-      sheet.rows = new Proxy(realRows, {
-        get(target, prop, receiver) {
-          if (prop === 'push') {
-            return (...args: unknown[]): number => {
-              ticksAtPush.push(ticker.count());
-              return Array.prototype.push.apply(target, args);
-            };
-          }
-          return Reflect.get(target, prop, receiver) as unknown;
-        },
-      });
-
-      const GROWN_ROWS = YIELD_EVERY_N_ROWS * 8; // 청크 경계를 여러 번 넘긴다
+      const GROWN_ROWS = YIELD_EVERY_N_ROWS * 8; // 예전 청크 경계를 여러 번 넘기던 규모 그대로 유지
       applyOnMirror(socket, (doc) => {
         const structure = doc.getMap<Record<string, unknown>>(GRID_STRUCTURE_MAP);
         const current = structure.get('0')!;
         structure.set('0', { ...current, rowCount: GROWN_ROWS });
       });
       await awaitCanonicalGrowthForTest(docId);
-      ticker.stop();
 
-      // 성장 자체는 실제로 끝났는가.
-      expect(realRows.length).toBe(GROWN_ROWS);
-      expect(ticksAtPush.length).toBeGreaterThanOrEqual(GROWN_ROWS - 1);
-
-      // 양보가 없던 예전 코드에서는 이 값이 1이다 — 전체 할당이 한 호흡의 동기 블록이라
-      // 그동안 이벤트 루프가 단 한 번도 돌지 못하기 때문이다.
-      expect(new Set(ticksAtPush).size).toBeGreaterThanOrEqual(5);
-
-      // "한 번도 안 쉬고 연달아 할당한 최대 행 수"도 직접 확인한다.
-      let longestUnyieldedRun = 1;
-      let currentRun = 1;
-      for (let i = 1; i < ticksAtPush.length; i += 1) {
-        currentRun = ticksAtPush[i] === ticksAtPush[i - 1] ? currentRun + 1 : 1;
-        longestUnyieldedRun = Math.max(longestUnyieldedRun, currentRun);
-      }
-      expect(longestUnyieldedRun).toBeLessThanOrEqual(YIELD_EVERY_N_ROWS + 100);
+      const lazyGrid = getRoomLazyGridForTest(docId)!;
+      expect(lazyGrid.sheetMeta[0].rowCount).toBe(GROWN_ROWS);
+      // 매핑 배열도 정확히 그만큼 자랐는지(패딩이 짧게 끝나 뒤쪽 인덱스가 undefined로 남지 않는지).
+      expect(lazyGrid.logicalToOriginalRow[0].length).toBe(GROWN_ROWS);
     },
     120_000,
   );
 
   test('a colCount beyond the real xlsx column ceiling is clamped, not allocated', async () => {
-    const { getRoomCanonicalGridForTest, awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
+    const { getRoomLazyGridForTest, awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
     const { GRID_STRUCTURE_MAP } = await import('../src/collab/gridShared.js');
     const { MAX_COLS } = await import('../src/spreadsheet.js');
     const { docId, socket } = await openRoom();
@@ -220,15 +172,16 @@ describe('room.ts: canonical grid growth is bounded and yields to the event loop
     });
     await awaitCanonicalGrowthForTest(docId);
 
-    const sheet = getRoomCanonicalGridForTest(docId)!.sheets[0];
-    expect(sheet.colCount).toBe(MAX_COLS);
-    for (const row of sheet.rows) expect(row.length).toBeLessThanOrEqual(MAX_COLS);
+    const lazyGrid = getRoomLazyGridForTest(docId)!;
+    expect(lazyGrid.sheetMeta[0].colCount).toBe(MAX_COLS);
+    expect(lazyGrid.logicalToOriginalCol[0].length).toBeLessThanOrEqual(MAX_COLS);
   });
 
   test('a cell key past the real xlsx column ceiling is rejected outright', async () => {
-    const { getRoomCanonicalGridForTest, awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
+    const { getRoomLazyGridForTest, awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
     const { GRID_CELLS_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
     const { MAX_COLS } = await import('../src/spreadsheet.js');
+    const { getCell } = await import('../src/xlsx/lazyGridStore.js');
     const { docId, socket } = await openRoom();
 
     applyOnMirror(socket, (doc) => {
@@ -240,14 +193,16 @@ describe('room.ts: canonical grid growth is bounded and yields to the event loop
     await awaitCanonicalGrowthForTest(docId);
     await flushEventLoop();
 
-    const sheet = getRoomCanonicalGridForTest(docId)!.sheets[0];
-    expect(sheet.colCount).toBeLessThanOrEqual(MAX_COLS);
-    expect(sheet.rows[0][500]).toBeUndefined();
-    expect(sheet.rows[0][2]).toEqual({ v: 'ok' });
+    const lazyGrid = getRoomLazyGridForTest(docId)!;
+    expect(lazyGrid.sheetMeta[0].colCount).toBeLessThanOrEqual(MAX_COLS);
+    // 상한 밖으로 거부된 좌표는 애초에 dirtyOverlay에 쓰인 적이 없다 — getCell은 "값 없음"을 0으로
+    // 나타낸다(원본에도 있을 수 없는 칸이므로 로직상 undefined가 아니라 0).
+    expect(await getCell(lazyGrid, 0, 0, 500)).toBe(0);
+    expect(await getCell(lazyGrid, 0, 0, 2)).toEqual({ v: 'ok' });
   });
 
   test('a rowCount far beyond the parser ceiling is clamped to MAX_ROWS', async () => {
-    const { getRoomCanonicalGridForTest, awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
+    const { getRoomLazyGridForTest, awaitCanonicalGrowthForTest } = await import('../src/collab/room.js');
     const { GRID_STRUCTURE_MAP } = await import('../src/collab/gridShared.js');
     const { MAX_ROWS } = await import('../src/spreadsheet.js');
     const { docId, socket } = await openRoom();
@@ -259,6 +214,6 @@ describe('room.ts: canonical grid growth is bounded and yields to the event loop
     });
     await awaitCanonicalGrowthForTest(docId);
 
-    expect(getRoomCanonicalGridForTest(docId)!.sheets[0].rowCount).toBe(MAX_ROWS);
+    expect(getRoomLazyGridForTest(docId)!.sheetMeta[0].rowCount).toBe(MAX_ROWS);
   }, 120_000);
 });

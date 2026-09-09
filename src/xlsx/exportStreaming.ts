@@ -4,9 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
 import { parseGridCellKey, type GridStructureOpRecord } from '../collab/gridShared.js';
-import type { GridCell, GridDocument } from '../spreadsheet.js';
+import type { GridCell } from '../spreadsheet.js';
 import { yieldToEventLoop, YIELD_EVERY_N_ROWS } from '../spreadsheet.js';
 import { applyStyleToCell, cellStyle, cellText, coerceCellValue, toCellStyleAttrs, type XlsxExportOptions } from './collab.js';
+import type { LazyGridStore } from './lazyGridStore.js';
 
 /**
  * `exportXlsxFromGrid`(collab.ts)의 **오직 대용량 파일 전용 폴백**이다 — 정상 경로가 아니다.
@@ -35,11 +36,16 @@ import { applyStyleToCell, cellStyle, cellText, coerceCellValue, toCellStyleAttr
  * 로컬 임시 파일에 스트리밍으로 쓴 뒤 그 결과를 한 번에 읽어 돌려준다(임시 파일은 항상 정리한다).
  * 최종 반환 타입은 exportXlsxFromGrid와 동일한 `Uint8Array`라 room.ts 호출부는 폴백 분기 하나만
  * 추가하면 된다.
+ *
+ * Task 11부터 데이터 소스는 `canonicalGrid: GridDocument` 대신 `room.lazyGrid`(`LazyGridStore`)다 —
+ * 편집된 칸은 `store.dirtyOverlay`를 직접 읽는다(옛 `dirtyCells: Set<string>` 인자는 필요 없다,
+ * 오버레이의 키·값 자체가 이미 그 정보다). 이 폴백은 구조연산을 지원하지 않으므로(아래 스코프
+ * 제한 참고) `store.logicalToOriginalRow/Col`을 참조할 필요가 없다 — "새 행"(원본 범위 밖)의
+ * 유일한 가능한 소스는 dirtyOverlay뿐이다.
  */
 export async function exportXlsxFromGridStreaming(
   originalXlsxBytes: Uint8Array,
-  canonicalGrid: GridDocument,
-  dirtyCells: ReadonlySet<string>,
+  store: LazyGridStore,
   structuralOps: readonly GridStructureOpRecord[],
   options: XlsxExportOptions = {},
 ): Promise<Uint8Array> {
@@ -55,17 +61,20 @@ export async function exportXlsxFromGridStreaming(
   const srcSheets = src.worksheets.filter((sheet) => !sheet.state || sheet.state === 'visible');
   const originalSheetCount = srcSheets.length;
 
-  // 편집된 칸의 좌표를 시트별로 미리 묶는다 — collab.ts의 exportXlsxFromGrid와 같은 이유.
-  const dirtyBySheet = new Map<number, Set<string>>(); // sheetIdx -> "row:col" 집합
-  for (const key of dirtyCells) {
+  // 편집된 칸을 시트+행별로 미리 묶는다 — collab.ts의 exportXlsxFromGrid와 같은 이유. 값 자체를
+  // 함께 들고 있으므로(옛 "row:col" 좌표 집합과 달리) 아래 쓰기 지점에서 store를 다시 조회할
+  // 필요가 없다.
+  const dirtyByRow = new Map<string, Array<{ col: number; cell: GridCell | 0 }>>(); // "sheetIdx:row" -> [{col, cell}]
+  for (const [key, cell] of store.dirtyOverlay) {
     const parsed = parseGridCellKey(key);
     if (!parsed || removedSheets.has(parsed.sheetIdx)) continue;
-    let set = dirtyBySheet.get(parsed.sheetIdx);
-    if (!set) {
-      set = new Set();
-      dirtyBySheet.set(parsed.sheetIdx, set);
+    const rowKey = `${parsed.sheetIdx}:${parsed.row}`;
+    let list = dirtyByRow.get(rowKey);
+    if (!list) {
+      list = [];
+      dirtyByRow.set(rowKey, list);
     }
-    set.add(`${parsed.row}:${parsed.col}`);
+    list.push({ col: parsed.col, cell });
   }
 
   const tempPath = path.join(os.tmpdir(), `docview-xlsx-stream-${randomUUID()}.xlsx`);
@@ -79,7 +88,7 @@ export async function exportXlsxFromGridStreaming(
     // 시트 탭 순서(sheetDisplayOrder) 반영 — 스트리밍 writer는 사후에 순서를 바꿀 방법이 없으므로
     // (ExcelJS.Workbook의 orderNo 재배치 같은 API가 없다) 애초에 원하는 순서대로 addWorksheet를
     // 부른다. WorkbookWriter는 addWorksheet가 불린 순서대로 시트를 써 내려간다.
-    const sheetIndices = [...canonicalGrid.sheets.keys()].filter((i) => !removedSheets.has(i));
+    const sheetIndices = [...store.sheetMeta.keys()].filter((i) => !removedSheets.has(i));
     sheetIndices.sort((a, b) => {
       const orderA = options.sheetDisplayOrder?.get(a) ?? a;
       const orderB = options.sheetDisplayOrder?.get(b) ?? b;
@@ -87,7 +96,7 @@ export async function exportXlsxFromGridStreaming(
     });
 
     for (const sheetIdx of sheetIndices) {
-      const target = canonicalGrid.sheets[sheetIdx];
+      const target = store.sheetMeta[sheetIdx];
       const srcSheet = srcSheets[sheetIdx] as ExcelJS.Worksheet | undefined;
       const dstSheet = out.addWorksheet(target.name, srcSheet ? { views: srcSheet.views } : undefined);
 
@@ -97,15 +106,14 @@ export async function exportXlsxFromGridStreaming(
         });
       }
 
-      const dirty = dirtyBySheet.get(sheetIdx);
       const originalRowCount = srcSheet?.rowCount ?? 0;
 
       for (let r = 1; r <= target.rowCount; r += 1) {
-        const canonicalRow = target.rows[r - 1];
+        const dirtyInRow = dirtyByRow.get(`${sheetIdx}:${r - 1}`);
         const dstRow = dstSheet.getRow(r);
 
         if (srcSheet && r <= originalRowCount) {
-          // 원본에 있던 행 — 값·서식을 그대로 옮기고, 실제로 편집된 칸만 canonical 값으로 덮어쓴다.
+          // 원본에 있던 행 — 값·서식을 그대로 옮기고, 실제로 편집된 칸만 store의 현재 값으로 덮어쓴다.
           const srcRow = srcSheet.getRow(r);
           srcRow.eachCell({ includeEmpty: true }, (srcCell, colNumber) => {
             if (colNumber > target.colCount) return;
@@ -114,22 +122,21 @@ export async function exportXlsxFromGridStreaming(
             if (srcCell.style) dstCell.style = srcCell.style;
           });
           if (srcRow.height) dstRow.height = srcRow.height;
-          if (dirty) {
-            for (const key of dirty) {
-              const [rowStr, colStr] = key.split(':');
-              if (Number(rowStr) !== r - 1) continue;
-              const c = Number(colStr);
-              if (c >= target.colCount) continue;
-              writeCanonicalCell(dstRow, c, canonicalRow, canonicalGrid);
+          if (dirtyInRow) {
+            for (const { col, cell } of dirtyInRow) {
+              if (col >= target.colCount) continue;
+              writeExportCell(dstRow, col, cell, store);
             }
           }
         } else {
-          // 원본에 없던 행(직접 rowCount를 늘려 시트 끝에 추가된 행, 또는 통째로 새 시트) —
-          // 옮겨올 원본이 없으므로 비어 있지 않은 칸을 전부 그대로 써야 한다.
-          for (let c = 0; c < target.colCount; c += 1) {
-            const cell = canonicalRow?.[c];
-            if (cell === 0 || cell === undefined) continue;
-            writeCanonicalCell(dstRow, c, canonicalRow, canonicalGrid);
+          // 원본에 없던 행(직접 rowCount를 늘려 시트 끝에 추가된 행, 또는 통째로 새 시트) — 옮겨올
+          // 원본이 없으므로, 이 행의 유일한 가능한 값 출처인 dirtyOverlay만 쓴다(원본 매핑이 없는
+          // 칸은 편집되지 않았다면 애초에 값이 존재할 수 없다 — LazyGridStore.getCell과 동일한 이유).
+          if (dirtyInRow) {
+            for (const { col, cell } of dirtyInRow) {
+              if (col >= target.colCount || cell === 0 || cell === undefined) continue;
+              writeExportCell(dstRow, col, cell, store);
+            }
           }
         }
 
@@ -149,16 +156,15 @@ export async function exportXlsxFromGridStreaming(
   }
 }
 
-function writeCanonicalCell(
+function writeExportCell(
   dstRow: ExcelJS.Row,
   col: number,
-  canonicalRow: ReadonlyArray<GridCell | 0> | undefined,
-  canonicalGrid: GridDocument,
+  cell: GridCell | 0,
+  store: LazyGridStore,
 ): void {
-  const cell = canonicalRow?.[col];
   const text = cellText(cell);
   const dstCell = dstRow.getCell(col + 1);
   dstCell.value = text === '' ? null : coerceCellValue(text);
-  const style = cellStyle(cell, canonicalGrid);
+  const style = cellStyle(cell, store);
   applyStyleToCell(dstCell, style ? toCellStyleAttrs(style) : undefined);
 }

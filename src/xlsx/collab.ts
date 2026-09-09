@@ -18,7 +18,7 @@ import {
 } from '../collab/gridShared.js';
 import type { GridCell, GridDocument, GridStyle } from '../spreadsheet.js';
 import { parseXlsxToGrid, yieldToEventLoop, YIELD_EVERY_N_ROWS } from '../spreadsheet.js';
-import type { LazyGridStore } from './lazyGridStore.js';
+import type { LazyGridSheetMeta, LazyGridStore } from './lazyGridStore.js';
 import { getRow } from './lazyGridStore.js';
 
 
@@ -96,13 +96,13 @@ function gridStyleSignature(style: GridStyle): string {
  * 선형 탐색으로 충분하다: 이 배열은 "워크북이 실제로 쓰는 서로 다른 서식의 팔레트"라 보통 수십
  * 개 수준이고, 여기 오는 호출은 사용자가 서식 버튼을 누르는 빈도(초당 몇 번)에 불과하다.
  */
-export function findOrAddGridStyleIndex(grid: GridDocument, style: GridStyle): number {
+export function findOrAddGridStyleIndex(store: LazyGridStore, style: GridStyle): number {
   const signature = gridStyleSignature(style);
-  for (let i = 0; i < grid.styles.length; i += 1) {
-    if (gridStyleSignature(grid.styles[i]) === signature) return i;
+  for (let i = 0; i < store.styles.length; i += 1) {
+    if (gridStyleSignature(store.styles[i]) === signature) return i;
   }
-  (grid.styles as GridStyle[]).push(style);
-  return grid.styles.length - 1;
+  store.styles.push(style);
+  return store.styles.length - 1;
 }
 
 /** 병합 범위(1-based, {r,c,rs,cs})에서 "앵커가 아닌, 병합에 덮인" 칸의 (0-based r:c) 키 집합을 만든다.
@@ -274,9 +274,8 @@ function resolveGridCell(
  * 시트 하나의 페이지 하나(PAGE_SIZE_ROWS행)만 Yjs에 채운다 — seedGridFromXlsx의 내부 행 루프와
  * 같은 로직을 한 페이지 범위로 좁힌 것.
  *
- * 데이터 출처는 원본 파일이 아니라 **LazyGridStore**다(Task 3-7이 만든 지연 읽기 계층 — 아직
- * room.ts는 실제 room.canonicalGrid: GridDocument를 이 store 모양으로 감싸는 어댑터를 통해
- * 호출한다, Task 14에서 정식 전환): 사용자가 편집한 뒤 스크롤로 화면에서 밀려났다가(unseed) 다시
+ * 데이터 출처는 원본 파일이 아니라 **LazyGridStore**다(Task 3-7이 만든 지연 읽기 계층, Task 11부터
+ * room.ts가 진짜 상주 인스턴스(`room.lazyGrid`)를 직접 넘긴다): 사용자가 편집한 뒤 스크롤로 화면에서 밀려났다가(unseed) 다시
  * 돌아온 페이지도 편집된 값 그대로 되살아나야 한다(원본에서 다시 읽으면 그 편집이 조용히
  * 되돌려진다) — resolveGridCell의 dirtyOverlay 확인이 그걸 보장한다.
  *
@@ -523,12 +522,12 @@ export async function unseedGridPageFromXlsx(
  * 가상 스크롤바를 올바른 길이로 그릴 수 있으므로, 이 두 맵은 **절대 윈도잉하지 않는다**(계획의
  * Global Constraints) — 구독 상태와 무관하게 모든 시트 분량을 항상 즉시 채운다.
  */
-export async function seedGridStructureOnly(ydoc: Y.Doc, grid: GridDocument): Promise<void> {
+export async function seedGridStructureOnly(ydoc: Y.Doc, sheets: readonly LazyGridSheetMeta[]): Promise<void> {
   const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
   const merges = ydoc.getMap<readonly GridMergeShape[]>(GRID_MERGES_MAP);
 
-  for (let sheetIdx = 0; sheetIdx < grid.sheets.length; sheetIdx += 1) {
-    const sheet = grid.sheets[sheetIdx];
+  for (let sheetIdx = 0; sheetIdx < sheets.length; sheetIdx += 1) {
+    const sheet = sheets[sheetIdx];
     ydoc.transact(() => {
       structure.set(String(sheetIdx), {
         name: sheet.name,
@@ -627,12 +626,12 @@ export function cellText(cell: GridCell | 0 | undefined): string {
   return cell === 0 || cell === undefined ? '' : cell.v;
 }
 
-/** canonicalGrid의 셀이 참조하는 스타일 인덱스를 실제 GridStyle로 해석한다 —
- * grid.styles는 공용 스타일 배열이라 셀은 인덱스(.s)만 들고 있다(Yjs styles 맵과 달리 셀마다
- * 통짜 서식 객체를 직접 들고 있지 않다). */
-export function cellStyle(cell: GridCell | 0 | undefined, grid: GridDocument): GridStyle | undefined {
+/** 셀이 참조하는 스타일 인덱스를 실제 GridStyle로 해석한다 — LazyGridStore.styles는 공용 스타일
+ * 팔레트라 셀은 인덱스(.s)만 들고 있다(Yjs styles 맵과 달리 셀마다 통짜 서식 객체를 직접 들고
+ * 있지 않다). */
+export function cellStyle(cell: GridCell | 0 | undefined, store: LazyGridStore): GridStyle | undefined {
   if (cell === 0 || cell === undefined || cell.s === undefined) return undefined;
-  return grid.styles[cell.s];
+  return store.styles[cell.s];
 }
 
 /**
@@ -657,28 +656,42 @@ const EMPTY_REMOVED_SHEETS: ReadonlySet<number> = new Set<number>();
  * 원본 xlsx(수식·서식 등 우리가 편집하지 않는 모든 것)를 그대로 로드한 뒤,
  * 실제로 사용자가 바꾼 칸(값·서식 각각)만 덮어써 재직렬화한다 — docx export와 같은
  * "바뀐 부분만 교체" 원칙. 한 번도 편집되지 않은 칸(수식 셀 포함)은 건드리지 않는다: 수식 셀은
- * 시딩 시 계산된 결괏값 문자열로만 채워지므로, 건드리지 않았는데도 canonicalGrid에 있다고 전부
+ * 시딩 시 계산된 결괏값 문자열로만 채워지므로, 건드리지 않았는데도 dirtyOverlay에 있다고 전부
  * 써버리면 수식 자체가 정적 값으로 깨진다.
  *
- * 데이터 소스는 Yjs Y.Doc이 아니라 canonicalGrid다(Task 3) — 룸이 항상 최신 상태로 유지하는
- * "단일 진실". "무엇이 바뀌었는지"는 더 이상 canonicalGrid 전체 복제본(옛 baselineGrid)과의
- * 셀 단위 비교로 재구성하지 않는다 — 대신 세 가지 가벼운 기록으로 재구성한다:
- * - `baselineSheetExtents`: 룸이 열릴 때 각 시트의 (rowCount, colCount)만 남긴 스냅샷.
+ * 데이터 소스는 Yjs Y.Doc이 아니라 `LazyGridStore`(Task 3, 이제 `room.lazyGrid`)다 — 룸이 항상
+ * 최신 상태로 유지하는 "단일 진실". "무엇이 바뀌었는지"는 셀 단위 비교로 재구성하지 않는다 —
+ * 대신 두 가지 가벼운 기록으로 재구성한다:
+ * - `baselineSheetExtents`: 룸이 열릴 때(=`ingestXlsxLazily` 직후, 아직 편집이 하나도 반영되기
+ *   전) 각 시트의 (rowCount, colCount)만 남긴 스냅샷. **`store.sheetMeta[i].rowCount/colCount`로
+ *   대체할 수 없다** — 그건 지금까지의 모든 편집(구조연산·직접 확장/축소)이 반영된 "현재" 값이라,
+ *   구조연산 재생의 시작점(이 계획 문서가 원래 상정했던 것과 달리)으로 쓰면 재생 수식이 어긋난다.
+ *   이 인자는 그래서 원래 계획 문서의 제안과 달리 계속 유지한다(아래 구현 노트 참고).
  * - `structuralOps`: 협업 중 적용된 행/열 삽입·삭제(MESSAGE_GRID_STRUCTURE_OP)의 순서 기록 —
- *   원본을 다시 로드한 이 워크시트에 **같은 순서로 재생**해 canonicalGrid와 물리적 위치를 맞춘다.
- * - `dirtyCells`: 값 또는 서식이 실제로 편집된 칸의 좌표(gridCellKey 형식) 집합 — 재생이 끝난
- *   뒤 이 좌표들만 canonicalGrid의 현재 값으로 덮어쓴다.
+ *   원본을 다시 로드한 이 워크시트에 **같은 순서로 재생**해 store와 물리적 위치를 맞춘다.
  *
- * **알려진 트레이드오프**: dirtyCells는 한 번 편집된 칸을 계속 "편집됨"으로 기억한다 — 원래
+ * 값 diff는 `store.dirtyOverlay`(gridCellKey -> 현재 값)를 직접 순회한다 — 이 오버레이의 키
+ * 집합 자체가 이미 "실제로 편집된 칸"의 정보이고 값까지 담고 있으므로, 옛 `dirtyCells: Set<string>`
+ * 인자처럼 별도로 canonical에서 값을 다시 찾아볼 필요가 없다.
+ *
+ * **알려진 트레이드오프**: dirtyOverlay는 한 번 편집된 칸을 계속 "편집됨"으로 기억한다 — 원래
  * 수식이었던 칸을 편집했다가 정확히 그 수식의 계산값과 같은 문자열로 되돌려도, 이 칸은 이제
  * 정적 값으로 저장된다(예전에는 값이 같으면 원본 수식이 그대로 보존됐다). 시트 전체를 매번
  * 비교하는 대신 실제 편집 건수에 비례하는 메모리만 쓰기 위해 받아들인 차이다.
+ *
+ * **구현 노트 — 계획 문서(2026-09-09 xlsx lazy canonical grid) Task 11 item 8과의 의도적 차이**:
+ * 그 항목은 "baselineSheetExtents 인자는 완전히 제거한다"고 적었지만, 실제로 그렇게 하면
+ * `tests/xlsx-collab.test.ts`의 "export does not call spliceRows/spliceColumns when nothing was
+ * actually edited..." 회귀(ExcelJS의 raw rowCount/columnCount가 실제 값 있는 행/열 수보다 부풀려질
+ * 수 있는 문제)가 되살아난다: `store.sheetMeta[i].rowCount`는 편집이 쌓이며 계속 바뀌는 "현재" 값이라
+ * "구조연산을 재생하기 전 원래 몇 행/열이었는지"라는 별도의 고정된 기준선을 대신할 수 없다(직접
+ * 확장/축소는 `structuralOps`에 기록되지 않으므로 현재 값에서 역산할 수도 없다). 그래서 이 인자는
+ * `room.baselineSheetExtents`(seedRoom이 `ingestXlsxLazily` 직후 한 번 스냅샷)로 그대로 유지한다.
  */
 export async function exportXlsxFromGrid(
   originalXlsxBytes: Uint8Array,
-  canonicalGrid: GridDocument,
+  store: LazyGridStore,
   baselineSheetExtents: ReadonlyArray<{ readonly rowCount: number; readonly colCount: number }>,
-  dirtyCells: ReadonlySet<string>,
   structuralOps: readonly GridStructureOpRecord[],
   options: XlsxExportOptions = {},
 ): Promise<Uint8Array> {
@@ -706,9 +719,9 @@ export async function exportXlsxFromGrid(
     Boolean((sheet as unknown as { sheetProtection?: unknown }).sheetProtection),
   );
 
-  for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+  for (let sheetIdx = 0; sheetIdx < store.sheetMeta.length; sheetIdx += 1) {
     if (removedSheets.has(sheetIdx)) continue;
-    const target = canonicalGrid.sheets[sheetIdx];
+    const target = store.sheetMeta[sheetIdx];
     // 협업 중 새로 추가된 시트(webviewer 쪽 "+"/삽입 메뉴)는 원본 xlsx에 애초에 없어서
     // visibleSheets에 자리가 없다 — 지금 이름으로 새 워크시트를 만들어 그 자리에 채워 넣는다.
     let sheet = visibleSheets[sheetIdx];
@@ -772,17 +785,21 @@ export async function exportXlsxFromGrid(
     }
   }
 
-  // 반대로, 협업 중 삭제된 시트(원래 있었는데 지금 canonicalGrid.sheets엔 그 인덱스가 없는 것 —
+  // 반대로, 협업 중 삭제된 시트(원래 있었는데 지금 store.sheetMeta엔 그 인덱스가 없는 것 —
   // 배열이라 삭제는 항상 끝에서부터만 반영된다는 뜻, v1 스코프와 동일한 단순화)는 원본에서 그대로
   // 남아 재저장되고 있었다 — 실제로 워크북에서 제거한다.
-  for (let sheetIdx = canonicalGrid.sheets.length; sheetIdx < originalSheetCount; sheetIdx += 1) {
+  for (let sheetIdx = store.sheetMeta.length; sheetIdx < originalSheetCount; sheetIdx += 1) {
     const sheet = visibleSheets[sheetIdx];
     if (sheet) workbook.removeWorksheet(sheet.id);
   }
 
-  // 편집된 칸의 좌표를 시트별로 미리 묶어 둔다 — dirtyCells 전체를 시트마다 다시 훑지 않기 위함.
-  const dirtyBySheet = new Map<number, Array<{ row: number; col: number }>>();
-  for (const key of dirtyCells) {
+  // 편집된 칸의 좌표를 시트별로 미리 묶어 둔다 — dirtyOverlay 전체를 시트마다 다시 훑지 않기
+  // 위함이다. 오버레이의 값 자체가 이미 "지금 이 칸이 뭐여야 하는지"라, 옛 dirtyCells(Set)처럼
+  // canonical에서 값을 별도로 다시 찾아볼 필요가 없다 — 새로 추가된 시트든 원본에 있던 시트든
+  // 똑같이 이 오버레이 하나로 다뤄진다(새 시트의 모든 칸은 원본이 없으므로 값이 있다면 반드시
+  // 오버레이에 있다 — LazyGridStore.getCell의 "원본 매핑이 -1이면 0"과 같은 이유).
+  const dirtyBySheet = new Map<number, Array<{ row: number; col: number; cell: GridCell | 0 }>>();
+  for (const [key, cell] of store.dirtyOverlay) {
     const parsed = parseGridCellKey(key);
     if (!parsed || removedSheets.has(parsed.sheetIdx)) continue;
     let list = dirtyBySheet.get(parsed.sheetIdx);
@@ -790,13 +807,12 @@ export async function exportXlsxFromGrid(
       list = [];
       dirtyBySheet.set(parsed.sheetIdx, list);
     }
-    list.push({ row: parsed.row, col: parsed.col });
+    list.push({ row: parsed.row, col: parsed.col, cell });
   }
 
-  // 쓰기 패스 — 새로 추가된 시트는 비교할 기준선이 없으므로 비어 있지 않은 칸을 전부 옮겨 쓰고,
-  // 원본에 있던 시트는(위에서 이미 구조가 재생돼 물리적 위치가 맞아 있다) dirtyBySheet에 담긴
-  // 좌표만 다시 쓴다. 두 경우 모두 실제 편집 규모에 비례하므로(전체 시트 크기가 아니라), 대용량
-  // 파일에서 편집이 적으면 이 패스는 예전의 전체 셀 스캔보다 훨씬 빠르다.
+  // 쓰기 패스 — dirtyBySheet에 담긴 좌표만 쓴다(새로 추가된 시트도 원본에 있던 시트도 동일하게).
+  // 실제 편집 규모에 비례하므로(전체 시트 크기가 아니라), 대용량 파일에서 편집이 적으면 이 패스는
+  // 예전의 전체 셀 스캔보다 훨씬 빠르다.
   let sinceYield = 0;
   const maybeYield = async () => {
     sinceYield += 1;
@@ -805,39 +821,19 @@ export async function exportXlsxFromGrid(
       await yieldToEventLoop();
     }
   };
-  for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+  for (let sheetIdx = 0; sheetIdx < store.sheetMeta.length; sheetIdx += 1) {
     if (removedSheets.has(sheetIdx)) continue;
-    const currentSheet = canonicalGrid.sheets[sheetIdx];
+    const target = store.sheetMeta[sheetIdx];
     const sheet = visibleSheets[sheetIdx];
     if (!sheet) continue;
-    const isNewSheet = sheetIdx >= originalSheetCount;
-
-    if (isNewSheet) {
-      for (let r = 0; r < currentSheet.rows.length; r += 1) {
-        if (r < currentSheet.rowCount) {
-          const row = currentSheet.rows[r];
-          for (let c = 0; c < currentSheet.colCount; c += 1) {
-            const cell = row?.[c];
-            if (cell === 0 || cell === undefined) continue;
-            const text = cellText(cell);
-            sheet.getCell(r + 1, c + 1).value = text === '' ? null : coerceCellValue(text);
-            const style = cellStyle(cell, canonicalGrid);
-            applyStyleToCell(sheet.getCell(r + 1, c + 1), style ? toCellStyleAttrs(style) : undefined);
-          }
-        }
-        await maybeYield();
-      }
-      continue;
-    }
 
     const dirtyList = dirtyBySheet.get(sheetIdx);
     if (!dirtyList) continue;
-    for (const { row: r, col: c } of dirtyList) {
-      if (r >= currentSheet.rowCount || c >= currentSheet.colCount) continue; // 이후 잘려나간 칸
-      const cell = currentSheet.rows[r]?.[c];
+    for (const { row: r, col: c, cell } of dirtyList) {
+      if (r >= target.rowCount || c >= target.colCount) continue; // 이후 잘려나간 칸
       const text = cellText(cell);
       sheet.getCell(r + 1, c + 1).value = text === '' ? null : coerceCellValue(text);
-      const style = cellStyle(cell, canonicalGrid);
+      const style = cellStyle(cell, store);
       applyStyleToCell(sheet.getCell(r + 1, c + 1), style ? toCellStyleAttrs(style) : undefined);
       await maybeYield();
     }
@@ -850,7 +846,7 @@ export async function exportXlsxFromGrid(
     }
   }
 
-  applySheetDisplayOrder(workbook, visibleSheets, canonicalGrid, removedSheets, options.sheetDisplayOrder);
+  applySheetDisplayOrder(workbook, visibleSheets, store, removedSheets, options.sheetDisplayOrder);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return new Uint8Array(buffer as ArrayBuffer);
@@ -867,13 +863,13 @@ export async function exportXlsxFromGrid(
 function applySheetDisplayOrder(
   workbook: ExcelJS.Workbook,
   visibleSheets: readonly ExcelJS.Worksheet[],
-  canonicalGrid: GridDocument,
+  store: LazyGridStore,
   removedSheets: ReadonlySet<number>,
   displayOrder: ReadonlyMap<number, number> | undefined,
 ): void {
   if (!displayOrder || displayOrder.size === 0) return;
   const survivors: Array<{ sheetIdx: number; worksheet: ExcelJS.Worksheet }> = [];
-  for (let sheetIdx = 0; sheetIdx < canonicalGrid.sheets.length; sheetIdx += 1) {
+  for (let sheetIdx = 0; sheetIdx < store.sheetMeta.length; sheetIdx += 1) {
     if (removedSheets.has(sheetIdx)) continue;
     const worksheet = visibleSheets[sheetIdx];
     if (worksheet && workbook.getWorksheet(worksheet.id)) survivors.push({ sheetIdx, worksheet });

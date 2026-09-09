@@ -92,7 +92,7 @@ describe('room.ts: forceCloseRoom cleans up an open room after document deletion
   });
 
   test('removes the room from memory so a later checkRoomCapacity/canonical lookup sees it as gone', async () => {
-    const { joinEditSession, forceCloseRoom, getRoomCanonicalGridForTest } = await import('../src/collab/room.js');
+    const { joinEditSession, forceCloseRoom, getRoomLazyGridForTest } = await import('../src/collab/room.js');
 
     const docId = randomUUID();
     await seedDoc(docId, await makeSampleXlsx());
@@ -100,11 +100,11 @@ describe('room.ts: forceCloseRoom cleans up an open room after document deletion
     await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
     await new Promise((resolve) => setImmediate(resolve)); // room.ready 시딩 완료를 기다린다
 
-    expect(getRoomCanonicalGridForTest(docId)).not.toBeNull();
+    expect(getRoomLazyGridForTest(docId)).not.toBeNull();
 
     forceCloseRoom(docId);
 
-    expect(getRoomCanonicalGridForTest(docId)).toBeNull();
+    expect(getRoomLazyGridForTest(docId)).toBeNull();
   });
 
   test('frees a large-room capacity slot immediately, without waiting for a natural disconnect', async () => {
