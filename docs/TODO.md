@@ -72,11 +72,20 @@
 - 회귀 테스트: `tests/roomCapacity.test.ts`(신규, 5개) — 소형 파일 무제한, 비-xlsx 무제한, 4번째
   대용량 룸 거부, 같은 docId 중복 체크 시 슬롯 안 먹음, 룸이 완전히 닫히면 슬롯이 반환되는지까지 확인.
 
+**4. `DELETE /api/documents/:id`의 Room 미정리 — 완료(2026-09-09):**
+- `room.ts`에 `forceCloseRoom(docId, reason?)` 추가 — 해당 문서의 룸이 열려 있으면 모든 연결을
+  WS 4410("문서가 삭제되었습니다.")로 닫고 closeConn의 정상 "마지막 참여자 퇴장" 경로를 그대로
+  태워 룸·대용량 상한 슬롯을 즉시 정리한다.
+- `documents.ts`의 DELETE 핸들러가 `store.deleteDocument` **다음에** 이걸 부른다 — 순서가
+  중요하다: 먼저 지워야 `flushToStore`의 `meta` null 체크가 자동저장으로 파일을 되살리는 걸
+  막아준다(forceCloseRoom 주석 참고).
+- 회귀 테스트: `tests/roomForceClose.test.ts`(신규, 5개) — 4410 코드로 실제 닫히는지, 룸이
+  메모리에서 사라지는지, 대용량 룸 상한 슬롯이 즉시 반환되는지, 룸이 없을 때 안전한 no-op인지,
+  삭제 후 자동저장이 파일을 되살리지 않는지까지 확인.
+
 **남은 항목:**
-3. (장기) 대용량 시트를 통째로 메모리에 올리지 않고 필요한 부분만 그때그때 읽는 진짜 지연
+2. (장기) 대용량 시트를 통째로 메모리에 올리지 않고 필요한 부분만 그때그때 읽는 진짜 지연
    materialization — 이번 세션에 끝낸 xlsx 윈도잉 프로젝트급의 별도 큰 작업.
-4. `DELETE /api/documents/:id`가 메모리상 살아있는 Room(및 그 대용량 룸 상한 슬롯)을 정리하지
-   않는 문제 — 위 진단에서 발견만 하고 손대지 않음.
 
 **저장 실패(`Invalid array length`) — 원인 규명 완료, 부분 수정:**
 - 실제 버그 하나 발견·수정함: `exportXlsxFromGrid`(`src/xlsx/collab.ts`)의 행/열 삭제

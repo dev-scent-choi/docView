@@ -1407,6 +1407,38 @@ function closeConn(room: Room, conn: WebSocket): void {
 }
 
 /**
+ * 문서 삭제(`DELETE /api/documents/:id`) 직후 호출한다 — 그 문서를 메모리상 편집 중이던 Room이
+ * 있으면 모든 연결을 강제로 끊어 즉시 정리한다.
+ *
+ * **왜 필요했는가**: 이 호출이 없으면 삭제 API가 디스크의 원본·파생 파일만 지우고, 이미 열려
+ * 있던 협업 Room(canonicalGrid 등 대용량 메모리를 그대로 붙잡고 있음)은 마지막 참여자가 스스로
+ * 나갈 때까지 계속 살아 있었다 — 대용량 xlsx 룸이라면 삭제 후에도 한동안(또는 브라우저 탭을 안
+ * 닫으면 무기한) 메모리를 계속 점유하고, `checkRoomCapacity`의 상한 슬롯도 계속 차지한다.
+ *
+ * **왜 순서가 중요한가(호출부의 계약)**: 반드시 `store.deleteDocument`가 끝난 **뒤**에 불러야
+ * 한다. 남은 연결을 여기서 강제로 끊으면 closeConn의 "마지막 참여자 퇴장" 경로가 그대로 타서
+ * `queueFlush(room)`(→ `flushToStore`)가 예약되는데, `flushToStore`는 `store.readMeta`가 이미
+ * null(문서가 지워짐)이면 즉시 아무 것도 안 하고 반환한다 — 삭제가 먼저 끝나 있어야 이 안전한
+ * no-op 경로를 타고, 순서가 바뀌면 삭제 직후에 방금 지운 파일이 자동저장으로 되살아날 수 있다.
+ *
+ * 4410(HTTP 410 Gone과 같은 취지)로 닫아, 클라이언트가 재연결을 한 번 더 시도하는 왕복 없이
+ * 곧바로 "문서가 삭제되었습니다"를 보여줄 수 있게 한다(grid-editor.ts의 connection-close 처리는
+ * 4400번대 코드를 전부 영구 거부로 취급해 재연결을 멈추고 이유를 그대로 보여준다).
+ */
+export function forceCloseRoom(docId: string, reason = '문서가 삭제되었습니다.'): void {
+  const room = rooms.get(docId);
+  if (!room) return;
+  for (const conn of [...room.conns.keys()]) {
+    try {
+      conn.close(4410, reason);
+    } catch {
+      /* 이미 닫힌 연결 */
+    }
+    closeConn(room, conn);
+  }
+}
+
+/**
  * 한 시트가 가질 수 있는 페이지 번호의 상한 — canonical 그리드가 자랄 수 있는 최대 행 수를 페이지
  * 크기로 나눈 값이다(300_000 / 500 = 600). 두 상수 중 어느 쪽이 나중에 바뀌어도 자동으로 따라오도록
  * 상수를 직접 쓰지 않고 계산한다. 이 범위 밖 페이지 번호는 채울 데이터가 존재할 수 없으므로 정상

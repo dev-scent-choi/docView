@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { requireApiKey, type ApiKeyAuthenticatedRequest } from '../apiKeyAuth.js';
 import { recordAudit } from '../audit.js';
+import { forceCloseRoom } from '../collab/room.js';
 import { config } from '../config.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
 import { ConversionError, type Converter } from '../converters/types.js';
@@ -222,6 +223,9 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(404).send({ success: false, error: '문서를 찾을 수 없습니다.' });
       }
       await store.deleteDocument(meta.id);
+      // 반드시 삭제 뒤에 부른다 — forceCloseRoom 주석 참고(순서가 바뀌면 삭제 직후 파일이
+      // 자동저장으로 되살아날 수 있다).
+      forceCloseRoom(meta.id);
       invalidateRenderCache(meta.id);
       invalidateViewCaches(meta.id);
       await recordAudit({ type: 'deleted', docId: meta.id, detail: meta.name });
