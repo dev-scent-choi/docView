@@ -485,3 +485,52 @@ export function shiftDirtyOverlayKeys(
   }
   for (const [key, value] of shifted) overlay.set(key, value);
 }
+
+export function applyRowShift(
+  store: LazyGridStore,
+  sheetIdx: number,
+  at: number,
+  count: number,
+  insert: boolean,
+): void {
+  const mapping = store.logicalToOriginalRow[sheetIdx];
+  if (insert) {
+    mapping.splice(at, 0, ...new Array(count).fill(-1));
+  } else {
+    mapping.splice(at, count);
+  }
+  shiftDirtyOverlayKeys(store.dirtyOverlay, sheetIdx, 'row', at, count, insert);
+  const meta = store.sheetMeta[sheetIdx];
+  meta.rowCount = insert ? meta.rowCount + count : Math.max(1, meta.rowCount - count);
+}
+
+export function applyColShift(
+  store: LazyGridStore,
+  sheetIdx: number,
+  at: number,
+  count: number,
+  insert: boolean,
+): void {
+  const mapping = store.logicalToOriginalCol[sheetIdx];
+  if (insert) {
+    mapping.splice(at, 0, ...new Array(count).fill(-1));
+  } else {
+    mapping.splice(at, count);
+  }
+  shiftDirtyOverlayKeys(store.dirtyOverlay, sheetIdx, 'col', at, count, insert);
+  const meta = store.sheetMeta[sheetIdx];
+  meta.colCount = insert ? meta.colCount + count : Math.max(1, meta.colCount - count);
+}
+
+/** 삽입·삭제 연산 없이 rowCount/colCount만 직접 늘어나는 경로(그리드 에디터 툴바의 "행/열 추가"
+ * 버튼) 전용 — 줄어들 때는 이 함수를 쓰지 않는다(room.ts의 기존 규칙과 동일: 배열은 그대로 두고
+ * sheetMeta의 count만 낮추면 getCell의 경계 체크가 자연히 뒤쪽을 가려낸다). */
+export function growSheet(store: LazyGridStore, sheetIdx: number, newRowCount: number, newColCount: number): void {
+  const meta = store.sheetMeta[sheetIdx];
+  const rowMapping = store.logicalToOriginalRow[sheetIdx];
+  while (rowMapping.length < newRowCount) rowMapping.push(-1);
+  const colMapping = store.logicalToOriginalCol[sheetIdx];
+  while (colMapping.length < newColCount) colMapping.push(-1);
+  meta.rowCount = Math.max(meta.rowCount, newRowCount);
+  meta.colCount = Math.max(meta.colCount, newColCount);
+}

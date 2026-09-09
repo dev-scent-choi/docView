@@ -5,8 +5,11 @@ import { describe, expect, test } from 'vitest';
 import { gridCellKey } from '../src/collab/gridShared.js';
 import type { GridCell } from '../src/spreadsheet.js';
 import {
+  applyColShift,
+  applyRowShift,
   getCell,
   getRow,
+  growSheet,
   ingestXlsxLazily,
   setDirtyCell,
   shiftDirtyOverlayKeys,
@@ -168,5 +171,56 @@ describe('xlsx/lazyGridStore.ts: setDirtyCell/shiftDirtyOverlayKeys', () => {
     const overlay = new Map<string, GridCell | 0>([[gridCellKey(1, 5, 2), { v: 'other sheet' }]]);
     shiftDirtyOverlayKeys(overlay, 0, 'row', 0, 1, true);
     expect(overlay.get(gridCellKey(1, 5, 2))).toEqual({ v: 'other sheet' });
+  });
+});
+
+describe('xlsx/lazyGridStore.ts: applyRowShift/applyColShift/growSheet', () => {
+  test('inserting a row shifts logicalToOriginalRow and dirtyOverlay together, keeping getCell correct', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    setDirtyCell(store, 0, 1, 0, { v: 'Alice Kim' }); // 논리 1행(원래 Alice)을 편집
+
+    applyRowShift(store, 0, 1, 1, true); // 1번 위치에 행 1개 삽입 — Alice가 2번째로 밀림
+
+    expect(store.logicalToOriginalRow[0]).toEqual([0, -1, 1]);
+    expect(await getCell(store, 0, 1, 0)).toBe(0); // 새로 삽입된 빈 행
+    expect(await getCell(store, 0, 2, 0)).toEqual({ v: 'Alice Kim' }); // 편집 내용이 함께 밀림
+
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('deleting a row removes the mapping and any dirty overlay entry inside the deleted range', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    applyRowShift(store, 0, 0, 1, false); // 0번째 행(Name/Score 헤더) 삭제
+
+    expect(store.logicalToOriginalRow[0]).toEqual([1]);
+    expect(await getCell(store, 0, 0, 0)).toEqual({ v: 'Alice' });
+
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('applyColShift mirrors applyRowShift for the column axis', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    applyColShift(store, 0, 0, 1, true); // 맨 앞에 열 1개 삽입 — Name/Alice가 오른쪽으로 밀림
+
+    expect(store.logicalToOriginalCol[0]).toEqual([-1, 0, 1]);
+    expect(await getCell(store, 0, 0, 0)).toBe(0);
+    expect(await getCell(store, 0, 0, 1)).toEqual({ v: 'Name', s: expect.any(Number) });
+
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('growSheet extends logicalToOriginalRow/Col with -1 entries without touching existing mappings', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    growSheet(store, 0, 5, 4); // 2행×2열 시트를 5행×4열로 직접 확장(삽입 연산 없이)
+
+    expect(store.logicalToOriginalRow[0]).toEqual([0, 1, -1, -1, -1]);
+    expect(store.logicalToOriginalCol[0]).toEqual([0, 1, -1, -1]);
+    expect(await getCell(store, 0, 4, 3)).toBe(0); // 새로 확장된 영역
+
+    await fs.rm(store.rowStorePath, { force: true });
   });
 });
