@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
 import ExcelJS from 'exceljs';
 import { describe, expect, test } from 'vitest';
-import { ingestXlsxLazily } from '../src/xlsx/lazyGridStore.js';
+import { gridCellKey } from '../src/collab/gridShared.js';
+import { getCell, getRow, ingestXlsxLazily } from '../src/xlsx/lazyGridStore.js';
 
 async function makeSampleXlsx(): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
@@ -75,6 +77,59 @@ describe('xlsx/lazyGridStore.ts: ingestXlsxLazily', () => {
       cellViaStreaming !== 0 && cellViaStreaming.s !== undefined ? store.styles[cellViaStreaming.s] : undefined;
 
     expect(styleViaStreaming).toEqual(styleViaFullParse);
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+});
+
+describe('xlsx/lazyGridStore.ts: getCell/getRow', () => {
+  test('reads an unedited cell from disk on first access, then from cache on repeat access', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+
+    expect(await getCell(store, 0, 0, 0)).toEqual({ v: 'Name', s: expect.any(Number) });
+    expect(await getCell(store, 0, 1, 0)).toEqual({ v: 'Alice' });
+    // 캐시가 채워졌는지 — 같은 원본 행에 대해 readCache에 항목이 생겼어야 한다.
+    expect(store.readCache.has('0:0')).toBe(true);
+
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('a dirty overlay entry always wins over the on-disk original, even if cached', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    await getCell(store, 0, 1, 0); // 먼저 캐시를 데운다
+    store.dirtyOverlay.set(gridCellKey(0, 1, 0), { v: 'Alice Kim' });
+
+    expect(await getCell(store, 0, 1, 0)).toEqual({ v: 'Alice Kim' });
+
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('a coordinate beyond logicalToOriginalRow/Col bounds (newly inserted, unedited) returns 0 without touching disk', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    store.logicalToOriginalRow[0].splice(1, 0, -1); // 1번 위치에 "새 행" 삽입
+
+    expect(await getCell(store, 0, 1, 0)).toBe(0); // 새로 삽입된 빈 행
+    expect(await getCell(store, 0, 2, 0)).toEqual({ v: 'Alice' }); // 밀려난 원래 2번째 행
+
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('readCache evicts the oldest row once over the configured limit, and re-reads correctly after eviction', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    store.readCacheLimit = 1;
+
+    await getRow(store, 0, 0);
+    expect(store.readCache.has('0:0')).toBe(true);
+    await getRow(store, 0, 1);
+    expect(store.readCache.has('0:0')).toBe(false); // 밀려남
+    expect(store.readCache.has('0:1')).toBe(true);
+
+    // 밀려난 뒤에도 다시 읽으면 같은 값
+    expect(await getCell(store, 0, 0, 0)).toEqual({ v: 'Name', s: expect.any(Number) });
+
     await fs.rm(store.rowStorePath, { force: true });
   });
 });

@@ -19,6 +19,7 @@ import {
   type GridStyle,
 } from '../spreadsheet.js';
 import { extractThemeColorsFromZip } from './themeExtract.js';
+import { gridCellKey } from '../collab/gridShared.js';
 
 export interface LazyGridSheetMeta {
   name: string;
@@ -373,4 +374,70 @@ export async function ingestXlsxLazily(docId: string, xlsxBytes: Buffer): Promis
     readCache: new Map(),
     readCacheLimit: DEFAULT_READ_CACHE_ROWS,
   };
+}
+
+async function readRowFromDisk(
+  store: LazyGridStore,
+  sheetIdx: number,
+  originalRow: number,
+): Promise<ReadonlyArray<GridCell | 0>> {
+  const entry = store.rowIndex[sheetIdx]?.[originalRow];
+  if (!entry) return [];
+  const handle = await fs.open(store.rowStorePath, 'r');
+  try {
+    const buf = Buffer.alloc(entry.byteLength);
+    await handle.read(buf, 0, entry.byteLength, entry.byteOffset);
+    return JSON.parse(buf.toString('utf8')) as Array<GridCell | 0>;
+  } finally {
+    await handle.close();
+  }
+}
+
+function cacheKey(sheetIdx: number, originalRow: number): string {
+  return `${sheetIdx}:${originalRow}`;
+}
+
+function touchCache(store: LazyGridStore, key: string, row: ReadonlyArray<GridCell | 0>): void {
+  // Map은 삽입 순서를 유지한다 — 다시 넣으면(delete 후 set) 맨 뒤(=가장 최근)로 이동한다.
+  store.readCache.delete(key);
+  store.readCache.set(key, row);
+  while (store.readCache.size > store.readCacheLimit) {
+    const oldest = store.readCache.keys().next().value;
+    if (oldest === undefined) break;
+    store.readCache.delete(oldest);
+  }
+}
+
+export async function getRow(
+  store: LazyGridStore,
+  sheetIdx: number,
+  logicalRow: number,
+): Promise<ReadonlyArray<GridCell | 0>> {
+  const originalRow = store.logicalToOriginalRow[sheetIdx]?.[logicalRow];
+  if (originalRow === undefined || originalRow < 0) return [];
+  const key = cacheKey(sheetIdx, originalRow);
+  const cached = store.readCache.get(key);
+  if (cached) {
+    touchCache(store, key, cached); // LRU 최신화
+    return cached;
+  }
+  const row = await readRowFromDisk(store, sheetIdx, originalRow);
+  touchCache(store, key, row);
+  return row;
+}
+
+export async function getCell(
+  store: LazyGridStore,
+  sheetIdx: number,
+  logicalRow: number,
+  logicalCol: number,
+): Promise<GridCell | 0> {
+  const key = gridCellKey(sheetIdx, logicalRow, logicalCol);
+  if (store.dirtyOverlay.has(key)) return store.dirtyOverlay.get(key)!;
+
+  const originalCol = store.logicalToOriginalCol[sheetIdx]?.[logicalCol];
+  if (originalCol === undefined || originalCol < 0) return 0;
+
+  const row = await getRow(store, sheetIdx, logicalRow);
+  return row[originalCol] ?? 0;
 }
