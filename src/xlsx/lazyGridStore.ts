@@ -19,7 +19,7 @@ import {
   type GridStyle,
 } from '../spreadsheet.js';
 import { extractThemeColorsFromZip } from './themeExtract.js';
-import { gridCellKey } from '../collab/gridShared.js';
+import { gridCellKey, parseGridCellKey } from '../collab/gridShared.js';
 
 export interface LazyGridSheetMeta {
   name: string;
@@ -440,4 +440,48 @@ export async function getCell(
 
   const row = await getRow(store, sheetIdx, logicalRow);
   return row[originalCol] ?? 0;
+}
+
+export function setDirtyCell(
+  store: LazyGridStore,
+  sheetIdx: number,
+  row: number,
+  col: number,
+  value: GridCell | 0,
+): void {
+  store.dirtyOverlay.set(gridCellKey(sheetIdx, row, col), value);
+}
+
+/** room.ts의 shiftDirtyCellKeys(Set 전용)와 동일한 규칙 — Map(dirtyOverlay)에 적용하는 버전. */
+export function shiftDirtyOverlayKeys(
+  overlay: Map<string, GridCell | 0>,
+  sheetIdx: number,
+  axis: 'row' | 'col',
+  at: number,
+  count: number,
+  insert: boolean,
+): void {
+  if (overlay.size === 0) return;
+  const shifted: Array<[string, GridCell | 0]> = [];
+  for (const [key, value] of overlay) {
+    const parsed = parseGridCellKey(key);
+    if (!parsed || parsed.sheetIdx !== sheetIdx) continue;
+    let { row, col } = parsed;
+    const coord = axis === 'row' ? row : col;
+    overlay.delete(key);
+    if (insert) {
+      if (coord >= at) {
+        if (axis === 'row') row += count;
+        else col += count;
+      }
+    } else {
+      if (coord >= at && coord < at + count) continue;
+      if (coord >= at + count) {
+        if (axis === 'row') row -= count;
+        else col -= count;
+      }
+    }
+    shifted.push([gridCellKey(sheetIdx, row, col), value]);
+  }
+  for (const [key, value] of shifted) overlay.set(key, value);
 }

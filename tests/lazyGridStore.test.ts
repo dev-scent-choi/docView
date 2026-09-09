@@ -3,7 +3,14 @@ import fs from 'node:fs/promises';
 import ExcelJS from 'exceljs';
 import { describe, expect, test } from 'vitest';
 import { gridCellKey } from '../src/collab/gridShared.js';
-import { getCell, getRow, ingestXlsxLazily } from '../src/xlsx/lazyGridStore.js';
+import type { GridCell } from '../src/spreadsheet.js';
+import {
+  getCell,
+  getRow,
+  ingestXlsxLazily,
+  setDirtyCell,
+  shiftDirtyOverlayKeys,
+} from '../src/xlsx/lazyGridStore.js';
 
 async function makeSampleXlsx(): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
@@ -131,5 +138,35 @@ describe('xlsx/lazyGridStore.ts: getCell/getRow', () => {
     expect(await getCell(store, 0, 0, 0)).toEqual({ v: 'Name', s: expect.any(Number) });
 
     await fs.rm(store.rowStorePath, { force: true });
+  });
+});
+
+describe('xlsx/lazyGridStore.ts: setDirtyCell/shiftDirtyOverlayKeys', () => {
+  test('setDirtyCell makes getCell return the new value immediately', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    setDirtyCell(store, 0, 1, 0, { v: 'Alice Kim' });
+    expect(await getCell(store, 0, 1, 0)).toEqual({ v: 'Alice Kim' });
+    await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('shiftDirtyOverlayKeys moves an edited coordinate down when a row is inserted above it', () => {
+    const overlay = new Map<string, GridCell | 0>([[gridCellKey(0, 5, 2), { v: 'edited' }]]);
+    shiftDirtyOverlayKeys(overlay, 0, 'row', 2, 1, true); // 2번 위치에 행 1개 삽입
+    expect(overlay.has(gridCellKey(0, 5, 2))).toBe(false);
+    expect(overlay.get(gridCellKey(0, 6, 2))).toEqual({ v: 'edited' });
+  });
+
+  test('shiftDirtyOverlayKeys drops an edited coordinate that falls inside a deleted range', () => {
+    const overlay = new Map<string, GridCell | 0>([[gridCellKey(0, 5, 2), { v: 'edited' }]]);
+    shiftDirtyOverlayKeys(overlay, 0, 'row', 4, 3, false); // 4,5,6번 행 삭제(5가 그 안에 포함)
+    expect(overlay.has(gridCellKey(0, 5, 2))).toBe(false);
+    expect(overlay.size).toBe(0);
+  });
+
+  test('shiftDirtyOverlayKeys leaves coordinates in other sheets untouched', () => {
+    const overlay = new Map<string, GridCell | 0>([[gridCellKey(1, 5, 2), { v: 'other sheet' }]]);
+    shiftDirtyOverlayKeys(overlay, 0, 'row', 0, 1, true);
+    expect(overlay.get(gridCellKey(1, 5, 2))).toEqual({ v: 'other sheet' });
   });
 });
