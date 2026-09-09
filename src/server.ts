@@ -5,9 +5,11 @@ import { supportedExtensions } from './converters/index.js';
 import { sofficePath, warmUpProfiles } from './converters/libreOffice.js';
 import { isEphemeralSecret } from './security.js';
 import { ensureDataDirs } from './storage.js';
+import { sweepOrphanedLazyGridFiles } from './xlsx/lazyGridStore.js';
 
 async function main(): Promise<void> {
   await ensureDataDirs();
+  await sweepOrphanedLazyGridFiles();
   const app = await buildApp();
   if (isEphemeralSecret) {
     app.log.warn(

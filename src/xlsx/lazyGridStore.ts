@@ -534,3 +534,26 @@ export function growSheet(store: LazyGridStore, sheetIdx: number, newRowCount: n
   meta.rowCount = Math.max(meta.rowCount, newRowCount);
   meta.colCount = Math.max(meta.colCount, newColCount);
 }
+
+export async function closeLazyGridStore(store: LazyGridStore): Promise<void> {
+  await fs.rm(store.rowStorePath, { force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {
+    /* 정리 실패는 치명적이지 않다 — OS 임시 폴더 청소 또는 다음 서버 시작 시 sweep에 맡긴다 */
+  });
+}
+
+/** 서버 비정상 종료로 남은 이 프로젝트의 임시 행 저장소 파일을 정리한다 — 정상 종료라면 이미
+ * closeLazyGridStore가 다 지웠을 것이므로, 이건 그 경우를 복구하는 안전망일 뿐이다. */
+export async function sweepOrphanedLazyGridFiles(): Promise<void> {
+  const dir = os.tmpdir();
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    entries
+      .filter((name) => name.startsWith('docview-lazygrid-'))
+      .map((name) => fs.rm(path.join(dir, name), { force: true }).catch(() => undefined)),
+  );
+}

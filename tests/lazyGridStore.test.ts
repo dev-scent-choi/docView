@@ -7,12 +7,14 @@ import type { GridCell } from '../src/spreadsheet.js';
 import {
   applyColShift,
   applyRowShift,
+  closeLazyGridStore,
   getCell,
   getRow,
   growSheet,
   ingestXlsxLazily,
   setDirtyCell,
   shiftDirtyOverlayKeys,
+  sweepOrphanedLazyGridFiles,
 } from '../src/xlsx/lazyGridStore.js';
 
 async function makeSampleXlsx(): Promise<Buffer> {
@@ -222,5 +224,37 @@ describe('xlsx/lazyGridStore.ts: applyRowShift/applyColShift/growSheet', () => {
     expect(await getCell(store, 0, 4, 3)).toBe(0); // 새로 확장된 영역
 
     await fs.rm(store.rowStorePath, { force: true });
+  });
+});
+
+describe('xlsx/lazyGridStore.ts: cleanup', () => {
+  test('closeLazyGridStore deletes the on-disk row store file', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    await closeLazyGridStore(store);
+    await expect(fs.access(store.rowStorePath)).rejects.toThrow();
+  });
+
+  test('sweepOrphanedLazyGridFiles removes leftover docview-lazygrid-* files in the OS temp dir', async () => {
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const orphanPath = path.join(os.tmpdir(), `docview-lazygrid-orphan-${randomUUID()}.jsonl`);
+    await fs.writeFile(orphanPath, 'leftover');
+
+    await sweepOrphanedLazyGridFiles();
+
+    await expect(fs.access(orphanPath)).rejects.toThrow();
+  });
+
+  test('sweepOrphanedLazyGridFiles does not touch unrelated temp files', async () => {
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const unrelatedPath = path.join(os.tmpdir(), `not-ours-${randomUUID()}.txt`);
+    await fs.writeFile(unrelatedPath, 'leave me alone');
+
+    await sweepOrphanedLazyGridFiles();
+
+    await expect(fs.access(unrelatedPath)).resolves.toBeUndefined();
+    await fs.rm(unrelatedPath, { force: true });
   });
 });
