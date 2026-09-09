@@ -235,7 +235,8 @@ async function withProfileSlot<T>(task: (profileDir: string) => Promise<T>): Pro
     return await task(profileDir);
   } catch (error) {
     // 변환 실패가 프로필 손상 때문일 수 있으므로 다음 실행에서 새로 만들도록 비운다.
-    await fs.rm(profileDir, { recursive: true, force: true }).catch(() => {});
+    // (Windows EBUSY 대비 짧게 재시도 — 실패해도 무시하는 건 기존과 동일)
+    await fs.rm(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
     throw error;
   } finally {
     release();
@@ -296,7 +297,9 @@ async function convertWithSoffice(
     }
     await fs.copyFile(produced, targetPdfPath);
   } finally {
-    await fs.rm(workDir, { recursive: true, force: true });
+    // Windows에서 백신 등이 방금 만든 임시 파일을 잠깐 스캔하는 동안 삭제가 EBUSY로 실패하는
+    // 경우가 있어, 짧게 재시도한다.
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -316,7 +319,7 @@ export async function warmUpProfiles(): Promise<void> {
       } catch {
         /* 웜업 실패는 무시 — 실제 변환 시 콜드 스타트로 대체된다 */
       } finally {
-        await fs.rm(workDir, { recursive: true, force: true });
+        await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     }),
   );

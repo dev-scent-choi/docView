@@ -46,17 +46,18 @@ async function deleteDocument(docId) {
 }
 
 /** 업로더 본인 열람용 — 전체 권한 토큰을 발급해 이동한다.
- * xlsx는 서버가 canEdit 여부와 무관하게 항상 editorUrl을 내려주므로(collab/room.ts가 쓰기만
- * 서버 쪽에서 막는다), "바로 보기"도 편집 화면과 완전히 같은 그리드 UI로 열되 수정만 못 하게
+ * xlsx/pptx는 서버가 canEdit 여부와 무관하게 항상 editorUrl을 내려주므로(collab/room.ts가
+ * 쓰기만 서버 쪽에서 막는다), "바로 보기"도 편집 화면과 완전히 같은 UI로 열되 수정만 못 하게
  * 한다 — 읽기 전용이라고 다른 화면(viewer.html)을 따로 보여줄 이유가 없다. docx는 editor.ts가
  * 아직 읽기 전용 모드를 지원하지 않아(server가 canEdit:false면 editorUrl 자체를 안 줌) 기존대로
  * viewer.html을 쓴다(canEdit는 요청하지 않는다 — 동시편집은 "동시편집 열기" 버튼의 몫이다).
- * docx/xlsx가 아닌 문서(PDF 등 pages 뷰)는 동시편집 대상이 아니므로 canEdit이 곧 마크업(리뷰
- * 코멘트) 추가/삭제 권한이 된다 — 업로더 본인이 보는 화면이니 기본으로 켜서 발급한다. */
+ * docx/xlsx/pptx가 아닌 문서(PDF 등 pages 뷰)는 동시편집 대상이 아니므로 canEdit이 곧 마크업
+ * (리뷰 코멘트) 추가/삭제 권한이 된다 — 업로더 본인이 보는 화면이니 기본으로 켜서 발급한다. */
 async function openViewer(docId, viewer, ext) {
-  const canEdit = ext !== 'docx' && ext !== 'xlsx';
+  const opensReadOnlyEditor = ext === 'xlsx' || ext === 'pptx';
+  const canEdit = !supportsEdit({ ext });
   const issued = await issueToken(docId, viewer, true, true, true, canEdit);
-  location.href = ext === 'xlsx' && issued.editorUrl ? issued.editorUrl : issued.viewerUrl;
+  location.href = opensReadOnlyEditor && issued.editorUrl ? issued.editorUrl : issued.viewerUrl;
 }
 
 /** 업로더 본인 편집용 — 전체 권한 + canEdit 토큰을 발급해 동시편집기로 이동한다(docx/xlsx). */
@@ -156,16 +157,15 @@ fileInput.addEventListener('change', async () => {
     const doc = await uploadWithProgress(file, (ratio) => showProgress('업로드 중…', ratio));
     showProgress('변환 중…', 0.1);
     const ready = await waitForConversion(doc.id);
-    // docx/xlsx처럼 동시편집을 지원하는 형식은 업로드 직후 바로 편집기로 들어간다 — 굳이
-    // 읽기 전용 뷰어를 거쳤다가 다시 "편집" 버튼을 눌러야 하는 두 단계를 거칠 이유가 없다.
-    const canOpenEditor = supportsEdit(ready);
-    showProgress(canOpenEditor ? '변환 완료 — 편집기로 이동합니다' : '변환 완료 — 뷰어로 이동합니다', 1);
+    // 업로드는 목록에만 반영한다 — 열람/편집은 목록에서 사용자가 직접 "바로보기"/"동시편집"을
+    // 눌러야 시작된다(자동으로 편집기·뷰어로 이동하지 않는다).
+    showProgress('변환 완료', 1);
     setStatus(`${ready.pageCount}페이지 변환 완료`, 'ok');
-    if (canOpenEditor) {
-      await openEditor(ready.id, '업로더');
-    } else {
-      await openViewer(ready.id, '업로더', ready.ext);
-    }
+    hideProgress();
+    fileInput.disabled = false;
+    fileInput.value = '';
+    fileLabel.textContent = DEFAULT_LABEL;
+    await refreshList().catch(() => {});
   } catch (error) {
     hideProgress();
     setStatus(error.message, 'error');
@@ -196,9 +196,9 @@ async function refreshList() {
   }
 }
 
-/** docx/xlsx가 동시편집을 지원한다 (src/routes/documents.ts의 EDITABLE_EXTS와 일치) */
+/** docx/xlsx/pptx가 동시편집을 지원한다 (src/routes/documents.ts의 EDITABLE_EXTS와 일치) */
 function supportsEdit(doc) {
-  return doc.ext === 'docx' || doc.ext === 'xlsx';
+  return doc.ext === 'docx' || doc.ext === 'xlsx' || doc.ext === 'pptx';
 }
 
 /** 동시편집 대상이 아닌 pages 뷰 문서(PDF 등)는 canEdit이 마크업(리뷰 코멘트) 추가/삭제 권한이 된다. */

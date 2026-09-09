@@ -297,6 +297,18 @@
     </div>
   </div>
 
+  <!-- 다른 화면에 iframe으로 임베드된 경우엔 부모 창이 이미 자신의 로딩 스피너를 쓰고 있으므로
+       (위 g-render-pending 주석 참고) 이 화면은 JS가 즉시 숨긴다 — 독립 접속(직접 URL로 열람)일
+       때만 보인다. 대용량 xlsx는 최초 동기화(canonical 그리드 재구성)에 수십 초가 걸릴 수 있어
+       그 사이 화면이 멈춘 것처럼 보이지 않도록 둔다. -->
+  <div id="loading-screen" class="error-screen">
+    <div class="error-card">
+      <svg class="loading-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/></svg>
+      <p>문서를 불러오는 중… <span id="loading-percent">0%</span><br /><span class="loading-hint">대용량 파일은 시간이 걸릴 수 있습니다</span></p>
+      <div class="loading-gauge"><div id="loading-gauge-fill" class="loading-gauge-fill"></div></div>
+    </div>
+  </div>
+
   <script type="module" src="/js/grid-editor.bundle.js"></script>
 </body>
 </html>

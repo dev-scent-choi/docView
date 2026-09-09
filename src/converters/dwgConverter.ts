@@ -147,7 +147,9 @@ export const dwgConverter: Converter = {
         cause: lastError,
       });
     } finally {
-      await fs.rm(workDir, { recursive: true, force: true });
+      // Windows에서 백신 등이 방금 만든 임시 파일을 잠깐 스캔하는 동안 삭제가 EBUSY로 실패하는
+      // 경우가 있어, 짧게 재시도한다.
+      await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   },
 };

@@ -139,14 +139,16 @@ async function main(): Promise<void> {
     showFatalError(error instanceof Error ? error.message : '문서 정보를 불러오지 못했습니다.');
     return;
   }
-  if (!info.permissions.canEdit) {
-    showFatalError('이 링크에는 동시편집 권한이 없습니다. 뷰어에서 열람만 가능합니다.');
-    return;
-  }
-
   titleEl.textContent = info.name;
   document.title = `${info.name} — DocView 편집`;
   canEdit = info.permissions.canEdit;
+  // 읽기 전용 토큰이어도 이 화면 자체는 그대로 보여주고 쓰기만 막는다 — grid-editor.ts와 동일한
+  // 패턴(canEdit:false로 fatal error를 띄우면 "바로보기"가 동시편집 화면을 못 씀). 실제 쓰기
+  // 차단은 room.ts의 readOnlyConns(서버 쪽)가 이미 하고 있고, 여기서는 UI만 맞춘다.
+  if (!canEdit) {
+    document.getElementById('btn-add-blank')?.setAttribute('hidden', '');
+    connStatusEl.insertAdjacentHTML('afterend', '<span class="conn-status" data-status="readonly">읽기 전용</span>');
+  }
 
   const ydoc = new Y.Doc();
   slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);

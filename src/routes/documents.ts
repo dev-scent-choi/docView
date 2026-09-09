@@ -114,7 +114,9 @@ export async function convertToPdf(
     await store.saveDerived(meta.id, 'pagesizes', Buffer.from(JSON.stringify(sizes)));
     return { pdfBytes, pageCount };
   } finally {
-    await fs.rm(workDir, { recursive: true, force: true });
+    // recursive:true일 때만 적용되는 옵션 — Windows에서 백신 등이 방금 만든 임시 파일을 잠깐
+    // 스캔하는 동안 삭제가 EBUSY로 실패하는 경우가 있어, 짧게 재시도한다.
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -259,19 +261,20 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
         viewer,
         detail: `print=${canPrint} download=${canDownload} copy=${canCopy} edit=${effectiveCanEdit}${callerProject ? ` caller=${callerProject}` : ''}`,
       });
-      // 그리드(xlsx) 편집기는 canEdit:false여도 읽기 전용으로 그대로 열 수 있다(collab/room.ts가
-      // 그 연결의 실제 쓰기를 서버에서 막는다) — 과거 연도 접속현황처럼 "현재 연도와 같은 화면인데
-      // 손은 못 대는" 문서가 이 편집기를 그대로 재사용할 수 있게, xlsx는 편집 권한과 무관하게 항상
-      // editorUrl을 내려준다. docx는 editor.ts가 아직 읽기 전용을 지원하지 않아 기존대로 둔다.
+      // 그리드(xlsx)·슬라이드(pptx) 편집기는 canEdit:false여도 읽기 전용으로 그대로 열 수 있다
+      // (collab/room.ts가 그 연결의 실제 쓰기를 서버에서 막는다) — 과거 연도 접속현황처럼 "현재
+      // 연도와 같은 화면인데 손은 못 대는" 문서가 이 편집기를 그대로 재사용할 수 있게, xlsx/pptx는
+      // 편집 권한과 무관하게 항상 editorUrl을 내려준다. docx는 editor.ts가 아직 읽기 전용을
+      // 지원하지 않아 기존대로 둔다.
       // (isEditableExt로 한 번 더 감싸는 이유: effectiveCanEdit이 이제 pdf 등에서도 true일 수 있는데,
       // 그런 문서는 editor.html/editor-grid.html이 아니라 markup 기능이 있는 viewer.html로만 열려야 한다.)
-      const isGrid = meta.ext === 'xlsx';
+      const supportsReadOnlyEditor = meta.ext === 'xlsx' || meta.ext === 'pptx';
       return {
         success: true,
         data: {
           token,
           viewerUrl: `/viewer.html?token=${encodeURIComponent(token)}`,
-          editorUrl: isEditableExt && (effectiveCanEdit || isGrid)
+          editorUrl: isEditableExt && (effectiveCanEdit || supportsReadOnlyEditor)
             ? `${editorPathFor(meta.ext)}?token=${encodeURIComponent(token)}`
             : undefined,
           expiresInSeconds: config.tokenTtlSeconds,

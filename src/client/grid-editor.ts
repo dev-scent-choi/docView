@@ -74,8 +74,51 @@ const formulaInputEl = document.getElementById('formula-input') as HTMLInputElem
 const toolbar = document.getElementById('toolbar') as HTMLElement;
 const errorScreen = document.getElementById('error-screen') as HTMLElement;
 const errorMessage = document.getElementById('error-message') as HTMLElement;
+const loadingScreen = document.getElementById('loading-screen') as HTMLElement;
+const loadingPercentEl = document.getElementById('loading-percent') as HTMLElement;
+const loadingGaugeFillEl = document.getElementById('loading-gauge-fill') as HTMLElement;
+
+// 다른 화면에 iframe으로 임베드된 경우엔 부모 창이 이미 자기 스피너를 쓰고 있으므로(위
+// g-render-pending 관련 주석 참고) 이 화면의 로딩 표시는 끈다 — 독립 접속일 때만 보인다.
+const showsOwnLoadingScreen = window.parent === window;
+if (!showsOwnLoadingScreen) {
+  loadingScreen.hidden = true;
+}
+
+/**
+ * 최초 동기화(서버가 canonical 그리드를 다시 구성하는 과정)는 진행률을 알려줄 방법이 없다 —
+ * ExcelJS 자체의 압축 해제·XML 파싱이 대부분의 시간을 차지하는데 그 내부 진행 상황은 이
+ * 라이브러리가 알려주지 않는다. 그래서 index.html의 업로드 변환 게이지(main.js의
+ * CONVERT_CREEP_CAP/RATE)와 똑같은 방식 — 시간이 지날수록 상한(92%)에 점근하도록 부드럽게
+ * 채워, "멈춘 게 아니라 진행 중"이라는 신호만 준다. 실제 완료(provider의 sync 이벤트)가
+ * 오면 그 즉시 100%로 스냅한다.
+ */
+const LOADING_CREEP_CAP = 92;
+const LOADING_CREEP_RATE = 0.04;
+const LOADING_CREEP_INTERVAL_MS = 300;
+let loadingDisplayed = 0;
+let loadingCreepTimer: ReturnType<typeof setInterval> | null = null;
+function setLoadingProgress(percent: number): void {
+  loadingPercentEl.textContent = `${Math.round(percent)}%`;
+  loadingGaugeFillEl.style.transform = `scaleX(${percent / 100})`;
+}
+if (showsOwnLoadingScreen) {
+  loadingCreepTimer = setInterval(() => {
+    loadingDisplayed = Math.min(LOADING_CREEP_CAP, loadingDisplayed + (LOADING_CREEP_CAP - loadingDisplayed) * LOADING_CREEP_RATE);
+    setLoadingProgress(loadingDisplayed);
+  }, LOADING_CREEP_INTERVAL_MS);
+}
+function stopLoadingCreep(): void {
+  if (loadingCreepTimer !== null) {
+    clearInterval(loadingCreepTimer);
+    loadingCreepTimer = null;
+  }
+  setLoadingProgress(100);
+}
 
 function showFatalError(message: string): void {
+  stopLoadingCreep();
+  loadingScreen.hidden = true;
   editorHost.hidden = true;
   toolbar.hidden = true;
   errorMessage.textContent = message;
@@ -226,6 +269,17 @@ async function main(): Promise<void> {
       event.status === 'connected' ? '연결됨' : event.status === 'disconnected' ? '연결 끊김 — 재연결 중…' : event.status;
     statusEl.dataset.status = event.status;
   });
+  // 서버가 편집 세션 자체를 거부한 경우(edit.ts의 socket.close(4xxx, 이유)) — 4400대는 재시도해도
+  // 같은 이유로 다시 거부될 뿐인 영구 거부다(잘못된 토큰, 문서 없음, 동시편집 룸 상한 등). 기본
+  // 동작(지수 백오프로 계속 재연결 시도)을 멈추고 서버가 준 이유를 그대로 보여준다 — 특히 룸 상한
+  // 거부("사용자가 많습니다…")는 그냥 두면 사용자가 원인을 알 길 없이 "연결 끊김 — 재연결 중…"만
+  // 계속 보게 된다.
+  provider.on('connection-close', (event: CloseEvent | null) => {
+    if (event && event.code >= 4400) {
+      provider.shouldConnect = false;
+      showFatalError(event.reason || '서버가 연결을 거부했습니다.');
+    }
+  });
   provider.on('sync', (isSynced: boolean) => {
     if (isSynced) {
       statusEl.dataset.status = 'synced';
@@ -237,6 +291,8 @@ async function main(): Promise<void> {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           editorHost.classList.remove('g-render-pending');
+          stopLoadingCreep();
+          loadingScreen.hidden = true;
           // 부모 창(iframe으로 이 문서를 띄운 화면)이 자신의 로딩 스피너를 이 시점까지 유지하다가
           // 여기서 iframe으로 교체할 수 있도록 알려준다 — webviewer 자신은 스피너 UI를 새로 만들지
           // 않는다(부모가 이미 쓰고 있는 스피너를 그대로 재사용하는 게 목적).
