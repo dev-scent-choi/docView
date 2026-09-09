@@ -141,7 +141,7 @@ async function waitForConversion(docId) {
     if (displayed < CONVERT_CREEP_CAP) {
       displayed = Math.min(CONVERT_CREEP_CAP, displayed + (CONVERT_CREEP_CAP - displayed) * CONVERT_CREEP_RATE);
     }
-    showProgress('변환 중…', displayed / 100);
+    showProgress('업로드 중…', displayed / 100);
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 }
@@ -155,12 +155,12 @@ fileInput.addEventListener('change', async () => {
   try {
     showProgress('업로드 중…', 0);
     const doc = await uploadWithProgress(file, (ratio) => showProgress('업로드 중…', ratio));
-    showProgress('변환 중…', 0.1);
+    showProgress('업로드 중…', 0.1);
     const ready = await waitForConversion(doc.id);
     // 업로드는 목록에만 반영한다 — 열람/편집은 목록에서 사용자가 직접 "바로보기"/"동시편집"을
     // 눌러야 시작된다(자동으로 편집기·뷰어로 이동하지 않는다).
-    showProgress('변환 완료', 1);
-    setStatus(`${ready.pageCount}페이지 변환 완료`, 'ok');
+    showProgress('업로드 완료', 1);
+    setStatus(`${ready.pageCount}페이지 업로드 완료`, 'ok');
     hideProgress();
     fileInput.disabled = false;
     fileInput.value = '';
@@ -220,7 +220,7 @@ function renderDocItem(doc) {
   if (doc.status === 'ready') {
     detail.textContent = `${doc.pageCount}페이지 · ${when}`;
   } else if (doc.status === 'processing') {
-    detail.textContent = `변환 중 ${doc.progress ?? 0}% · ${when}`;
+    detail.textContent = `업로드 중 ${doc.progress ?? 0}% · ${when}`;
   } else {
     detail.textContent = `변환 실패 · ${when}`;
   }
