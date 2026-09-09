@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -376,6 +377,40 @@ export async function ingestXlsxLazily(docId: string, xlsxBytes: Buffer): Promis
   };
 }
 
+/** openRowStoreWithRetry의 최대 재시도 횟수·간격 — closeLazyGridStore/exportStreaming.ts의
+ * fs.rm(..., { maxRetries: 5, retryDelay: 100 })와 같은 값을 그대로 맞춘다(일관된 관용구). */
+const ROW_STORE_OPEN_MAX_RETRIES = 5;
+const ROW_STORE_OPEN_RETRY_DELAY_MS = 100;
+
+/**
+ * `fs.open(rowStorePath, 'r')`가 `ENOENT`로 실패하면 최대 5번, 100ms 간격으로 재시도한다.
+ *
+ * **왜 필요한가**: 실제 29만 행급 파일로 room.ts의 실제 시딩 경로(seedGridStylesFromXlsx가 청크당
+ * 최대 2000개 행을 `Promise.all`로 동시에 읽는 실 사용 패턴)를 검증하는 중, 파일이 방금 정상적으로
+ * 쓰이고 닫혔는데도 이후의 `fs.open`이 간헐적으로 `ENOENT`를 던지는 현상을 실측했다 — 실패 시점이
+ * 실행마다 달라(같은 재현 스크립트를 반복해도 일관된 행 번호가 아니었다) 이 코드의 결정적 경쟁이라기
+ * 보다는 이 개발 환경(짧은 경로 표기 `OPENMI~1`이 나타나는 Windows 프로필)의 OS/파일시스템 계층
+ * 불안정성으로 보인다 — 같은 임시 폴더를 대상으로 한 기본적인 `fs.watch` 호출조차 별개로 libuv
+ * 내부 단언 실패로 죽는 것을 확인했다. 재시도 대기를 크게 늘려봐도(최대 약 1.85초) 근본적으로
+ * 해결되지 않았다(대기 중에도 반복해서 실패해 결국 메모리 누적 후 OOM으로 이어짐) — 즉 이 재시도가
+ * 그 환경 문제 자체를 고치지는 못한다. 그래도 이 코드베이스의 다른 파일 I/O(fs.rm의 maxRetries/
+ * retryDelay)가 이미 같은 부류의 Windows 파일 I/O 불안정성에 짧은 재시도로 대응하는 것과 같은
+ * 관용구를 유지하는 편이 맨 첫 시도에서 바로 포기하는 것보다는 낫다고 판단해 남긴다. 진짜로 파일이
+ * 없는 경우(예: closeLazyGridStore로 이미 정리된 룸을 읽으려는 버그)는 재시도가 소진된 뒤 그대로
+ * 던져 조용히 감춰지지 않는다.
+ */
+async function openRowStoreWithRetry(rowStorePath: string): Promise<FileHandle> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fs.open(rowStorePath, 'r');
+    } catch (error) {
+      const isEnoent = (error as NodeJS.ErrnoException).code === 'ENOENT';
+      if (!isEnoent || attempt >= ROW_STORE_OPEN_MAX_RETRIES) throw error;
+      await new Promise((resolve) => setTimeout(resolve, ROW_STORE_OPEN_RETRY_DELAY_MS));
+    }
+  }
+}
+
 async function readRowFromDisk(
   store: LazyGridStore,
   sheetIdx: number,
@@ -383,7 +418,7 @@ async function readRowFromDisk(
 ): Promise<ReadonlyArray<GridCell | 0>> {
   const entry = store.rowIndex[sheetIdx]?.[originalRow];
   if (!entry) return [];
-  const handle = await fs.open(store.rowStorePath, 'r');
+  const handle = await openRowStoreWithRetry(store.rowStorePath);
   try {
     const buf = Buffer.alloc(entry.byteLength);
     await handle.read(buf, 0, entry.byteLength, entry.byteOffset);

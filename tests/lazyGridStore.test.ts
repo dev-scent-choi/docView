@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import ExcelJS from 'exceljs';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { gridCellKey } from '../src/collab/gridShared.js';
 import type { GridCell } from '../src/spreadsheet.js';
 import {
@@ -143,6 +143,35 @@ describe('xlsx/lazyGridStore.ts: getCell/getRow', () => {
     expect(await getCell(store, 0, 0, 0)).toEqual({ v: 'Name', s: expect.any(Number) });
 
     await fs.rm(store.rowStorePath, { force: true });
+  });
+
+  test('a transient ENOENT on fs.open is retried and getRow still succeeds', async () => {
+    // 실제 29만 행급 파일을 room.ts의 실제 시딩 경로로 열람할 때, 방금 정상적으로 쓰이고 닫힌
+    // 행 저장소 파일에 대한 fs.open이 간헐적으로 ENOENT를 던지는 현상을 실측했다(원인은 이
+    // 환경의 OS/파일시스템 계층으로 보임 — lazyGridStore.ts의 openRowStoreWithRetry 주석 참고).
+    // 그 관용구가 실제로 재시도해 회복하는지를 여기서 검증한다.
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+
+    const enoent = Object.assign(new Error('ENOENT: no such file or directory, open'), { code: 'ENOENT' });
+    const openSpy = vi.spyOn(fs, 'open');
+    openSpy.mockRejectedValueOnce(enoent).mockRejectedValueOnce(enoent);
+
+    try {
+      expect(await getRow(store, 0, 0)).toEqual([{ v: 'Name', s: expect.any(Number) }, { v: 'Score' }]);
+      expect(openSpy).toHaveBeenCalledTimes(3); // 실패 2번 + 성공한 3번째 시도
+    } finally {
+      openSpy.mockRestore();
+      await fs.rm(store.rowStorePath, { force: true });
+    }
+  });
+
+  test('fs.open failing with ENOENT on every retry still throws (a genuinely missing file is not hidden)', async () => {
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+    await fs.rm(store.rowStorePath, { force: true }); // 진짜로 파일이 없는 상황을 재현한다
+
+    await expect(getRow(store, 0, 0)).rejects.toThrow(/ENOENT/);
   });
 });
 
