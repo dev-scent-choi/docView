@@ -148,9 +148,10 @@ function filterValidEntries(
 export interface ExportedPptx {
   readonly bytes: Uint8Array;
   readonly finalParts: readonly string[];
-  /** finalParts[i]를 만들어낸 SlideEntry의 저장 전 id — flushToStore가 slideContents를
-   * 새로 발급되는 id로 재키잉할 때 쓴다(옛 id -> 새 id 매핑의 "옛 id" 쪽). filterValidEntries가
-   * 걸러낸 항목의 id는 여기 들어가지 않는다. */
+  /** finalParts[i]를 만들어낸 SlideEntry의 id(저장 전/후 동일 — flushToStore는 이 id를 그대로
+   * 재사용해 새 SlideEntry를 만든다). flushToStore는 이 목록을 "이번 저장에서 살아남은 id
+   * 전체"로도 써서, slideContents 중 여기 없는 키(삭제되거나 filterValidEntries가 걸러낸
+   * 슬라이드)를 쓰레기로 간주해 정리한다. finalParts와 항상 같은 길이, 같은 순서로 1:1 대응한다. */
   readonly survivingEntryIds: readonly string[];
 }
 

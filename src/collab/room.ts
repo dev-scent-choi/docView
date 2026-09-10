@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { WebSocket } from 'ws';
 import * as decoding from 'lib0/decoding';
@@ -1189,35 +1188,67 @@ async function flushToStore(room: Room): Promise<void> {
     // 주기(8초 후)에서 자연스럽게 반영된다(그동안 sourcePageNumber가 한 번 더 낡은 채로 남는
     // 정도의 대가일 뿐, 편집 유실은 없다).
     if (JSON.stringify(slidesArray.toArray()) === snapshotBeforeSave) {
+      // exportPptxFromSlides는 finalParts와 survivingEntryIds를 같은 필터링된 entryList에서
+      // 같은 순서로 1:1로 만들어낸다(둘 다 for-of 한 번으로 정확히 한 번씩 push된다) — 그래서
+      // 길이가 항상 같아야 한다. 이 불변식이 깨지면(예: exportPptxFromSlides가 나중에 바뀌어
+      // 둘 중 하나만 필터링하게 되면) 아래에서 survivingEntryIds[index]를 finalParts와 잘못
+      // 짝지어 엉뚱한 슬라이드에 엉뚱한 id를 붙이는(=콘텐츠 유실) 조용한 사고가 나므로, 절대
+      // 그냥 넘어가지 않고 여기서 바로 던진다.
+      if (finalParts.length !== survivingEntryIds.length) {
+        throw new Error(
+          `pptx 저장 불변식 위반: finalParts.length(${finalParts.length}) !== survivingEntryIds.length(${survivingEntryIds.length})`,
+        );
+      }
       room.suppressAutosaveReschedule = true;
       try {
         ydoc.transact(() => {
-          const newIds = finalParts.map(() => randomUUID());
-          // slideContents 재키잉을 배열 재작성과 같은 트랜잭션 안에서 한다 — 그래야 "배열은 새
-          // id인데 slideContents는 아직 옛 id"인 순간이 다른 클라이언트에 보이지 않는다(옛 id에
-          // 아직 콘텐츠가 없는 항목은 건너뛴다 — 아직 열어 본 적 없는 슬라이드). Y.Map은 이미
-          // 통합된(integrated) 인스턴스를 다른 키에 그대로 다시 넣을 수 없다(Yjs 공유 타입은
-          // 한 번 문서에 편입되면 재편입 시 내부 _prelimContent가 이미 null이라 깨진다) — 그래서
-          // 같은 내용(중첩된 서식 포함)을 보존하는 새 인스턴스를 clone()으로 만들어 새 키에 넣는다.
-          const slideContents = ydoc.getMap<Y.Map<unknown>>(PPTX_SLIDE_CONTENTS_MAP);
-          for (let i = 0; i < survivingEntryIds.length; i += 1) {
-            const oldId = survivingEntryIds[i];
-            const content = slideContents.get(oldId);
-            if (content !== undefined) {
-              slideContents.set(newIds[i], content.clone());
-              slideContents.delete(oldId);
-            }
-          }
+          // 살아남은 SlideEntry는 저장 시점에 id를 새로 발급하지 않고 survivingEntryIds[index]를
+          // 그대로 재사용한다. 모든 SlideEntry의 id는 저장 이전, 사용자가 슬라이드를 추가/복제한
+          // "그 시점"에 이미 클라이언트에서 발급되어 안정적으로 존재한다 — 저장이 id를 새로
+          // 발급해야 할 기능적 이유가 애초에 없었다. (과거에는 매 저장마다 randomUUID()로 새
+          // id를 발급하고, slideContents를 옛 id에서 새 id로 .clone()해 옮기는 재키잉 루프가
+          // 있었다. .clone()은 Yjs CRDT 상 완전히 새로운 객체 정체성을 만들어내므로, 옛 id의
+          // Y.Map에 바인딩된 살아있는 에디터(y-prosemirror ySyncPlugin 등 — 아직 이 시점엔
+          // 없지만 다음 단계 작업이 만들 것이다)가 있으면 서버가 방금 지워버린 서브트리에 계속
+          // 쓰게 되어, 그 사이(자동저장 주기, 약 8초)에 입력한 내용이 조용히 전부 사라진다.
+          // id를 그대로 유지하면 slideContents는 같은 키 아래 계속 유효하므로 재키잉 자체가
+          // 필요 없다 — 마이그레이션 없이 자연스럽게 살아남는다.)
           slidesArray.delete(0, slidesArray.length);
           slidesArray.insert(
             0,
             finalParts.map((part, index) => ({
-              id: newIds[index],
+              id: survivingEntryIds[index],
               kind: 'original' as const,
               sourceSlidePart: part,
               sourcePageNumber: index + 1,
             })),
           );
+
+          // slideContents 중 이제 어떤 SlideEntry도 가리키지 않는 키(사용자가 지웠거나 유효성
+          // 검사에서 걸러진 슬라이드)는 도달 불가능한 쓰레기로 Y.Doc에 영원히 남는다 — 이 저장소는
+          // 대용량 xlsx에서 이미 한 번 Y.Doc 메모리/OOM 문제를 겪은 전례가 있으므로(Room.lazyGrid
+          // 관련 이슈 참고) 여기서도 같은 패턴을 반복하지 않도록 이번 저장에서 살아남은
+          // survivingEntryIds에 없는 키를 모두 정리한다. 같은 트랜잭션 안에서 하므로 "배열은
+          // 갱신됐는데 slideContents는 아직 지워지기 전"인 순간이 다른 클라이언트에 보이지 않는다.
+          const slideContents = ydoc.getMap<unknown>(PPTX_SLIDE_CONTENTS_MAP);
+          const survivingIdSet = new Set(survivingEntryIds);
+          for (const key of Array.from(slideContents.keys())) {
+            if (!survivingIdSet.has(key)) {
+              slideContents.delete(key);
+              continue;
+            }
+            // handleMessage는 클라이언트가 보낸 원시 Yjs 업데이트를 루트 타입 검증 없이 그대로
+            // 적용한다 — 슬라이드 id는 동기화된 slidesArray로 누구나 볼 수 있으므로, 악의적이거나
+            // 버그가 있는 클라이언트가 이 키에 Y.Map이 아닌 값(예: 그냥 숫자)을 써 넣었을 수
+            // 있다. 그런 값은 유효한 슬라이드 콘텐츠로 읽을 수 없으니 쓰레기로 간주해 지운다 —
+            // 절대 여기서 throw하지 않는다: throw하면 이 트랜잭션 전체가 취소되어 이 문서의
+            // 자동저장이 8초마다 같은 자리에서 영원히 실패하게 된다(queueFlush는 실패를 그대로
+            // 재시도 없이 다음 주기에 다시 시도할 뿐이라 같은 값이 계속 같은 방식으로 막는다).
+            const value = slideContents.get(key);
+            if (!(value instanceof Y.Map)) {
+              slideContents.delete(key);
+            }
+          }
         });
       } finally {
         room.suppressAutosaveReschedule = false;
