@@ -142,12 +142,16 @@
 
   <main id="grid" class="grid-container" hidden>
     <div id="grid-head" class="grid-head"></div>
-    <div id="grid-scroll" class="grid-scroll">
+    <div id="grid-scroll" class="grid-scroll" tabindex="0">
       <div id="grid-inner" class="grid-inner">
         <table id="grid-table" class="grid-table"></table>
       </div>
     </div>
     <div id="sheet-tabs" class="sheet-tabs" role="tablist"></div>
+    <div id="grid-status-bar" class="grid-status-bar">
+      <span id="grid-cell-ref" class="grid-cell-ref"></span>
+      <span id="grid-row-info" class="grid-row-info"></span>
+    </div>
     <div class="grid-watermark-overlay" aria-hidden="true"></div>
   </main>
 

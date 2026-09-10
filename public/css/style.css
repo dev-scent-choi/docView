@@ -1096,6 +1096,9 @@ h2 {
   color: #1c1b1a;
   scrollbar-color: #a7adb8 #f3f4f7; /* Firefox */
 }
+/* 방향키를 받으려면 포커스가 필요하지만, 선택된 칸 자체가 .g-selected 테두리로 이미 표시되므로
+   스크롤 영역 전체에 도는 기본 포커스 링은 군더더기다. */
+.grid-scroll:focus { outline: none; }
 
 /* 흰 배경 위에서도 보이도록 그리드 전용 스크롤바 (다크 뷰어 공통 스타일 무시) */
 .grid-scroll::-webkit-scrollbar { width: 13px; height: 13px; }
@@ -1173,6 +1176,11 @@ h2 {
   z-index: 1;
 }
 
+/* 읽기 전용 뷰어의 셀 선택 표시 — 수정은 못 해도 "지금 이 칸을 보고 있다"는 참조용
+   하이라이트다. 검색 히트(.g-hit-current, 주황/노랑)와 색이 겹치지 않게 문서 종류별
+   --v-accent(엑셀은 초록)를 쓴다. */
+.grid-table td.g-selected { outline: 2px solid var(--v-accent); outline-offset: -1px; }
+
 .grid-noselect { user-select: none; -webkit-user-select: none; }
 
 .sheet-tabs {
@@ -1198,6 +1206,23 @@ h2 {
 
 .sheet-tab:hover { background: rgba(0, 0, 0, 0.06); }
 .sheet-tab.active { background: #fff; color: #1c1b1a; font-weight: 600; box-shadow: 0 -1px 4px rgba(0,0,0,0.08); }
+
+/* 선택한 셀 참조·행 수 같은 "지금 어디 있는지" 정보 — 스프레드시트 관례대로 화면 맨 아래에
+   둔다(예전엔 상단 툴바의 줌 컨트롤 옆에 작게 끼어 있어 눈에 잘 안 띄었다). */
+.grid-status-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 3px 10px;
+  background: #eceef2;
+  border-top: 1px solid #d7dae0;
+  font-size: 0.72rem;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+.grid-cell-ref { font-weight: 600; color: #3d434e; min-width: 2.5em; }
+.grid-row-info { margin-left: auto; }
 
 /* ---------- 그리드(엑셀) 동시편집기 ---------- */
 

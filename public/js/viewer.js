@@ -8,6 +8,8 @@ const pagesContainer = document.getElementById('pages');
 const docTitle = document.getElementById('doc-title');
 const pageJumpInput = document.getElementById('page-jump-input');
 const pageJumpTotal = document.getElementById('page-jump-total');
+const gridCellRefEl = document.getElementById('grid-cell-ref');
+const gridRowInfoEl = document.getElementById('grid-row-info');
 const zoomLevelLabel = document.getElementById('zoom-level');
 const printBtn = document.getElementById('print-btn');
 const downloadBtn = document.getElementById('download-btn');
@@ -912,6 +914,7 @@ const gridState = {
   chunks: new Map(), // `${sheet}:${chunkIdx}` -> rows | 'loading'
   mergeStarts: new Map(),
   mergeCovered: new Set(),
+  selected: null, // { row, col } — 1-based, 실제 시트 좌표(병합에 덮인 칸이면 앵커 좌표로 맞춰 둔다)
 };
 
 function colLetter(index) {
@@ -960,18 +963,36 @@ function buildMergeIndex(sheet) {
   }
 }
 
-async function fetchChunk(sheetIdx, chunkIdx) {
+function fetchChunk(sheetIdx, chunkIdx) {
+  void ensureChunkLoaded(sheetIdx, chunkIdx);
+}
+
+/** fetchChunk와 달리 청크가 실제로 준비될 때까지 기다릴 수 있다 — 이미 다른 곳(스크롤 뷰포트)이
+ * 같은 청크를 불러오는 중이면 그 요청을 다시 보내지 않고 같은 Promise를 같이 기다린다. 방향키로
+ * "데이터 끝까지 이동"할 때, 아직 화면에 없는(스크롤로 지나가지 않은) 구간의 칸이 비었는지 실제로
+ * 확인하려면 이렇게 기다릴 수 있어야 한다. */
+const chunkLoadPromises = new Map();
+function ensureChunkLoaded(sheetIdx, chunkIdx) {
   const key = `${sheetIdx}:${chunkIdx}`;
-  if (gridState.chunks.has(key)) return;
+  const existing = gridState.chunks.get(key);
+  if (existing !== undefined && existing !== 'loading') return Promise.resolve();
+  let promise = chunkLoadPromises.get(key);
+  if (promise) return promise;
   gridState.chunks.set(key, 'loading');
-  try {
-    const from = chunkIdx * GRID_CHUNK + 1;
-    const data = await fetchJsonView(`/api/view/grid/rows?${tokenQuery}&sheet=${sheetIdx}&from=${from}&count=${GRID_CHUNK}`);
-    gridState.chunks.set(key, data.rows);
-    renderGridViewport();
-  } catch {
-    gridState.chunks.delete(key);
-  }
+  promise = (async () => {
+    try {
+      const from = chunkIdx * GRID_CHUNK + 1;
+      const data = await fetchJsonView(`/api/view/grid/rows?${tokenQuery}&sheet=${sheetIdx}&from=${from}&count=${GRID_CHUNK}`);
+      gridState.chunks.set(key, data.rows);
+      renderGridViewport();
+    } catch {
+      gridState.chunks.delete(key);
+    } finally {
+      chunkLoadPromises.delete(key);
+    }
+  })();
+  chunkLoadPromises.set(key, promise);
+  return promise;
 }
 
 async function fetchJsonView(url, options = {}) {
@@ -1048,6 +1069,7 @@ function renderGridViewport() {
       const isHit = gridSearchHits.has(hitKey);
       if (isHit) classes.push('g-hit');
       if (hitKey === gridCurrentHit) classes.push('g-hit-current');
+      if (gridState.selected && gridState.selected.row === r && gridState.selected.col === c) classes.push('g-selected');
       const value = isEmpty ? '' : isHit ? markMatches(cell.v, searchState.lastQuery) : escapeHtml(cell.v);
       const cls = classes.length > 0 ? ` class="${classes.join(' ')}"` : '';
       const span = merge ? ` colspan="${merge.cs}"${merge.rs > 1 ? ` rowspan="${merge.rs}"` : ''}` : '';
@@ -1065,7 +1087,7 @@ function renderGridViewport() {
         if (spillWidth > colWidthAt(sheet, c)) spillStyle = ` style="width:${spillWidth}px"`;
       }
       const content = value ? `<span class="g-cell-spill"${spillStyle}>${value}</span>` : '';
-      cells.push(`<td${cls}${span}>${content}</td>`);
+      cells.push(`<td data-r="${r}" data-c="${c}"${cls}${span}>${content}</td>`);
     }
     rowsHtml.push(`<tr style="height:${GRID_ROW_H}px">${cells.join('')}</tr>`);
   }
@@ -1075,9 +1097,9 @@ function renderGridViewport() {
   table.style.width = `${totalColWidthPx}px`;
   table.style.transform = `translateY(${(firstVisible - 1) * GRID_ROW_H}px)`;
 
-  if (pageJumpTotal) {
+  if (gridRowInfoEl) {
     const currentRow = Math.min(sheet.rowCount, Math.floor(scroll.scrollTop / GRID_ROW_H) + 1);
-    pageJumpTotal.textContent = `${currentRow.toLocaleString()} / ${sheet.rowCount.toLocaleString()}행`;
+    gridRowInfoEl.textContent = `${currentRow.toLocaleString()} / ${sheet.rowCount.toLocaleString()}행`;
   }
 }
 
@@ -1107,7 +1129,115 @@ function activateSheet(index) {
     tab.classList.toggle('active', i === index);
   }
   renderGridHead();
+  gridState.selected = { row: 1, col: 1 };
   renderGridViewport();
+  updateCellRefDisplay();
+}
+
+function updateCellRefDisplay() {
+  if (!gridCellRefEl) return;
+  gridCellRefEl.textContent = gridState.selected ? `${colLetter(gridState.selected.col)}${gridState.selected.row}` : '';
+}
+
+function scrollSelectedIntoView() {
+  const sheet = gridState.sheets[gridState.active];
+  if (!sheet || !gridState.selected) return;
+  const scroll = document.getElementById('grid-scroll');
+  const { row, col } = gridState.selected;
+  const rowTop = (row - 1) * GRID_ROW_H;
+  const rowBottom = rowTop + GRID_ROW_H;
+  if (rowTop < scroll.scrollTop) scroll.scrollTop = rowTop;
+  else if (rowBottom > scroll.scrollTop + scroll.clientHeight) scroll.scrollTop = rowBottom - scroll.clientHeight;
+
+  let colLeft = GRID_ROWNUM_W;
+  for (let c = 1; c < col; c += 1) colLeft += colWidthAt(sheet, c);
+  const colRight = colLeft + colWidthAt(sheet, col);
+  const visibleLeft = scroll.scrollLeft + GRID_ROWNUM_W;
+  const visibleRight = scroll.scrollLeft + scroll.clientWidth;
+  if (colLeft < visibleLeft) scroll.scrollLeft = colLeft - GRID_ROWNUM_W;
+  else if (colRight > visibleRight) scroll.scrollLeft = colRight - scroll.clientWidth;
+}
+
+function setSelected(row, col) {
+  gridState.selected = { row, col };
+  updateCellRefDisplay();
+  renderGridViewport();
+  scrollSelectedIntoView();
+}
+
+/** 지금 칸에서 (dRow,dCol)만큼 떨어진 칸으로 선택을 옮긴다 — 읽기 전용이라 grid-editor.ts의
+ * moveSelection과 달리 항상 이미 로드된 화면 안에서만 움직이므로(한 칸씩이라 스크롤 범위를
+ * 벗어나지 않는다) 비동기 청크 로딩이 필요 없다. 병합에 덮인 칸(자기 <td>가 없다)은 같은
+ * 방향으로 한 칸 더 건너뛴다. */
+function moveSelectionSimple(dRow, dCol) {
+  const sheet = gridState.sheets[gridState.active];
+  if (!sheet) return;
+  let { row, col } = gridState.selected ?? { row: 1, col: 1 };
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const nextRow = Math.min(Math.max(row + dRow, 1), sheet.rowCount);
+    const nextCol = Math.min(Math.max(col + dCol, 1), sheet.colCount);
+    if (nextRow === row && nextCol === col) return; // 시트 끝
+    row = nextRow;
+    col = nextCol;
+    if (!gridState.mergeCovered.has(`${row}:${col}`)) {
+      setSelected(row, col);
+      return;
+    }
+  }
+}
+
+async function isCellEmptyAt(sheetIdx, sheet, row, col) {
+  if (row < 1 || col < 1 || row > sheet.rowCount || col > sheet.colCount) return true;
+  await ensureChunkLoaded(sheetIdx, Math.floor((row - 1) / GRID_CHUNK));
+  const cell = cellAt(sheetIdx, row, col - 1);
+  return !cell || cell === 0;
+}
+
+/** 엑셀의 Ctrl(⌘)+방향키(End 모드) — 빈 칸이거나 바로 다음 칸이 비어 있으면 다음 데이터(또는
+ * 시트 끝)까지 건너뛰고, 데이터가 연속돼 있으면 그 블록이 끝나는 칸까지 단번에 이동한다.
+ * 아직 스크롤로 지나가지 않아 안 불러와진 구간도 지나가야 할 수 있어(청크 단위로 그때그때
+ * 불러온다) grid-editor.ts의 동기 버전과 달리 비동기다. */
+async function moveSelectionToEdge(dRow, dCol) {
+  const sheet = gridState.sheets[gridState.active];
+  if (!sheet) return;
+  const sheetIdx = gridState.active;
+  let { row, col } = gridState.selected ?? { row: 1, col: 1 };
+  const inBounds = (r, c) => r >= 1 && c >= 1 && r <= sheet.rowCount && c <= sheet.colCount;
+
+  if ((await isCellEmptyAt(sheetIdx, sheet, row, col)) || (await isCellEmptyAt(sheetIdx, sheet, row + dRow, col + dCol))) {
+    let r = row + dRow;
+    let c = col + dCol;
+    while (inBounds(r, c) && (await isCellEmptyAt(sheetIdx, sheet, r, c))) {
+      r += dRow;
+      c += dCol;
+    }
+    row = Math.min(Math.max(r, 1), sheet.rowCount);
+    col = Math.min(Math.max(c, 1), sheet.colCount);
+  } else {
+    let r = row;
+    let c = col;
+    while (inBounds(r + dRow, c + dCol) && !(await isCellEmptyAt(sheetIdx, sheet, r + dRow, c + dCol))) {
+      r += dRow;
+      c += dCol;
+    }
+    row = r;
+    col = c;
+  }
+  // 병합에 덮인 칸(자기 <td>가 없다)에 내려앉으면 moveSelectionSimple과 같은 이유로 한 칸 더 간다.
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (!gridState.mergeCovered.has(`${row}:${col}`)) {
+      setSelected(row, col);
+      return;
+    }
+    const nextRow = Math.min(Math.max(row + dRow, 1), sheet.rowCount);
+    const nextCol = Math.min(Math.max(col + dCol, 1), sheet.colCount);
+    if (nextRow === row && nextCol === col) {
+      setSelected(row, col);
+      return;
+    }
+    row = nextRow;
+    col = nextCol;
+  }
 }
 
 async function initGridView() {
@@ -1120,6 +1250,8 @@ async function initGridView() {
   document.getElementById('rotate-btn').hidden = true;
   document.getElementById('page-view-btn').hidden = true;
   document.getElementById('page-jump-input').hidden = true;
+  // "N/전체행" 정보는 이제 하단 grid-status-bar가 보여준다(예전엔 여기 상단 툴바에 작게 끼어 있었다).
+  pageJumpTotal.hidden = true;
   document.getElementById('invert-btn').hidden = true;
   document.getElementById('measure-btn').hidden = true;
   document.getElementById('markup-toggle-btn').hidden = true;
@@ -1154,6 +1286,45 @@ async function initGridView() {
       renderGridViewport();
       document.querySelector('.g-head-track').style.transform = `translateX(${-scroll.scrollLeft}px)`;
     });
+  });
+
+  // 열람 전용이라 내용은 못 고쳐도, 어느 칸인지는 클릭으로 짚어볼 수 있어야 편하다 — 가상 스크롤이라
+  // <td>가 스크롤마다 다시 그려지므로 개별 셀에 리스너를 달지 않고 테이블에 위임한다.
+  document.getElementById('grid-table').addEventListener('click', (event) => {
+    const td = event.target.closest('td[data-r]');
+    if (!td) return;
+    setSelected(Number(td.dataset.r), Number(td.dataset.c));
+    scroll.focus({ preventScroll: true });
+  });
+
+  // 방향키 이동 + Ctrl(⌘)+방향키로 데이터 끝까지 이동(엑셀 End 모드). 가상 스크롤이라 개별 셀이
+  // 포커스를 못 받으니(스크롤마다 새로 그려짐) 스크롤 컨테이너 자체가 포커스를 갖고 키를 받는다.
+  scroll.addEventListener('keydown', (event) => {
+    const withEdge = event.ctrlKey || event.metaKey;
+    switch (event.key) {
+      case 'ArrowUp':
+        event.preventDefault();
+        if (withEdge) void moveSelectionToEdge(-1, 0);
+        else moveSelectionSimple(-1, 0);
+        break;
+      case 'ArrowDown':
+        event.preventDefault();
+        if (withEdge) void moveSelectionToEdge(1, 0);
+        else moveSelectionSimple(1, 0);
+        break;
+      case 'ArrowLeft':
+        event.preventDefault();
+        if (withEdge) void moveSelectionToEdge(0, -1);
+        else moveSelectionSimple(0, -1);
+        break;
+      case 'ArrowRight':
+        event.preventDefault();
+        if (withEdge) void moveSelectionToEdge(0, 1);
+        else moveSelectionSimple(0, 1);
+        break;
+      default:
+        break;
+    }
   });
 
   // 복사 권한이 없으면 선택·복사·우클릭을 차단한다 (서버가 원본을 주지 않는 것이 근본 방어)
