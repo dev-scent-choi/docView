@@ -45,19 +45,20 @@ async function deleteDocument(docId) {
   return fetchJson(`/api/documents/${docId}`, { method: 'DELETE' });
 }
 
-/** 업로더 본인 열람용 — 전체 권한 토큰을 발급해 이동한다.
- * xlsx/pptx는 서버가 canEdit 여부와 무관하게 항상 editorUrl을 내려주므로(collab/room.ts가
- * 쓰기만 서버 쪽에서 막는다), "바로 보기"도 편집 화면과 완전히 같은 UI로 열되 수정만 못 하게
- * 한다 — 읽기 전용이라고 다른 화면(viewer.html)을 따로 보여줄 이유가 없다. docx는 editor.ts가
- * 아직 읽기 전용 모드를 지원하지 않아(server가 canEdit:false면 editorUrl 자체를 안 줌) 기존대로
- * viewer.html을 쓴다(canEdit는 요청하지 않는다 — 동시편집은 "동시편집 열기" 버튼의 몫이다).
+/** 업로더 본인 열람용 — 전체 권한 토큰을 발급해 이동한다. 항상 viewerUrl(업로드 시점에 미리
+ * 만들어 둔 렌더링 캐시를 그냥 HTTP로 읽는 가벼운 화면)로 연다 — xlsx/pptx도 마찬가지다.
+ * 예전에는 xlsx/pptx의 "바로 보기"도 편집 화면(editor-grid.html/editor-slides.html)을 그대로
+ * 재사용했는데(server가 canEdit 여부와 무관하게 항상 editorUrl을 내려주므로 가능은 했다), 그
+ * 화면은 열람뿐이어도 Yjs Y.Doc·WebSocket·LazyGridStore 전체 스트리밍 파싱·전체 시트 서식
+ * 동기화까지 실제 동시편집과 똑같이 다 거쳐서 열람 속도가 불필요하게 느렸다 — 편집 툴바·수식
+ * 입력창 등은 어차피 안 보이니 얻는 것 없이 비용만 지불하고 있었다. 동시편집이 실제로 필요한
+ * 경우는 "동시편집 열기" 버튼(openEditor)의 몫이다.
  * docx/xlsx/pptx가 아닌 문서(PDF 등 pages 뷰)는 동시편집 대상이 아니므로 canEdit이 곧 마크업
  * (리뷰 코멘트) 추가/삭제 권한이 된다 — 업로더 본인이 보는 화면이니 기본으로 켜서 발급한다. */
 async function openViewer(docId, viewer, ext) {
-  const opensReadOnlyEditor = ext === 'xlsx' || ext === 'pptx';
   const canEdit = !supportsEdit({ ext });
   const issued = await issueToken(docId, viewer, true, true, true, canEdit);
-  location.href = opensReadOnlyEditor && issued.editorUrl ? issued.editorUrl : issued.viewerUrl;
+  location.href = issued.viewerUrl;
 }
 
 /** 업로더 본인 편집용 — 전체 권한 + canEdit 토큰을 발급해 동시편집기로 이동한다(docx/xlsx). */
