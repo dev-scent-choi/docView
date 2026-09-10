@@ -149,6 +149,13 @@ export function spliceShapeTxBody(slideXml: string, shapeId: string, txBodyXml: 
   const result = slideXml.replace(spBlockRe, (spBlock) => {
     const idMatch = /<p:cNvPr\b[^>]*\bid="(\d+)"/.exec(spBlock);
     if (!idMatch || idMatch[1] !== shapeId) return spBlock;
+    // id는 맞아도 이 <p:sp> 블록에 <p:txBody>가 구조적으로 없을 수 있다(그림 등) — 그 경우
+    // 아래 정규식 치환은 아무것도 바꾸지 못한 채 spBlock을 그대로 돌려주는데, 그걸 놓치고
+    // replaced만 true로 찍으면 "교체 성공"으로 잘못 보고되며 수정이 조용히 사라진다.
+    // 원본 유실 금지가 최우선 기준이므로, 실제로 바꿀 대상이 없으면 여기서 즉시 throw한다.
+    if (!/<p:txBody>[\s\S]*?<\/p:txBody>/.test(spBlock)) {
+      throw new Error(`spliceShapeTxBody: shapeId ${shapeId}의 <p:sp> 블록에 <p:txBody>가 없습니다.`);
+    }
     replaced = true;
     return spBlock.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, txBodyXml);
   });

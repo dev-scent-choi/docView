@@ -197,4 +197,17 @@ describe('serializeTxBodyXml + spliceShapeTxBody (export)', () => {
     expect(shapes[0].x).toBe(1000000);
     expect(shapes[0].doc.textContent).toBe('New box');
   });
+
+  test('throws instead of silently no-op when the matched <p:sp> block has no <p:txBody>', () => {
+    // id는 일치하지만 <p:txBody>가 구조적으로 없는 <p:sp> 블록(그림 등)을 손으로 만든다 —
+    // parseSlideShapes는 이런 도형을 애초에 ParsedShape로 만들지 않지만, spliceShapeTxBody는
+    // 원시 XML 문자열을 그대로 받으므로 이런 입력도 걸러내지 못하면 안 된다.
+    const original =
+      XML_HEAD +
+      '<p:sp><p:nvSpPr><p:cNvPr id="42" name="NoBody"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:spPr/></p:sp>' +
+      XML_TAIL;
+
+    expect(() => spliceShapeTxBody(original, '42', '<p:txBody><a:bodyPr/><a:p/></p:txBody>')).toThrow();
+  });
 });
