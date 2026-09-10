@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { parseSlideShapes } from '../src/pptx/slideContent.js';
+import { appendNewShape, parseSlideShapes, serializeTxBodyXml, spliceShapeTxBody } from '../src/pptx/slideContent.js';
+import { pptxTextSchema as schema } from '../src/pptx/textSchema.js';
 
 const XML_HEAD =
   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
@@ -113,5 +114,87 @@ describe('parseSlideShapes', () => {
     const shapes = parseSlideShapes(xml);
     expect(shapes[0].doc.childCount).toBe(1);
     expect(shapes[0].doc.child(0).textContent).toBe('');
+  });
+});
+
+describe('serializeTxBodyXml + spliceShapeTxBody (export)', () => {
+  test('round-trips plain text unchanged', () => {
+    const original =
+      XML_HEAD +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp>' +
+      XML_TAIL;
+
+    const [shape] = parseSlideShapes(original);
+    const txBodyXml = serializeTxBodyXml(shape.doc);
+    const spliced = spliceShapeTxBody(original, '2', txBodyXml);
+
+    const [reparsed] = parseSlideShapes(spliced);
+    expect(reparsed.doc.textContent).toBe('Hello');
+  });
+
+  test('round-trips mixed bold/plain runs and does not touch the other shape', () => {
+    const original =
+      XML_HEAD +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="A"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:rPr b="1"/><a:t>Bold</a:t></a:r><a:r><a:t> plain</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="B"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Untouched</a:t></a:r></a:p></p:txBody></p:sp>' +
+      XML_TAIL;
+
+    const shapes = parseSlideShapes(original);
+    const editedDoc = schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Edited ', [schema.marks.strong.create()]),
+        schema.text('text'),
+      ]),
+    ]);
+    const spliced = spliceShapeTxBody(original, '2', serializeTxBodyXml(editedDoc));
+
+    const reparsed = parseSlideShapes(spliced);
+    const shapeA = reparsed.find((s) => s.shapeId === '2')!;
+    const shapeB = reparsed.find((s) => s.shapeId === '3')!;
+    expect(shapeA.doc.child(0).child(0).text).toBe('Edited ');
+    expect(shapeA.doc.child(0).child(0).marks.map((m) => m.type.name)).toEqual(['strong']);
+    expect(shapeB.doc.textContent).toBe('Untouched'); // 다른 도형은 안 건드림
+  });
+
+  test('color and font size survive the round trip', () => {
+    const doc = schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Red big', [
+          schema.marks.textColor.create({ color: '#00FF00' }),
+          schema.marks.fontSize.create({ size: 18 }),
+        ]),
+      ]),
+    ]);
+    const original =
+      XML_HEAD +
+      '<p:sp><p:nvSpPr><p:cNvPr id="9" name="X"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>placeholder</a:t></a:r></a:p></p:txBody></p:sp>' +
+      XML_TAIL;
+
+    const spliced = spliceShapeTxBody(original, '9', serializeTxBodyXml(doc));
+    const [reparsed] = parseSlideShapes(spliced);
+    const run = reparsed.doc.child(0).child(0);
+    expect(run.marks.find((m) => m.type.name === 'textColor')?.attrs.color).toBe('#00FF00');
+    expect(run.marks.find((m) => m.type.name === 'fontSize')?.attrs.size).toBe(18);
+  });
+
+  test('appendNewShape inserts a brand-new text box with its own position', () => {
+    const original = XML_HEAD + XML_TAIL; // 텍스트박스가 하나도 없는 슬라이드
+    const doc = schema.node('doc', null, [schema.node('paragraph', null, [schema.text('New box')])]);
+
+    const withShape = appendNewShape(
+      original,
+      { shapeId: 'new-abc123', x: 1000000, y: 2000000, w: 3000000, h: 500000 },
+      serializeTxBodyXml(doc),
+    );
+
+    const shapes = parseSlideShapes(withShape);
+    expect(shapes).toHaveLength(1);
+    expect(shapes[0].shapeId).toBe('new-abc123');
+    expect(shapes[0].x).toBe(1000000);
+    expect(shapes[0].doc.textContent).toBe('New box');
   });
 });
