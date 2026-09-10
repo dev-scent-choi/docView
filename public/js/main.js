@@ -234,11 +234,18 @@ function renderDocItem(doc) {
     button.textContent = '삭제';
     button.addEventListener('click', async () => {
       if (!confirm(`"${doc.name}" 문서를 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+      // 삭제 요청이 끝나기 전부터 즉시 반응이 보이도록, 버튼만이 아니라 카드 전체를 바로 흐리게
+      // 한다 — 예전에는 DELETE 요청과 그 뒤 목록 재조회(refreshList, 별도의 GET 왕복) 두 번의
+      // 네트워크 왕복이 끝나야만 화면이 바뀌어 "눌러도 한참 반응이 없다"고 느껴졌다.
       button.disabled = true;
+      li.classList.add('is-deleting');
       try {
         await deleteDocument(doc.id);
-        await refreshList();
+        // 성공하면 전체 목록을 다시 받아오는 대신 이 카드만 바로 지운다 — 왕복 한 번을 아낀다.
+        li.remove();
+        emptyMessage.hidden = docList.children.length > 0;
       } catch (error) {
+        li.classList.remove('is-deleting');
         button.disabled = false;
         setStatus(error.message, 'error');
       }

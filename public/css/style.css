@@ -231,6 +231,9 @@ h2 {
     transform var(--duration-med) ease;
 }
 .doc-item:hover { box-shadow: var(--shadow-card-hover); border-color: #d5cfc0; transform: translateY(-1px); }
+/* 삭제 확인 직후, 실제 삭제 요청이 끝나기 전부터 "지금 지워지고 있다"는 즉각적인 피드백을 준다 —
+   버튼 하나만 흐려지는 정도로는 눈에 잘 안 띄어 반응이 늦게 온다고 느껴지는 문제가 있었다. */
+.doc-item.is-deleting { opacity: 0.4; pointer-events: none; transition: opacity var(--duration-fast) ease; }
 
 .doc-info { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: baseline; }
 .doc-info strong { font-weight: 600; letter-spacing: -0.005em; }
