@@ -148,6 +148,10 @@ function filterValidEntries(
 export interface ExportedPptx {
   readonly bytes: Uint8Array;
   readonly finalParts: readonly string[];
+  /** finalParts[i]를 만들어낸 SlideEntry의 저장 전 id — flushToStore가 slideContents를
+   * 새로 발급되는 id로 재키잉할 때 쓴다(옛 id -> 새 id 매핑의 "옛 id" 쪽). filterValidEntries가
+   * 걸러낸 항목의 id는 여기 들어가지 않는다. */
+  readonly survivingEntryIds: readonly string[];
 }
 
 /**
@@ -161,6 +165,7 @@ export function exportPptxFromSlides(pptxBytes: Uint8Array, slidesArray: Y.Array
   if (entryList.length === 0) {
     throw new Error('슬라이드가 하나도 남지 않아 저장할 수 없습니다.');
   }
+  const survivingEntryIds = entryList.map((entry) => entry.id);
 
   const originalRelsXml = strFromU8(zipEntries['ppt/_rels/presentation.xml.rels']);
   const originalPresentationXml = strFromU8(zipEntries['ppt/presentation.xml']);
@@ -282,5 +287,5 @@ export function exportPptxFromSlides(pptxBytes: Uint8Array, slidesArray: Y.Array
   contentTypesXml = contentTypesXml.replace('</Types>', `${missingOverrides.join('')}</Types>`);
   zipEntries['[Content_Types].xml'] = strToU8(contentTypesXml);
 
-  return { bytes: zipSync(zipEntries), finalParts };
+  return { bytes: zipSync(zipEntries), finalParts, survivingEntryIds };
 }

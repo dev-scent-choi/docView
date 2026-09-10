@@ -215,4 +215,35 @@ describe('exportPptxFromSlides', () => {
     expect(strFromU8(entries['ppt/_rels/presentation.xml.rels'])).not.toContain('evil.example');
     expect(strFromU8(entries['[Content_Types].xml'])).not.toContain('evil.example');
   });
+
+  test('survivingEntryIds matches finalParts 1:1, in the same order, using pre-save ids', () => {
+    const ydoc = new Y.Doc();
+    const slidesArray = slidesArrayFrom(ydoc);
+    seedSlidesFromPptx(makeSamplePptx(['First', 'Second']), slidesArray);
+    const idsBeforeExport = slidesArray.toArray().map((e) => e.id);
+
+    const original = makeSamplePptx(['First', 'Second']);
+    const result = exportPptxFromSlides(original, slidesArray);
+
+    expect(result.survivingEntryIds).toEqual(idsBeforeExport);
+    expect(result.survivingEntryIds).toHaveLength(result.finalParts.length);
+  });
+
+  test('survivingEntryIds drops ids of entries filterValidEntries rejects (broken sourceSlidePart)', () => {
+    const ydoc = new Y.Doc();
+    const slidesArray = slidesArrayFrom(ydoc);
+    seedSlidesFromPptx(makeSamplePptx(['First', 'Second']), slidesArray);
+    const survivingIdBefore = slidesArray.get(0).id;
+    // 두 번째 항목을 존재하지 않는 슬라이드 파트를 가리키도록 깨뜨린다.
+    const broken = { ...slidesArray.get(1), sourceSlidePart: 'slide999.xml' };
+    ydoc.transact(() => {
+      slidesArray.delete(1, 1);
+      slidesArray.insert(1, [broken]);
+    });
+
+    const original = makeSamplePptx(['First', 'Second']);
+    const result = exportPptxFromSlides(original, slidesArray);
+
+    expect(result.survivingEntryIds).toEqual([survivingIdBefore]); // 깨진 두 번째 항목은 빠짐
+  });
 });
