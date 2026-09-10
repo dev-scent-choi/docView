@@ -124,6 +124,7 @@ const MESSAGE_PAGE_SUBSCRIBE = 2;
  * 항목), 새로 추가하는 값은 그 범위를 아예 벗어나게 둔다.
  */
 const MESSAGE_GRID_STRUCTURE_OP = 4;
+const MESSAGE_SLIDE_CONTENT_SUBSCRIBE = 5;
 
 const AUTOSAVE_IDLE_MS = 8_000;
 const PING_INTERVAL_MS = 30_000;

@@ -19,3 +19,29 @@ export interface SlideEntry {
 }
 
 export const PPTX_SLIDES_ARRAY = 'slides';
+
+/**
+ * slideContents.get(slideEntryId) -> Y.Map(shapeId -> Y.Map({ meta: SlideShapeMeta, content: Y.XmlFragment })).
+ * 슬라이드 "내용"은 이제 여기 담긴다 — 위 PPTX_SLIDES_ARRAY 자체는 여전히 순서/포인터만
+ * 나타낸다(이 파일 위쪽 주석은 "슬라이드 배열 자체"에는 내용을 안 담는다는 뜻으로 남겨 둔다).
+ */
+export const PPTX_SLIDE_CONTENTS_MAP = 'slideContents';
+
+/** slideContents 안, 텍스트박스 하나의 위치 메타데이터. content(Y.XmlFragment)는 같은
+ * 텍스트박스의 Y.Map 안에 'content' 키로 별도로 들어간다(이 인터페이스에는 없음 — Yjs
+ * 공유 타입은 plain interface로 표현할 수 없어서 분리한다). */
+export interface SlideShapeMeta {
+  readonly shapeId: string;
+  /** EMU(1pt = 12700 EMU) 단위, 원본 슬라이드 XML의 <a:off>/<a:ext>와 같은 단위.
+   * null = 원본 XML에 명시적 위치가 없어(레이아웃 상속 등) 기본값을 썼다는 뜻. */
+  readonly x: number | null;
+  readonly y: number | null;
+  readonly w: number | null;
+  readonly h: number | null;
+}
+
+/** 새로 추가한(원본에 없던) 텍스트박스의 기본 위치/크기 — 슬라이드 중앙에 가로 60%, 세로 20%.
+ * 표준 16:9 슬라이드 크기(12192000 x 6858000 EMU) 기준으로 잡되, 실제 슬라이드 크기가
+ * 다르면 호출부가 비율로 다시 계산한다(이 상수는 "기본 비율"의 근거로만 쓴다). */
+export const NEW_TEXTBOX_WIDTH_RATIO = 0.6;
+export const NEW_TEXTBOX_HEIGHT_RATIO = 0.2;
