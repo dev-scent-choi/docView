@@ -71,7 +71,7 @@ import {
 } from '../xlsx/lazyGridStore.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
 import { computeGridCellDisplayAsync, formatComputedValueForStorage } from '../xlsx/formulas.js';
-import { PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
+import { PPTX_SLIDE_CONTENTS_MAP, PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
 import {
   DOC_META_MAP,
   DOC_META_SAVED_AT_KEY,
@@ -1170,7 +1170,7 @@ async function flushToStore(room: Room): Promise<void> {
     // 받아들인다)이 끝난 뒤 배열이 이 시점과 달라졌는지 비교하기 위한 스냅샷 — 진짜 위험 구간은
     // exportPptxFromSlides의 동기적 zip 조작(끼어들 틈 없음)이 아니라 바로 이 await다.
     const snapshotBeforeSave = JSON.stringify(slidesArray.toArray());
-    const { bytes: newPptxBytes, finalParts } = exportPptxFromSlides(original, slidesArray);
+    const { bytes: newPptxBytes, finalParts, survivingEntryIds } = exportPptxFromSlides(original, slidesArray);
     await store.saveOriginal(docId, meta.ext, Buffer.from(newPptxBytes));
 
     // 저장이 끝난 직후, Yjs 배열을 "방금 디스크에 쓴 내용"과 다시 일치시킨다: 모든 항목을
@@ -1192,11 +1192,27 @@ async function flushToStore(room: Room): Promise<void> {
       room.suppressAutosaveReschedule = true;
       try {
         ydoc.transact(() => {
+          const newIds = finalParts.map(() => randomUUID());
+          // slideContents 재키잉을 배열 재작성과 같은 트랜잭션 안에서 한다 — 그래야 "배열은 새
+          // id인데 slideContents는 아직 옛 id"인 순간이 다른 클라이언트에 보이지 않는다(옛 id에
+          // 아직 콘텐츠가 없는 항목은 건너뛴다 — 아직 열어 본 적 없는 슬라이드). Y.Map은 이미
+          // 통합된(integrated) 인스턴스를 다른 키에 그대로 다시 넣을 수 없다(Yjs 공유 타입은
+          // 한 번 문서에 편입되면 재편입 시 내부 _prelimContent가 이미 null이라 깨진다) — 그래서
+          // 같은 내용(중첩된 서식 포함)을 보존하는 새 인스턴스를 clone()으로 만들어 새 키에 넣는다.
+          const slideContents = ydoc.getMap<Y.Map<unknown>>(PPTX_SLIDE_CONTENTS_MAP);
+          for (let i = 0; i < survivingEntryIds.length; i += 1) {
+            const oldId = survivingEntryIds[i];
+            const content = slideContents.get(oldId);
+            if (content !== undefined) {
+              slideContents.set(newIds[i], content.clone());
+              slideContents.delete(oldId);
+            }
+          }
           slidesArray.delete(0, slidesArray.length);
           slidesArray.insert(
             0,
             finalParts.map((part, index) => ({
-              id: randomUUID(),
+              id: newIds[index],
               kind: 'original' as const,
               sourceSlidePart: part,
               sourcePageNumber: index + 1,
@@ -1875,6 +1891,11 @@ export function getSeededPagesForTest(docId: string, sheet: number): Set<number>
 /** 테스트 전용 — 룸의 지연(lazy) 그리드 저장소를 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */
 export function getRoomLazyGridForTest(docId: string): LazyGridStore | null {
   return rooms.get(docId)?.lazyGrid ?? null;
+}
+
+/** 테스트 전용 — 룸의 Y.Doc을 직접 들여다본다. 프로덕션 코드에서는 쓰지 않는다. */
+export function getRoomYdocForTest(docId: string): Y.Doc | null {
+  return rooms.get(docId)?.ydoc ?? null;
 }
 
 /**
