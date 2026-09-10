@@ -1124,7 +1124,8 @@ function activateSheet(index) {
   let totalWidth = 0;
   for (let c = 1; c <= displayColCount(sheet); c += 1) totalWidth += colWidthAt(sheet, c);
   inner.style.width = `${GRID_ROWNUM_W + totalWidth}px`;
-  document.getElementById('grid-scroll').scrollTop = 0;
+  const scroll = document.getElementById('grid-scroll');
+  scroll.scrollTop = 0;
   for (const [i, tab] of [...document.querySelectorAll('.sheet-tab')].entries()) {
     tab.classList.toggle('active', i === index);
   }
@@ -1132,6 +1133,10 @@ function activateSheet(index) {
   gridState.selected = { row: 1, col: 1 };
   renderGridViewport();
   updateCellRefDisplay();
+  // A1이 시각적으로는 바로 선택돼 보이지만, 클릭을 한 번 해야만 방향키가 먹는 건 어색하다 —
+  // 시트를 열거나(또는 다른 시트로 전환) 하자마자 바로 방향키가 통하도록 스크롤 컨테이너에
+  // 포커스를 미리 준다(scrollIntoView는 여기서 필요 없으니 preventScroll로 막는다).
+  scroll.focus({ preventScroll: true });
 }
 
 function updateCellRefDisplay() {
