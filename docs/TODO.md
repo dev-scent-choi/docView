@@ -144,7 +144,7 @@
 
 ---
 
-## 3. pptx 텍스트박스 콘텐츠 동시편집 — 완료(2026-09-11), 발견된 버그는 Task 13 + Task 13 fix 라운드에서 전부 수정 완료
+## 3. pptx 텍스트박스 콘텐츠 동시편집 — 완료(2026-09-11), 발견된 버그는 Task 13 + Task 13 fix 라운드(1차·2차)에서 전부 수정 완료
 
 계획: `docs/superpowers/plans/2026-09-10-pptx-content-editing.md` (13개 태스크, 전부 완료).
 설계: `docs/superpowers/specs/2026-09-10-pptx-content-editing-design.md`.
@@ -269,7 +269,12 @@ SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브
 - **문서 정정**: 이 파일의 위 "회귀 위험 검증" 항목과 `src/pptx/slideContent.ts`/`src/pptx/collab.ts`의
   `removeShape` 관련 인라인 주석이 "이 throw는 정상 사용에서는 결코 발생하지 않는다"고 단정했던
   부분을 정정했다 — 이 fix 라운드 **이전에는 거짓**이었고(위 버그 1이 그 반증), 이 정규식 수정이
-  실제로 반영된 지금에서야 참이 된다는 점을 명시했다.
+  실제로 반영된 지금에서야 참이 된다는 점을 명시했다. **(2026-09-11 재검토로 이 문장 자체도
+  과도하게 단정적이었음이 드러나 다시 정정됨 — 아래 "Task 13 fix 2차 라운드" 항목 참고: `<p:sp\b`
+  블록 정규식에 한해서는 이 수정으로 baseline과 정확히 일치하게 됐지만, 세 함수가 함께 쓰는 id
+  추출 정규식(`id="([^"]+)"`)은 PowerPoint/LibreOffice가 실제로 내보내는 직렬화 형태에서만
+  baseline과 항상 일치하고, 어느 실제 생산자도 만들지 않는 합법적 변형에서는 이론상 여전히 어긋날
+  수 있다 — "절대 발생하지 않는다"는 그 범위 안에서만 참이다.)
 - **테스트**: `tests/pptxSlideContent.test.ts`에 단위 테스트 7개 추가 — 속성 있는 도형의
   `parseSlideShapes`/`hasShape`/`spliceShapeTxBody`(제자리 갱신, 중복 안 됨)/`removeShape`(삭제,
   형제 도형 안 건드림), 그리고 `<p:spPr>`/`<p:spTree>`를 도형으로 오인하지 않는지 확인하는 전용
@@ -290,6 +295,45 @@ SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브
   상태로도 실행해, "편집한 속성 있는 도형이 정확히 한 번만 나타난다" 단언이 `got 2`(중복)로
   실패하는 것을 직접 재현해 회귀 테스트가 실제 버그를 잡아낸다는 것도 확인했다.
 
+**Task 13 fix 2차 라운드 — `<p:txBody>` 정규식의 동일 버그 패턴 + 문서 과잉단정 정정 + 바이트 동일성
+테스트 보강 (2026-09-11, 재검토에서 발견):**
+- **Fix 1 (동일 버그 패턴)**: `spliceShapeTxBody`가 쓰는 `<p:txBody>...</p:txBody>` 탐지 정규식
+  두 곳(존재 여부 확인용 `.test()`, 실제 치환용 `.replace()`)이 위에서 이미 한 번 고친 `<p:sp\b`
+  버그와 정확히 같은 패턴으로 리터럴 `<p:txBody>`만 매치했다 — 여는 태그에 속성이 붙은 변형
+  (OOXML 스키마의 `CT_TextBody`는 속성을 정의하지 않으므로 `<p:sp>`보다 훨씬 드문 트리거지만,
+  어떤 재직렬화 도구가 네임스페이스 재선언 등을 붙이면 여전히 가능)을 만나면 실제 파서
+  (`parseSlideShapes`)는 그 도형의 텍스트 본문을 정상 인식하는데 이 함수만 "`<p:txBody>` 없음"으로
+  잘못 throw했다 — 저장/다운로드 경로 안에서 일어나므로 그 문서의 이후 모든 저장을 영구히 막는,
+  위 버그 1과 동일한 결과. `src/pptx/slideContent.ts`의 두 정규식을 `<p:txBody>` → `<p:txBody\b`로
+  넓혀 고쳤다(다른 파일에는 같은 패턴의 정규식이 없음을 확인).
+- **Fix 2 (문서 과잉단정 정정)**: 위 "Task 13 fix 라운드" 항목의 "문서 정정" 불릿과
+  `src/pptx/slideContent.ts`(`removeShape` doc comment)/`src/pptx/collab.ts`(삭제 병합 단계 인라인
+  주석)가 "`<p:sp\b`로 넓힌 지금은 이 throw가 절대 발생하지 않는다"를 무조건적 사실처럼 서술한
+  부분을 정확한 범위로 좁혔다 — 이건 `<p:sp\b` 블록 탐지 정규식에 한정된 얘기고, 세 함수가 함께 쓰는
+  또 다른 정규식(`<p:cNvPr>`에서 id 값을 뽑는 `/<p:cNvPr\b[^>]*\bid="([^"]+)"/`)은 여전히 실제 XML
+  파서와 완전히 같지 않다 — PowerPoint/LibreOffice가 실제로 내보내는 직렬화 형태(큰따옴표, id가
+  다른 속성보다 먼저 옴)에서는 항상 일치하지만, 합법적이지만 어느 실제 생산자도 만들지 않는 변형
+  (작은따옴표 `id='7'`, `=` 앞뒤 공백 `id = "7"`, id보다 앞선 속성 값 안의 이스케이프 안 된 `>`,
+  예: `name="a > b" id="7"`)에서는 이론상 여전히 어긋날 수 있다는 점을 명시했다. id 정규식 자체는
+  건드리지 않았다(요청 범위가 문서 정확성이었고, id 정규식 변경은 세 함수 모두의 캡처 그룹
+  구조를 바꿔야 해 위험 대비 이득이 낮다고 판단).
+- **Fix 3 (바이트 동일성 테스트 보강)**: `tests/pptxSlideContent.test.ts`의 기존 "속성 있는 형제
+  도형은 안 건드림" 테스트 2개(`spliceShapeTxBody`의 edit 시나리오, `removeShape`의 delete
+  시나리오)가 형제 도형에 대해 `.textContent`만 확인하던 것을, 그 형제의 `<p:sp>...</p:sp>` 블록
+  전체를 상수로 뽑아 `expect(result).toContain(siblingBlock)`으로 바이트 단위 동일성까지 확인하도록
+  강화했다(delete 시나리오의 형제는 원래 속성이 없었는데, "속성 있는 형제가 살아남는지"를 보이려면
+  형제 자신도 속성이 있어야 하므로 `flipH="1"`을 붙였다).
+- **새 테스트**: `tests/pptxSlideContent.test.ts`에 `spliceShapeTxBody`가 속성 붙은
+  `<p:txBody xmlns:a="...">`를 찾아 정상적으로(throw 없이) 갱신하는지, 속성 없는 형제 도형은
+  바이트 단위로 그대로인지 확인하는 테스트 1개 추가.
+- **검증**: RED 확인 — `git stash push --keep-index -- src/pptx/slideContent.ts`로 정규식/주석
+  수정만 되돌리고(새 테스트는 유지) `npx vitest run tests/pptxSlideContent.test.ts -t attribute`
+  실행 → 새 `<p:txBody\b` 테스트가 정확히 "shapeId 10의 `<p:sp>` 블록에 `<p:txBody>`가 없습니다"로
+  실패(다른 22개는 그대로 통과, 이미 넓혀진 `<p:sp\b` 관련 테스트는 영향 없음). `git stash pop`으로
+  복구 후 GREEN 재확인. `npx vitest run tests/pptxSlideContent.test.ts tests/roomPptxContent.test.ts`
+  → 2 files / 44 tests 모두 통과. 전체 스위트 `npx vitest run` → 44 files / 346 tests 모두 통과,
+  `npx tsc --noEmit` 클린.
+
 **그 외 참고(이번 세션 범위 밖, 새 버그 아님):** 슬라이드 레일 카드 썸네일이 `kind: 'duplicate'`
 슬라이드에 대해 깨진 이미지 요청(`/api/view/pages/null`)을 보내는 것을 수동 E2E 중 관찰함 — 이
 콘텐츠 편집 기능이 생기기 전부터(`811b376` 커밋, 최초 슬라이드 관리 UI) 있던 코드라 이번 플랜과
@@ -299,5 +343,6 @@ SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브
 표/차트/이미지 편집 제외 등은 설계 문서에 이미 문서화된 의도된 스코프 제한)은 지켜졌다 — 위
 검증에서 확인한 대로 안 연 슬라이드·표·이미지는 전부 바이트 단위로 보존됐다. "삭제" 기능 자체가
 저장 시 무효화되던 문제(Task 13)와, 속성이 붙은 `<p:sp>` 도형에 대해서만 삭제가 영구 실패하거나
-편집이 조용히 중복되던 문제(Task 13 fix 라운드, 코드 리뷰에서 발견) 모두 고쳤다 — 이 계획
-(13개 태스크 + 1개 fix 라운드)은 이제 전부 완료다.
+편집이 조용히 중복되던 문제(Task 13 fix 라운드)와, `<p:txBody>`에 대한 동일 버그 패턴 및 관련 문서
+과잉단정(Task 13 fix 2차 라운드, 재검토에서 발견) 모두 고쳤다 — 이 계획(13개 태스크 + 2개 fix
+라운드)은 이제 전부 완료다.

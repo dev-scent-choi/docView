@@ -156,7 +156,13 @@ export function serializeTxBodyXml(doc: PMNode): string {
  * 매치하지 못했다(이 함수는 "못 찾음"으로 throw하지는 않지만, 아래 hasShape가 같은 이유로 "없다"고
  * 잘못 답하면 이 함수가 아니라 appendNewShape가 불려 같은 도형이 중복 추가됐다 — Task 13 fix로
  * `\b`(단어 경계)로 넓혀 속성 유무와 무관하게 매치하면서도 `<p:spPr>`/`<p:spTree>`는 계속
- * 거른다: `sp` 다음이 `Pr`/`Tree`처럼 단어 문자로 이어지면 그 사이엔 경계가 없기 때문). */
+ * 거른다: `sp` 다음이 `Pr`/`Tree`처럼 단어 문자로 이어지면 그 사이엔 경계가 없기 때문).
+ *
+ * `<p:txBody>...</p:txBody>` 탐지 정규식도 (리뷰에서 지적된) 같은 계열의 문제를 안고 있었다 —
+ * 리터럴 `<p:txBody>`만 매치해, 여는 태그에 속성이 붙은 변형(OOXML 스키마 자체는 CT_TextBody에
+ * 속성을 정의하지 않으므로 `<p:sp>`보다 훨씬 드문 트리거지만, 어떤 재직렬화 도구가 네임스페이스
+ * 재선언 등을 붙이면 여전히 가능하다)을 만나면 이 함수가 "<p:txBody> 없음"으로 잘못 throw했다.
+ * 아래에서 `<p:txBody\b`로 넓혀 같은 방식으로 고쳤다. */
 export function spliceShapeTxBody(slideXml: string, shapeId: string, txBodyXml: string): string {
   const spBlockRe = /<p:sp\b(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
   let replaced = false;
@@ -167,11 +173,22 @@ export function spliceShapeTxBody(slideXml: string, shapeId: string, txBodyXml: 
     // 아래 정규식 치환은 아무것도 바꾸지 못한 채 spBlock을 그대로 돌려주는데, 그걸 놓치고
     // replaced만 true로 찍으면 "교체 성공"으로 잘못 보고되며 수정이 조용히 사라진다.
     // 원본 유실 금지가 최우선 기준이므로, 실제로 바꿀 대상이 없으면 여기서 즉시 throw한다.
-    if (!/<p:txBody>[\s\S]*?<\/p:txBody>/.test(spBlock)) {
+    //
+    // 이 <p:txBody> 탐지 정규식도 위 <p:sp\b 블록 정규식과 정확히 같은 이유로 `\b`(단어 경계)를
+    // 쓴다 — 리터럴 <p:txBody>만 매치하면, 어떤 재직렬화 도구가 <p:txBody>에 네임스페이스
+    // 재선언 같은 속성을 붙인(OOXML 스키마 자체는 CT_TextBody에 속성을 정의하지 않지만, 실제로
+    // 그런 속성 붙은 변형을 만들어내는 도구가 있을 수 있다) 슬라이드를 만나면, parseSlideShapes
+    // (실제 XML 파서)는 그 도형의 텍스트 본문을 정상적으로 인식하는데 이 함수만 "<p:txBody> 없음"
+    // 으로 잘못 throw한다 — 이 throw는 저장/다운로드 경로 안에서 일어나므로 그 문서의 이후 모든
+    // 저장을 영구히 막는다(<p:sp\b 정규식을 리터럴 <p:sp>로 뒀을 때 일어났던 것과 완전히 같은
+    // 종류의 결과). `\b`는 <p:txBody>(바로 뒤가 `>`)도, <p:txBody xmlns:a="...">(바로 뒤가 공백)도
+    // 매치하면서, <p:txBody> 접두어를 공유하되 실제로는 다른 태그(가정상의 <p:txBodyFoo> 등, 바로
+    // 뒤가 단어 문자로 이어짐)는 여전히 거른다.
+    if (!/<p:txBody\b[\s\S]*?<\/p:txBody>/.test(spBlock)) {
       throw new Error(`spliceShapeTxBody: shapeId ${shapeId}의 <p:sp> 블록에 <p:txBody>가 없습니다.`);
     }
     replaced = true;
-    return spBlock.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, txBodyXml);
+    return spBlock.replace(/<p:txBody\b[\s\S]*?<\/p:txBody>/, txBodyXml);
   });
   if (!replaced) {
     throw new Error(`spliceShapeTxBody: shapeId ${shapeId}를 슬라이드 XML에서 찾지 못했습니다.`);
@@ -250,8 +267,18 @@ export function appendNewShape(
  * 안에서 일어나므로, 그 문서의 이후 모든 저장·다운로드를 영구히 막았다(orphan된 baseline id는
  * 절대 사라지지 않으므로 사용자 쪽에서 되돌릴 방법도 없었다). 지금은 세 함수의 블록 정규식을
  * 전부 `<p:sp\b`로 넓혀(속성 유무와 무관하게 매치하되 `<p:spPr>`/`<p:spTree>`는 여전히 제외)
- * baseline과 이 함수가 항상 같은 도형 집합을 인식하므로, 위 "절대 발생하지 않아야 한다"는 주장이
- * 비로소 참이 된다. */
+ * baseline과 이 함수가 항상 같은 도형 집합을 인식한다.
+ *
+ * **위 "절대 발생하지 않아야 한다"는 주장의 정확한 범위**: 이건 `<p:sp\b` 블록 탐지 정규식에
+ * 한정된 얘기다 — 세 함수가 함께 쓰는 또 다른 정규식, `<p:cNvPr>`에서 id 속성값을 뽑는
+ * `/<p:cNvPr\b[^>]*\bid="([^"]+)"/`는 여전히 실제 XML 파서와 완전히 동일하지 않다. PowerPoint와
+ * LibreOffice가 실제로 내보내는, 큰따옴표를 쓰고 `id`가 다른 속성보다 먼저 오는 직렬화 형태에서는
+ * 항상 일치하지만, 합법적이지만 어느 실제 생산자도 만들어내지 않는 변형 — 작은따옴표
+ * (`id='7'`), `=` 앞뒤 공백(`id = "7"`), 또는 `id`보다 앞선 속성의 값 안에 이스케이프 안 된 `>`가
+ * 들어있는 경우(예: `name="a > b" id="7"`) — 에서는 이 id 정규식이 이론적으로 여전히 실제 파서와
+ * 다르게 판단할 수 있다. 그러므로 "이 throw가 절대 발생하지 않는다"는 건 실제 생산자가 만들어내는
+ * 직렬화 형태에 한해 참이지, 위와 같은 이론상 가능한 모든 합법적 XML 변형까지 포괄하는 절대적
+ * 보장은 아니다. */
 export function removeShape(slideXml: string, shapeId: string): string {
   const spBlockRe = /<p:sp\b(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
   let removed = false;

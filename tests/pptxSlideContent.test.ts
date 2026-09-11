@@ -252,13 +252,15 @@ describe('serializeTxBodyXml + spliceShapeTxBody (export)', () => {
   });
 
   test('spliceShapeTxBody updates an attributed <p:sp useBgFill="1"> shape in place — exactly one shape with that id, holding the new text, not a duplicate', () => {
+    const siblingBlock =
+      '<p:sp flipH="1"><p:nvSpPr><p:cNvPr id="9" name="Sibling"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Sibling Untouched</a:t></a:r></a:p></p:txBody></p:sp>';
     const original =
       XML_HEAD +
       '<p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="8" name="BgShape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
       '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr>' +
       '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Old Text</a:t></a:r></a:p></p:txBody></p:sp>' +
-      '<p:sp flipH="1"><p:nvSpPr><p:cNvPr id="9" name="Sibling"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
-      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Sibling Untouched</a:t></a:r></a:p></p:txBody></p:sp>' +
+      siblingBlock +
       XML_TAIL;
 
     const newDoc = schema.node('doc', null, [schema.node('paragraph', null, [schema.text('New Text')])]);
@@ -271,9 +273,44 @@ describe('serializeTxBodyXml + spliceShapeTxBody (export)', () => {
     expect(result).not.toContain('Old Text');
 
     // 다른 속성 있는(flipH="1") 도형은 전혀 건드리지 않는다 — 그 쪽도 <p:sp\b 넓힌 정규식이 잘못
-    // 건드리지 않는지 함께 확인한다.
+    // 건드리지 않는지 함께 확인한다. textContent만 비교하면 마크업이 미세하게 달라져도(예: 속성
+    // 순서, 공백) 통과할 수 있으므로, 그 도형의 원본 <p:sp>...</p:sp> 블록 전체가 바이트 단위로
+    // 정확히 그대로 남아 있는지도 직접 문자열 비교로 확인한다.
     const sibling = shapes.find((s) => s.shapeId === '9')!;
     expect(sibling.doc.textContent).toBe('Sibling Untouched');
+    expect(result).toContain(siblingBlock); // 바이트 단위 동일성 — 텍스트 내용만이 아니라 원본 XML 그대로
+  });
+
+  // 코드 리뷰에서 지적된, <p:sp\b 넓힘과 동일한 계열의 버그: spliceShapeTxBody가 쓰는
+  // <p:txBody>...</p:txBody> 탐지 정규식이 리터럴 <p:txBody>만 매치했다 — 여는 태그에 속성이 붙은
+  // 변형(예: 어떤 재직렬화 도구가 붙인 네임스페이스 재선언)을 만나면 parseSlideShapes(실제 XML
+  // 파서)는 그 도형의 텍스트 본문을 정상적으로 인식하는데도 이 함수는 "<p:txBody> 없음"으로 잘못
+  // throw했다(저장/다운로드 경로 안에서 — 그 문서의 이후 모든 저장을 영구히 막는 것과 동일한 결과).
+  test('spliceShapeTxBody finds and updates a shape whose <p:txBody> opening tag carries an attribute, without throwing, and leaves an untouched sibling shape alone', () => {
+    const siblingBlock =
+      '<p:sp><p:nvSpPr><p:cNvPr id="11" name="Sibling"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Sibling Untouched</a:t></a:r></a:p></p:txBody></p:sp>';
+    const original =
+      XML_HEAD +
+      '<p:sp><p:nvSpPr><p:cNvPr id="10" name="AttrBody"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+      '<a:bodyPr/><a:p><a:r><a:t>Old Text</a:t></a:r></a:p></p:txBody></p:sp>' +
+      siblingBlock +
+      XML_TAIL;
+
+    const newDoc = schema.node('doc', null, [schema.node('paragraph', null, [schema.text('New Text')])]);
+
+    expect(() => spliceShapeTxBody(original, '10', serializeTxBodyXml(newDoc))).not.toThrow();
+    const result = spliceShapeTxBody(original, '10', serializeTxBodyXml(newDoc));
+
+    const shapes = parseSlideShapes(result);
+    const edited = shapes.find((s) => s.shapeId === '10')!;
+    expect(edited.doc.textContent).toBe('New Text');
+    expect(result).not.toContain('Old Text');
+
+    const sibling = shapes.find((s) => s.shapeId === '11')!;
+    expect(sibling.doc.textContent).toBe('Sibling Untouched');
+    expect(result).toContain(siblingBlock); // 바이트 단위 동일성
   });
 });
 
@@ -323,13 +360,15 @@ describe('removeShape', () => {
   // 저장/다운로드 경로 안에서 일어나므로 그 문서의 이후 모든 저장을 영구히 막았다(사용자 쪽에서
   // 되돌릴 방법이 없는 orphan baseline id). 지금은 <p:sp\b로 넓혀 이 케이스가 정상적으로 제거된다.
   test('removes an attributed <p:sp useBgFill="1"> shape without throwing, leaving the sibling shape untouched (Task 13 fix — Critical)', () => {
+    const siblingBlock =
+      '<p:sp flipH="1"><p:nvSpPr><p:cNvPr id="9" name="Sibling"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Keep Me</a:t></a:r></a:p></p:txBody></p:sp>';
     const original =
       XML_HEAD +
       '<p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="8" name="BgShape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
       '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr>' +
       '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Delete Me</a:t></a:r></a:p></p:txBody></p:sp>' +
-      '<p:sp><p:nvSpPr><p:cNvPr id="9" name="Sibling"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
-      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Keep Me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      siblingBlock +
       XML_TAIL;
 
     const result = removeShape(original, '8');
@@ -340,6 +379,9 @@ describe('removeShape', () => {
     expect(shapes[0].doc.textContent).toBe('Keep Me');
     expect(result).not.toContain('Delete Me');
     expect(result).not.toContain('useBgFill');
+    // 형제 도형도 속성이 붙어 있다(flipH="1") — textContent만이 아니라 그 <p:sp>...</p:sp> 블록
+    // 전체가 삭제 연산 전후로 바이트 단위로 정확히 동일한지 직접 문자열 비교로 확인한다.
+    expect(result).toContain(siblingBlock);
   });
 });
 

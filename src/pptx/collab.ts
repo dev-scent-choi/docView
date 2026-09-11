@@ -560,7 +560,14 @@ export function exportPptxFromSlides(
       // 실제 PowerPoint 도형을 못 찾았으므로, 그런 도형을 삭제하면 baseline에는 있지만
       // removeShape는 못 찾는 모순이 생겨 이 throw가 정상 조작만으로 발생했고(export/다운로드
       // 경로 안에서 던지므로 그 문서의 이후 모든 저장을 영구히 막았다) — 세 함수의 정규식을
-      // `<p:sp\b`로 넓힌 지금에서야 이 안전장치가 실제로 "결코 발생하지 않는" 것이 됐다.
+      // `<p:sp\b`로 넓힌 지금은 baseline과 이 블록 탐지 정규식이 항상 같은 도형 집합을 인식한다.
+      // 단 이건 <p:sp\b 정규식에 한정된 얘기다 — 셋이 함께 쓰는 id 추출 정규식
+      // (`/<p:cNvPr\b[^>]*\bid="([^"]+)"/`, src/pptx/slideContent.ts의 removeShape 주석 참고)은
+      // PowerPoint/LibreOffice가 실제로 내보내는 직렬화 형태(큰따옴표, id가 다른 속성보다 먼저 옴)
+      // 에서는 항상 parseSlideShapes와 일치하지만, 어느 실제 생산자도 만들어내지 않는 합법적 변형
+      // (작은따옴표 id, `=` 앞뒤 공백, id보다 앞선 속성 값 안의 이스케이프 안 된 `>`)에서는 이론상
+      // 여전히 어긋날 수 있다 — 그러므로 이 안전장치가 "결코 발생하지 않는다"는 건 실제 생산자가
+      // 만들어내는 형태에 한해서만 참이다.
       if (baselineShapes) {
         for (const baselineShapeId of baselineShapes.keys()) {
           if (!perSlide.has(baselineShapeId)) {
