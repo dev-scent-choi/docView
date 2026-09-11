@@ -549,9 +549,13 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     const { store } = await import('../src/storage.js');
     const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
     const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, unzipSync } = await import('fflate');
 
     const docId = randomUUID();
-    await store.saveOriginal(docId, 'pptx', makeSamplePptx(['Source Text', 'Other Text']));
+    const original = makeSamplePptx(['Source Text', 'Other Text']);
+    await store.saveOriginal(docId, 'pptx', original);
     await store.writeMeta({
       id: docId,
       name: 'x.pptx',
@@ -592,10 +596,62 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     expect(dupPerSlide!.size).toBeGreaterThan(0);
 
     // 독립적인 깊은 복사인지 확인한다 — 소스를 수정해도 복제본은 영향을 받지 않는다(참조 공유가 아님).
+    // 이건 아직 Y.Map 키 레벨 확인이다(마커 키 하나가 새는지만 본다).
     ydoc.transact(() => {
       sourcePerSlide.get('2')!.set('__source_only_marker', true);
     });
     expect(dupPerSlide!.get('2')!.has('__source_only_marker')).toBe(false);
+
+    // 여기부터는 사람이 실제로 읽는 텍스트 내용 레벨에서 같은 것을 증명한다 — 소스와 복제본의
+    // 도형 "2"(샘플 pptx의 유일한 도형)를 각각 실제 Yjs 편집(다른 테스트들과 같은 방식으로
+    // prosemirrorToYXmlFragment를 통해 ProseMirror 문서를 Y.XmlFragment에 반영)으로 고쳐 쓴 뒤,
+    // exportPptxFromSlides가 만들어내는 실제 슬라이드 XML에서 각자의 편집만 보이고 상대방의 편집은
+    // 전혀 새어나가지 않아야 한다. slidesArray 순서는 [source(0), 'Other Text'(1), duplicate(2)]이므로
+    // finalParts도 같은 순서로 대응한다(exportPptxFromSlides는 entryList와 1:1로 finalParts를 만든다).
+
+    // (a) 소스만 먼저 편집한다.
+    const sourceFragment = sourcePerSlide.get('2')!.get('content') as Y.XmlFragment;
+    const sourceEditedDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Edited SOURCE Only')]),
+    ]);
+    ydoc.transact(() => {
+      prosemirrorToYXmlFragment(sourceEditedDoc, sourceFragment);
+    });
+
+    const afterSourceEdit = exportPptxFromSlides(original, slidesArray, slideContents);
+    const afterSourceEditEntries = unzipSync(afterSourceEdit.bytes);
+    const sourceXmlAfterSourceEdit = strFromU8(
+      afterSourceEditEntries[`ppt/slides/${afterSourceEdit.finalParts[0]}`],
+    );
+    const dupXmlAfterSourceEdit = strFromU8(
+      afterSourceEditEntries[`ppt/slides/${afterSourceEdit.finalParts[2]}`],
+    );
+    expect(sourceXmlAfterSourceEdit).toContain('Edited SOURCE Only'); // 소스는 편집대로 바뀌었다
+    // 복제본은 소스의 편집이 전혀 비치지 않고, 시딩 시점의 원문("Source Text") 그대로다.
+    expect(dupXmlAfterSourceEdit).toContain('Source Text');
+    expect(dupXmlAfterSourceEdit).not.toContain('Edited SOURCE Only');
+
+    // (b) 이번엔 반대 방향 — 복제본만 편집한다(소스는 더 건드리지 않는다).
+    const dupFragment = dupPerSlide!.get('2')!.get('content') as Y.XmlFragment;
+    const dupEditedDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Edited DUPLICATE Only')]),
+    ]);
+    ydoc.transact(() => {
+      prosemirrorToYXmlFragment(dupEditedDoc, dupFragment);
+    });
+
+    const afterBothEdits = exportPptxFromSlides(original, slidesArray, slideContents);
+    const afterBothEditsEntries = unzipSync(afterBothEdits.bytes);
+    const sourceXmlAfterBothEdits = strFromU8(
+      afterBothEditsEntries[`ppt/slides/${afterBothEdits.finalParts[0]}`],
+    );
+    const dupXmlAfterBothEdits = strFromU8(
+      afterBothEditsEntries[`ppt/slides/${afterBothEdits.finalParts[2]}`],
+    );
+    expect(dupXmlAfterBothEdits).toContain('Edited DUPLICATE Only'); // 복제본은 자신의 편집대로 바뀌었다
+    // 소스는 여전히 자신의 이전 편집만 남아 있다 — 복제본 편집이 소스로 거슬러 새지 않는다.
+    expect(sourceXmlAfterBothEdits).toContain('Edited SOURCE Only');
+    expect(sourceXmlAfterBothEdits).not.toContain('Edited DUPLICATE Only');
   });
 
   test('subscribing to a blank slide seeds an empty per-slide map (no shapes to parse)', async () => {
