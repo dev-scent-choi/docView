@@ -6,7 +6,13 @@ import path from 'node:path';
 import * as decoding from 'lib0/decoding';
 import * as encoding from 'lib0/encoding';
 import * as Y from 'yjs';
-import { messageYjsSyncStep2, messageYjsUpdate, readUpdate } from 'y-protocols/sync';
+import {
+  messageYjsSyncStep2,
+  messageYjsUpdate,
+  readUpdate,
+  writeSyncStep1,
+  writeUpdate,
+} from 'y-protocols/sync';
 import { prosemirrorToYXmlFragment } from 'y-prosemirror';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { makeSamplePptx } from './helpers.js';
@@ -44,6 +50,53 @@ class FakeSocket extends EventEmitter {
 /** 페이지 채우기/재계산은 청크마다 실제 setImmediate로 양보하므로 그 턴을 흘려보낸다(pptxCollab.test.ts와 동일). */
 async function flushEventLoop(turns = 30): Promise<void> {
   for (let i = 0; i < turns; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * 클라이언트가 접속 직후 보내는 것과 같은, "내 상태 벡터를 보낼 테니 diff를 달라"는 요청을 흉내낸다.
+ * join 시점에 서버가 먼저 보내는 syncStep1은 서버→클라이언트 방향의 "네 상태를 알려달라"는 요청일
+ * 뿐 실제 데이터 전송이 아니라서(room.ts의 joinEditSession 참고), FakeSocket이 그것만으로는 mirror를
+ * 채우지 못한다 — 이 함수로 클라이언트 쪽에서 먼저 요청해야 서버가 syncStep2(diff)로 응답하고,
+ * FakeSocket.send가 그걸 가로채 mirror에 적용한다. roomStructureSync.test.ts의 동명 헬퍼와 동일한
+ * 이유·동일한 구현.
+ */
+function syncMirrorWithRoom(socket: FakeSocket): void {
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_SYNC);
+  writeSyncStep1(encoder, socket.mirror);
+  socket.emit('message', encoding.toUint8Array(encoder));
+}
+
+/**
+ * 로컬 mirror Y.Doc에서 트랜잭션을 실행하고, 그 결과 생긴 Yjs update 바이트만 캡처해 돌려준다(즉시
+ * 서버로 보내지 않는다) — roomStructureSync.test.ts의 applyOnMirror와 같은 캡처 기법이지만, 캡처와
+ * 전송(sendUpdateToServer)을 의도적으로 분리한다. 두 "클라이언트"가 서로의 편집을 아직 보지 못한 채
+ * 갈라져(fork) 각자 독립적으로 편집을 계산해야 진짜 동시 편집(concurrent) 시나리오가 되기 때문이다 —
+ * 먼저 한쪽을 서버로 보내고 나서 다른 쪽을 계산하면, 나중 계산하는 쪽은 이미 앞쪽의 편집을 반영한
+ * 상태를 보게 되어 더 이상 "동시"가 아니다.
+ */
+function captureMirrorUpdate(doc: Y.Doc, fn: () => void): Uint8Array {
+  let captured: Uint8Array | null = null;
+  const onUpdate = (update: Uint8Array) => {
+    captured = captured === null ? update : Y.mergeUpdates([captured, update]);
+  };
+  doc.on('update', onUpdate);
+  doc.transact(fn);
+  doc.off('update', onUpdate);
+  if (captured === null) throw new Error('테스트 헬퍼 오류: 트랜잭션이 아무 update도 만들지 않았다');
+  return captured;
+}
+
+/**
+ * 캡처된 update를 실제 클라이언트가 서버로 보내는 것과 같은 MESSAGE_SYNC/messageYjsUpdate 프레임으로
+ * 감싸 FakeSocket에 흘려보낸다 — room.ts의 진짜 handleMessage 경로(readUpdate → room.ydoc 적용 →
+ * 다른 모든 연결로 broadcast)를 그대로 태운다.
+ */
+function sendUpdateToServer(socket: FakeSocket, update: Uint8Array): void {
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_SYNC);
+  writeUpdate(encoder, update);
+  socket.emit('message', encoding.toUint8Array(encoder));
 }
 
 /** slideContents 안, 텍스트박스 하나를 흉내 낸 최소 구조. 이 태스크 시점엔 아직 진짜
@@ -923,5 +976,104 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     expect(() => exportPptxFromSlides(original, slidesArray, slideContents)).toThrow(
       /<p:txBody>가 없습니다/,
     );
+  });
+
+  // Task 12 통합 테스트: 두 클라이언트가 같은 텍스트박스를 정말로 "동시에" 타이핑해도(서로의 편집을
+  // 아직 보지 못한 채 각자 갈라져 계산한 뒤에야 서버로 보내도) 둘 다 최종 문서에 살아남는지 — 진짜
+  // CRDT 병합 증명이다. FakeSocket 두 개 + mirror Y.Doc 두 개가 room.ts의 실제 WebSocket 프로토콜
+  // 경로(handleMessage → room.ydoc 적용 → 전체 연결로 broadcast)를 그대로 태운다. 패턴은
+  // roomForceClose.test.ts의 "같은 룸에 소켓 두 개가 join"과 roomStructureSync.test.ts의
+  // applyOnMirror(로컬 트랜잭션 → update 캡처 → FakeSocket에 'message'로 재생)를 결합한 것이고,
+  // collab.test.ts의 "두 독립적인 삽입이 같은 Y.Doc에 모두 살아남는다(CRDT 병합, last-writer-wins
+  // 손실 없음)" 테스트와 같은 증명을 오프라인 Y.applyUpdate 대신 실제 서버 룸 경로로 재현한다.
+  test('two clients concurrently typing into the same text box: both edits survive the merge', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+
+    // 두 클라이언트가 같은 문서 룸에 접속한다 — roomForceClose.test.ts의 socketA/socketB 패턴과 동일.
+    const socketA = new FakeSocket();
+    const socketB = new FakeSocket();
+    await joinEditSession(socketA as never, {} as never, docId, 'pptx', [], false);
+    await joinEditSession(socketB as never, {} as never, docId, 'pptx', [], false);
+
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    // 클라이언트 A가 슬라이드를 연다(시딩) — "동시편집 열기" 후 실제로 텍스트박스가 있는 슬라이드를
+    // 클릭했을 때와 같은 경로.
+    subscribeSlideContent(socketA, entryId);
+    await flushEventLoop();
+
+    // 두 클라이언트 모두 지금까지의 룸 상태로 자신의 로컬 mirror를 맞춘다 — 실제 브라우저 탭 두 개가
+    // 같은 문서를 열어 둔 상황과 같다.
+    syncMirrorWithRoom(socketA);
+    syncMirrorWithRoom(socketB);
+    await flushEventLoop();
+
+    // 두 mirror 모두 시딩된 텍스트박스(샘플 pptx의 유일한 도형, shapeId "2")의 같은 Y.XmlFragment를
+    // 복제로 갖고 있어야 한다.
+    function shapeFragment(mirror: Y.Doc): Y.XmlFragment {
+      const perSlide = mirror.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP).get(entryId)!;
+      const shapeMap = perSlide.get('2')!;
+      return shapeMap.get('content') as Y.XmlFragment;
+    }
+    const fragmentA = shapeFragment(socketA.mirror);
+    const fragmentB = shapeFragment(socketB.mirror);
+    const textA = (fragmentA.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    const textB = (fragmentB.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    expect(textA.toString()).toBe('Hello World');
+    expect(textB.toString()).toBe('Hello World');
+
+    // 핵심: 두 클라이언트가 "서로의 편집을 아직 보지 못한" 같은 시작 상태에서 갈라져(fork), 서로
+    // 다른 위치에 서로 다른 글자를 넣는 트랜잭션을 각자 만든다 — update만 먼저 캡처하고, 아직 어느
+    // 쪽도 서버로 보내지 않는다.
+    const updateA = captureMirrorUpdate(socketA.mirror, () => textA.insert(0, 'FROM-A: '));
+    const updateB = captureMirrorUpdate(socketB.mirror, () => textB.insert(textB.length, ' :FROM-B'));
+
+    // 이제 각자 계산한 update를 실제 클라이언트가 하는 것과 같은 방식으로 서버에 순서대로 보낸다 —
+    // room.ts의 진짜 handleMessage 경로(readUpdate → room.ydoc 적용 → 다른 모든 연결로 broadcast)를
+    // 태운다. B는 A의 편집을 반영하기 '전' 상태를 기준으로 위치를 계산했으므로, 이 순서로 적용해도
+    // (또는 반대 순서로 적용해도) Yjs가 두 삽입을 정확히 병합해야 한다.
+    sendUpdateToServer(socketA, updateA);
+    await flushEventLoop();
+    sendUpdateToServer(socketB, updateB);
+    await flushEventLoop();
+
+    // 핵심 단언 1: 룸의 canonical Y.Doc(서버가 저장할 때 실제로 읽는 바로 그 상태)에 두 편집이 모두
+    // 살아남았다 — 어느 한쪽이 다른 쪽을 조용히 덮어쓰지 않았다.
+    const perSlideAfterMerge = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP).get(entryId)!;
+    const mergedFragment = perSlideAfterMerge.get('2')!.get('content') as Y.XmlFragment;
+    const mergedParagraph = mergedFragment.get(0) as Y.XmlElement;
+    const mergedText = mergedParagraph.get(0) as Y.XmlText;
+    expect(mergedText.toString()).toBe('FROM-A: Hello World :FROM-B');
+
+    // 핵심 단언 2: 두 클라이언트의 mirror도 서로의 편집을 broadcast로 받아 똑같이 수렴했다 — 서버만
+    // 두 편집을 갖고 있고 클라이언트는 영영 못 보는 "반쪽 병합"이 아니다.
+    expect(textA.toString()).toBe('FROM-A: Hello World :FROM-B');
+    expect(textB.toString()).toBe('FROM-A: Hello World :FROM-B');
+
+    // 핵심 단언 3: 실제로 내보낸(다운로드할) pptx 바이트에도 두 편집이 모두 들어 있다 — Yjs 안에만
+    // 보이고 저장 파일에는 없는 조용한 데이터 손실이 아니다.
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+    expect(exportedSlideXml).toContain('FROM-A: Hello World :FROM-B');
   });
 });
