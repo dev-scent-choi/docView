@@ -43,6 +43,17 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
         빈 슬라이드
       </button>
+      <span class="toolbar-sep"></span>
+      <div class="toolbar-group" id="format-toolbar" aria-label="텍스트 서식">
+        <button id="btn-bold" class="icon-btn icon-btn-glyph" title="굵게 (Ctrl+B)"><strong>가</strong></button>
+        <button id="btn-italic" class="icon-btn icon-btn-glyph" title="기울임 (Ctrl+I)"><em>가</em></button>
+        <button id="btn-underline" class="icon-btn icon-btn-glyph" title="밑줄 (Ctrl+U)"><u>가</u></button>
+        <span class="color-btn" id="text-color-btn">
+          <span class="color-btn-glyph">가</span>
+          <span class="color-btn-bar"></span>
+          <input id="text-color-picker" class="color-btn-input" type="color" value="#1b1a17" title="글자 색" aria-label="글자 색" />
+        </span>
+      </div>
     </div>
   </header>
 

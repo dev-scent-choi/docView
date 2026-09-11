@@ -3,7 +3,7 @@ import { WebsocketProvider } from 'y-websocket';
 import * as encoding from 'lib0/encoding';
 import { EditorState, type Command } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
-import { baseKeymap } from 'prosemirror-commands';
+import { baseKeymap, toggleMark } from 'prosemirror-commands';
 import { keymap } from 'prosemirror-keymap';
 import { ySyncPlugin, yCursorPlugin, yUndoPlugin, ySyncPluginKey, undo, redo } from 'y-prosemirror';
 import {
@@ -151,6 +151,16 @@ function subscribeSlideContent(entryId: string, duplicateOfId?: string): void {
 // 사라진 슬라이드의 EditorView가 계속 ySyncPlugin으로 Y.Doc을 관찰하며 메모리/리스너가 샌다.
 const mountedViews = new Map<string, EditorView>();
 
+// 지금 포커스를 들고 있는(=가장 최근에 focus 이벤트를 받은) EditorView. 서식 툴바(굵게/기울임/
+// 밑줄/색)가 "어느 텍스트박스에 적용할지" 알아야 하는데, 슬라이드 하나에 텍스트박스(=EditorView)가
+// 여러 개 동시에 마운트돼 있어 이 값 없이는 알 수 없다 — 각 view 생성 시 handleDOMEvents.focus로
+// 갱신한다(아래 renderCanvasForSlide 참고). 툴바 버튼을 클릭하면 그 클릭이 현재 포커스된
+// contentEditable을 blur시키지만, ProseMirror의 state.selection은 DOM blur와 무관하게 그대로
+// 남아 있으므로(editor.ts의 bindToolbarButton과 동일한, 이미 검증된 가정) blur 이벤트에서 이 값을
+// null로 되돌리지 않는다 — 그러면 버튼 클릭 시점엔 이미 focusedView가 null이 되어 아무 데도 적용이
+// 안 된다. 유일한 예외는 renderCanvasForSlide가 이 view를 destroy할 때(아래에서 별도로 null 처리).
+let focusedView: EditorView | null = null;
+
 /**
  * y-prosemirror의 undo/redo를 실제 키(Ctrl+Z/Ctrl+Shift+Z, Ctrl+Y)에 연결한다. 이 keymap
  * 없이는 yUndoPlugin()이 만드는 Y.UndoManager가 순전히 죽은 코드다 — 어떤 키도 그 undo/redo
@@ -200,6 +210,10 @@ function renderCanvasForSlide(entryId: string): void {
   for (const view of previousViews) {
     const syncState = ySyncPluginKey.getState(view.state) as { binding?: { isDestroyed?: boolean } } | undefined;
     if (syncState?.binding) syncState.binding.isDestroyed = true;
+    // focusedView가 지금 destroy하려는 view를 가리키고 있다면 반드시 여기서 null로 되돌린다 —
+    // 그러지 않으면 (예: 이 텍스트박스에 커서를 두고 있다가 다른 슬라이드 카드를 클릭한 경우)
+    // 서식 툴바가 이미 destroy된(= docView가 사라진) view에 대고 dispatch를 시도해 예외를 던진다.
+    if (focusedView === view) focusedView = null;
     view.destroy();
   }
   mountedViews.clear();
@@ -229,6 +243,19 @@ function renderCanvasForSlide(entryId: string): void {
         plugins: [ySyncPlugin(fragment), yCursorPlugin(provider.awareness), yUndoPlugin(), keymap(buildSlideKeymap())],
       }),
       editable: () => canEdit,
+      // 서식 툴바가 "지금 어느 텍스트박스를 편집 중인지" 알 수 있는 유일한 경로 — handleDOMEvents의
+      // 반환값 false는 "이 이벤트를 ProseMirror가 가로채 막지 말고 브라우저 기본 동작(포커스 이동)을
+      // 그대로 진행시켜라"는 뜻이다(true를 반환하면 기본 동작이 막힌다). focus 이벤트는 이 view가
+      // DOM에 붙은 뒤 나중에(사용자가 클릭하거나 명시적으로 .focus()를 부를 때)만 발생하므로, 이
+      // 콜백 안에서 아직 대입 중인 const view를 참조해도(클로저) 실제 호출 시점엔 이미 대입이 끝나
+      // 있어 안전하다 — editor.ts가 dispatchTransaction에서 겪은 "생성자 안에서 view 참조" 문제와
+      // 달리, focus는 생성자 실행 중 동기적으로 발생하지 않는다.
+      handleDOMEvents: {
+        focus: () => {
+          focusedView = view;
+          return false;
+        },
+      },
     });
     mountedViews.set(shapeId, view);
   }
@@ -368,6 +395,47 @@ function setupCardActions(): void {
   });
 }
 
+/**
+ * 서식 툴바(굵게/기울임/밑줄/색) 버튼을 지금 focusedView에 잡혀 있는 EditorView에 연결한다.
+ * editor.ts(docx 편집기)의 bindToolbarButton/font-color 배선과 같은 패턴 — 일반 click 이벤트를
+ * 쓰고(mousedown+preventDefault가 아니다) 커맨드 적용 뒤 view.focus()로 포커스를 되돌린다. 이
+ * 패턴이 안전한 이유: 버튼 mousedown이 지금 포커스된 contentEditable을 blur시키더라도
+ * ProseMirror의 EditorState.selection은 DOM 포커스와 별개로 유지되는 순수 JS 상태라 click
+ * 핸들러가 실행되는 시점에도 그대로 남아 있다 — focusedView는 focus 이벤트에서만 갱신하고 blur
+ * 에서는 절대 건드리지 않으므로(renderCanvasForSlide 위쪽 주석 참고) 이 사이에도 값을 잃지 않는다.
+ */
+function bindFormatButton(id: string, markName: 'strong' | 'em' | 'underline'): void {
+  document.getElementById(id)?.addEventListener('click', () => {
+    if (!focusedView) return; // 포커스된 텍스트박스가 없으면 조용히 아무 것도 하지 않는다.
+    toggleMark(pptxTextSchema.marks[markName])(focusedView.state, focusedView.dispatch);
+    focusedView.focus();
+  });
+}
+
+function setupFormatToolbar(): void {
+  bindFormatButton('btn-bold', 'strong');
+  bindFormatButton('btn-italic', 'em');
+  bindFormatButton('btn-underline', 'underline');
+
+  const colorInput = document.getElementById('text-color-picker') as HTMLInputElement | null;
+  const colorBtn = document.getElementById('text-color-btn') as HTMLElement | null;
+  // .color-btn-bar는 --btn-color 커스텀 프로퍼티로 자기 배경색을 그리므로(style.css), 입력의
+  // 현재 값과 항상 맞춰 둔다 — 초기값(HTML의 value="#1b1a17")과 이후 사용자가 고른 색 둘 다.
+  colorBtn?.style.setProperty('--btn-color', colorInput?.value ?? '#1b1a17');
+  colorInput?.addEventListener('input', () => {
+    if (!focusedView) return;
+    colorBtn?.style.setProperty('--btn-color', colorInput.value);
+    const { from, to } = focusedView.state.selection;
+    // from === to(선택 영역 없이 커서만 있는 경우)여도 addMark(from, to, ...)는 그냥 빈 범위에
+    // 아무것도 안 하는 no-op이다 — toggleMark류처럼 "커서 위치의 다음 입력에 적용"하는 stored-mark
+    // 동작까지는 흉내 내지 않지만, 이 태스크 범위에서는 브리프가 그린 그대로(선택 영역에 직접
+    // addMark) 충분하다.
+    const tr = focusedView.state.tr.addMark(from, to, pptxTextSchema.marks.textColor.create({ color: colorInput.value }));
+    focusedView.dispatch(tr);
+    focusedView.focus();
+  });
+}
+
 async function main(): Promise<void> {
   if (!token) {
     showFatalError('열람 토큰이 없습니다.');
@@ -388,6 +456,7 @@ async function main(): Promise<void> {
   // 차단은 room.ts의 readOnlyConns(서버 쪽)가 이미 하고 있고, 여기서는 UI만 맞춘다.
   if (!canEdit) {
     document.getElementById('btn-add-blank')?.setAttribute('hidden', '');
+    document.getElementById('format-toolbar')?.setAttribute('hidden', '');
     connStatusEl.insertAdjacentHTML('afterend', '<span class="conn-status" data-status="readonly">읽기 전용</span>');
   }
 
@@ -444,6 +513,7 @@ async function main(): Promise<void> {
   renderSlides();
   setupDragAndDrop();
   setupCardActions();
+  setupFormatToolbar();
 
   // ---------- 저장 상태 표시(Office 365 스타일 "저장 중… / 저장됨") + Ctrl+S ----------
   // grid-editor.ts와 완전히 동일한 패턴 — docMeta.savedAt은 서버의 flushToStore가 실제로
