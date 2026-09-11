@@ -1327,6 +1327,23 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   /* 실제 폭/높이는 JS가 슬라이드 크기(EMU)에 맞춰 인라인 style로 설정한다(Task 9). */
 }
 
+/* 슬라이드 캔버스 위 텍스트박스 — editor-slides.ts의 renderCanvasForSlide가 x/y/w/h(EMU를
+   px로 스케일)를 인라인 style로 채운다. 여기서는 위치 지정 방식과 편집 중임을 알리는 최소한의
+   시각 신호만 담당한다(서식 툴바/추가·삭제 UI 폴리시는 이후 과제). */
+.slide-textbox {
+  position: absolute;
+  padding: 4px;
+  outline: 1px dashed transparent;
+}
+.slide-textbox:hover,
+.slide-textbox:focus-within {
+  outline-color: var(--v-glass-line);
+}
+.slide-textbox .ProseMirror {
+  outline: none;
+  min-height: 1em;
+}
+
 .slide-card {
   position: relative;
   border: 1px solid var(--v-glass-line);

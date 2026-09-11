@@ -1,8 +1,26 @@
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
-import { PPTX_SLIDES_ARRAY, type SlideEntry } from '../collab/pptxShared.js';
+import * as encoding from 'lib0/encoding';
+import { EditorState } from 'prosemirror-state';
+import { EditorView } from 'prosemirror-view';
+import { ySyncPlugin, yCursorPlugin, yUndoPlugin } from 'y-prosemirror';
+import {
+  PPTX_SLIDES_ARRAY,
+  PPTX_SLIDE_CONTENTS_MAP,
+  NEW_TEXTBOX_WIDTH_RATIO,
+  NEW_TEXTBOX_HEIGHT_RATIO,
+  type SlideEntry,
+  type SlideShapeMeta,
+} from '../collab/pptxShared.js';
 import { DOC_META_MAP, DOC_META_SAVED_AT_KEY, DOC_META_SAVE_ERROR_AT_KEY } from '../collab/gridShared.js';
 import { pickPresenceColorForName, renderPresenceAvatars } from './presence.js';
+import { pptxTextSchema } from '../pptx/textSchema.js';
+
+/** src/pptx/collab.ts가 서버 쪽에서 선언한 것과 같은 모양이지만, 그 파일은 node:crypto/fflate 등
+ * 서버 전용 의존성을 끌고 있어 클라이언트 번들에 그대로 import할 수 없다 — Yjs 공유 타입 자체는
+ * 구조적 타이핑이라 여기서 같은 모양을 독립적으로 다시 선언해도 완전히 호환된다. */
+type ShapeContentMap = Y.Map<unknown>;
+type PerSlideContentsMap = Y.Map<ShapeContentMap>;
 
 interface Permissions {
   readonly canPrint: boolean;
@@ -26,10 +44,10 @@ const canvasEl = document.getElementById('slide-canvas') as HTMLElement;
 const cardTemplate = document.getElementById('slide-card-template') as HTMLTemplateElement;
 const presenceListEl = document.getElementById('presence-list') as HTMLElement;
 
-// 어떤 슬라이드가 오른쪽 캔버스에 표시 중인지 — Task 9가 이 값을 읽어 실제 콘텐츠를 그린다.
+// 어떤 슬라이드가 오른쪽 캔버스에 표시 중인지 — renderCanvasForSlide()가 이 값을 읽어 실제
+// 콘텐츠를 그린다.
 let activeSlideId: string | null = null;
-// Task 9가 여기에 실제 렌더링 로직을 걸어 넣는 훅 포인트. 이 태스크에서는 상태 갱신만 하고
-// 아직 아무것도 구독하지 않는다.
+// Task 8이 남겨 둔 훅 포인트 — main()에서 renderCanvasForSlide로 연결한다(아래 참고).
 let onActiveSlideChange: ((entryId: string) => void) | null = null;
 
 function showFatalError(message: string): void {
@@ -47,6 +65,112 @@ async function fetchViewInfo(): Promise<ViewInfo> {
 let canEdit = false;
 let slidesArray: Y.Array<SlideEntry>;
 let dragFromIndex: number | null = null;
+// main()에서 대입된다(slidesArray와 같은 패턴) — subscribeSlideContent/renderCanvasForSlide가
+// 모듈 스코프 함수라 provider/slideContents도 모듈 스코프에 있어야 접근할 수 있다.
+let provider: WebsocketProvider;
+let slideContents: Y.Map<PerSlideContentsMap>;
+
+/**
+ * 슬라이드 크기(EMU)를 캔버스 픽셀로 스케일한다. `/api/view/info`(ViewInfo)에는 슬라이드 크기
+ * 필드가 없고, room.ts/viewer.ts 어디에도 sldSz류 값을 따로 내려주는 경로가 없다(grep으로 확인
+ * 완료) — 표준 16:9 슬라이드 크기(12192000 x 6858000 EMU)를 기본값으로 쓴다. 실제 프레젠테이션의
+ * 진짜 크기를 반영하는 것은 이후 개선 과제로 남긴다(이번 태스크에서 서버 API를 넓히지 않는다).
+ */
+const SLIDE_W_EMU = 12192000;
+const SLIDE_H_EMU = 6858000;
+const EMU_PER_PX = SLIDE_W_EMU / 960; // 캔버스 폭을 960px 기준으로 스케일(반응형은 이후 과제)
+
+function emuToPx(emu: number): number {
+  return emu / EMU_PER_PX;
+}
+
+/** room.ts의 MESSAGE_SLIDE_CONTENT_SUBSCRIBE와 **같은 값이어야 한다**(grid-editor.ts의
+ * MESSAGE_GRID_STRUCTURE_OP 주석과 같은 이유 — 0~3은 y-websocket 표준 프로토콜이 이미 쓰고
+ * 있어 새 값은 그 범위를 벗어나게 둔다). */
+const MESSAGE_SLIDE_CONTENT_SUBSCRIBE = 5;
+
+/**
+ * 슬라이드 하나를 "지금 연다"고 서버에 알린다 — 서버가 slideContents.get(entryId)를 아직 안
+ * 채웠으면 원본 XML에서 지연 시딩한다(room.ts의 seedSlideContentIfNeeded). 전송 방식은
+ * grid-editor.ts의 sendPageSubscription과 완전히 같은, 이미 검증된 패턴이다: WebsocketProvider가
+ * 공개 필드로 들고 있는 실제 WebSocket 인스턴스(node_modules/y-websocket/dist/src/y-websocket.d.ts:
+ * `ws: WebSocket | null`)에 varUint 메시지 타입 + varString JSON 페이로드를 그대로 실어 보낸다 —
+ * y-websocket 자신도 내부적으로 `this.ws.send(encoding.toUint8Array(encoder))`로 syncStep1을
+ * 보내는 것과 같은 경로다.
+ */
+function subscribeSlideContent(entryId: string, duplicateOfId?: string): void {
+  if (!provider.ws || provider.ws.readyState !== WebSocket.OPEN) return;
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_SLIDE_CONTENT_SUBSCRIBE);
+  encoding.writeVarString(encoder, JSON.stringify({ slideEntryId: entryId, duplicateOfId }));
+  provider.ws.send(encoding.toUint8Array(encoder));
+}
+
+// entryId(슬라이드) -> 그 슬라이드의 shapeId -> 마운트된 EditorView. 슬라이드를 벗어나면(다른
+// 슬라이드를 클릭하면) 여기 담긴 뷰를 전부 destroy()한 뒤 비운다 — 그러지 않으면 이미 화면에서
+// 사라진 슬라이드의 EditorView가 계속 ySyncPlugin으로 Y.Doc을 관찰하며 메모리/리스너가 샌다.
+const mountedViews = new Map<string, EditorView>();
+
+/**
+ * 오른쪽 캔버스에 activeSlideId 슬라이드의 텍스트박스를 실제 위치로 배치하고, 각 텍스트박스에
+ * pptxTextSchema 기반 ProseMirror EditorView를 마운트한다(y-prosemirror 바인딩은 editor.ts의
+ * 기존 docx 편집기 마운트 코드와 동일한 패턴 — ySyncPlugin/yCursorPlugin/yUndoPlugin).
+ *
+ * 슬라이드가 아직 한 번도 열린 적이 없으면(slideContents에 그 entryId 키가 없으면) 서버에 지연
+ * 시딩을 요청만 하고 빈 캔버스로 돌아온다 — 실제 콘텐츠는 slideContents.observe가 시딩 완료를
+ * 감지해 이 함수를 다시 불러줄 때 그려진다(main()의 observe 콜백 참고).
+ */
+function renderCanvasForSlide(entryId: string): void {
+  // 곧바로 view.destroy()를 부르지 않고 한 틱(매크로태스크) 미룬다. y-prosemirror의
+  // ySyncPlugin/yCursorPlugin은 원격 갱신·커서 이동이 있을 때마다 "이 view에 적용할 setMeta"를
+  // 모듈 전역 큐에 넣고 setTimeout(0)으로 나중에 한꺼번에 flush한다(y-prosemirror 소스의
+  // updateMetas). 그 큐가 이미 이 view를 예약해 둔 상태에서 우리가 view.destroy()를 동기로
+  // 불러버리면(destroy()는 view.docView를 null로 만든다), 나중에 실행되는 그 flush가 이미
+  // 죽은 view에 대고 dispatch를 시도해 "Cannot read properties of null (reading 'matchesNode')"
+  // 예외를 던진다 — 실제로 두 탭이 동시에 타이핑하는 중 슬라이드를 전환하는 시나리오로 재현
+  // 확인했다(y-prosemirror 1.3.7 updateMetas가 binding.isDestroyed를 확인하긴 하지만, 그
+  // 라이브러리 자신이 그 플래그를 어디서도 true로 설정하지 않아 가드가 항상 무력하다 — 업스트림
+  // 결함이라 우리 쪽 코드에서 그 플래그에 기댈 수 없다). destroy()를 setTimeout(0)으로 미루면,
+  // 클릭 이전에 이미 예약돼 있던 flush가 (아직 살아있는 view에 대해) 먼저 실행되어 정상적으로
+  // 끝난 뒤에야 view가 파괴된다 — DOM에서는 아래에서 즉시 교체하므로 화면 전환 자체는 지연되지
+  // 않는다(detached된 DOM 위에서 view.destroy()를 부르는 것 자체는 안전하다).
+  const previousViews = [...mountedViews.values()];
+  if (previousViews.length > 0) {
+    setTimeout(() => {
+      for (const view of previousViews) view.destroy();
+    }, 0);
+  }
+  mountedViews.clear();
+  canvasEl.style.width = `${emuToPx(SLIDE_W_EMU)}px`;
+  canvasEl.style.height = `${emuToPx(SLIDE_H_EMU)}px`;
+  canvasEl.replaceChildren();
+
+  const perSlide = slideContents.get(entryId);
+  if (!perSlide) {
+    subscribeSlideContent(entryId); // 아직 안 열렸다 — 요청하고 observe가 다시 불러줄 때까지 대기
+    return;
+  }
+  for (const [shapeId, shapeMap] of perSlide.entries()) {
+    const meta = shapeMap.get('meta') as SlideShapeMeta;
+    const box = document.createElement('div');
+    box.className = 'slide-textbox';
+    box.style.left = `${emuToPx(meta.x ?? SLIDE_W_EMU * 0.2)}px`;
+    box.style.top = `${emuToPx(meta.y ?? SLIDE_H_EMU * 0.4)}px`;
+    box.style.width = `${emuToPx(meta.w ?? SLIDE_W_EMU * NEW_TEXTBOX_WIDTH_RATIO)}px`;
+    box.style.height = `${emuToPx(meta.h ?? SLIDE_H_EMU * NEW_TEXTBOX_HEIGHT_RATIO)}px`;
+    canvasEl.append(box);
+
+    const fragment = shapeMap.get('content') as Y.XmlFragment;
+    const view = new EditorView(box, {
+      state: EditorState.create({
+        schema: pptxTextSchema,
+        plugins: [ySyncPlugin(fragment), yCursorPlugin(provider.awareness), yUndoPlugin()],
+      }),
+      editable: () => canEdit,
+    });
+    mountedViews.set(shapeId, view);
+  }
+}
 
 function cardFor(entry: SlideEntry, index: number): HTMLElement {
   const fragment = cardTemplate.content.cloneNode(true) as DocumentFragment;
@@ -85,7 +209,7 @@ function renderSlides(): void {
 }
 
 // 슬라이드 카드 클릭(또는 렌더 직후 기본 선택)으로 오른쪽 캔버스에 표시할 슬라이드를 바꾼다.
-// 실제 콘텐츠 렌더링은 Task 9가 onActiveSlideChange 콜백에서 처리한다 — 여기서는 상태/표시만.
+// 실제 콘텐츠 렌더링은 onActiveSlideChange 콜백(renderCanvasForSlide)이 처리한다 — 여기서는 상태/표시만.
 function selectSlide(entryId: string): void {
   activeSlideId = entryId;
   for (const card of railEl.querySelectorAll('.slide-card')) {
@@ -189,8 +313,9 @@ async function main(): Promise<void> {
 
   const ydoc = new Y.Doc();
   slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+  slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
   const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const provider = new WebsocketProvider(`${wsProtocol}//${location.host}/ws/edit`, info.docId, ydoc, {
+  provider = new WebsocketProvider(`${wsProtocol}//${location.host}/ws/edit`, info.docId, ydoc, {
     params: { token },
   });
 
@@ -211,6 +336,18 @@ async function main(): Promise<void> {
     }
   });
   provider.awareness.on('change', () => renderPresenceAvatars(presenceListEl, provider.awareness));
+
+  // slideContents는 슬라이드별 키가 지연 시딩될 때만 top-level 변경이 일어난다(텍스트박스 안
+  // 내용 편집은 그 nested Y.Map/Y.XmlFragment 안에서만 바뀌므로 여기로 이벤트가 올라오지 않는다
+  // — 그건 각 텍스트박스에 마운트된 ySyncPlugin이 알아서 반영한다). event.keysChanged로 지금
+  // 보고 있는 슬라이드의 키가 실제로 추가된 경우에만 다시 그린다 — 그러지 않고 무조건 다시
+  // 그리면, 다른 슬라이드가 시딩될 때마다(다른 참여자가 다른 슬라이드를 여는 경우 등) 지금 이미
+  // 마운트돼 편집 중인 EditorView까지 destroy→재생성돼 커서/포커스가 끊기고 만다.
+  slideContents.observe((event) => {
+    if (activeSlideId && event.keysChanged.has(activeSlideId)) renderCanvasForSlide(activeSlideId);
+  });
+  // Task 8이 남겨 둔 훅 — 슬라이드를 고를 때마다 오른쪽 캔버스를 그 슬라이드 내용으로 채운다.
+  onActiveSlideChange = renderCanvasForSlide;
 
   slidesArray.observe(renderSlides);
   renderSlides();
