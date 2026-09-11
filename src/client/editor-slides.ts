@@ -21,9 +21,16 @@ interface ViewInfo {
 const token = new URLSearchParams(location.search).get('token');
 const titleEl = document.getElementById('doc-title')!;
 const connStatusEl = document.getElementById('conn-status')!;
-const gridEl = document.getElementById('slides-grid') as HTMLElement;
+const railEl = document.getElementById('slides-rail') as HTMLElement;
+const canvasEl = document.getElementById('slide-canvas') as HTMLElement;
 const cardTemplate = document.getElementById('slide-card-template') as HTMLTemplateElement;
 const presenceListEl = document.getElementById('presence-list') as HTMLElement;
+
+// 어떤 슬라이드가 오른쪽 캔버스에 표시 중인지 — Task 9가 이 값을 읽어 실제 콘텐츠를 그린다.
+let activeSlideId: string | null = null;
+// Task 9가 여기에 실제 렌더링 로직을 걸어 넣는 훅 포인트. 이 태스크에서는 상태 갱신만 하고
+// 아직 아무것도 구독하지 않는다.
+let onActiveSlideChange: ((entryId: string) => void) | null = null;
 
 function showFatalError(message: string): void {
   document.getElementById('error-message')!.textContent = message;
@@ -61,20 +68,43 @@ function cardFor(entry: SlideEntry, index: number): HTMLElement {
 
 function renderSlides(): void {
   const entries = slidesArray.toArray();
-  gridEl.replaceChildren(...entries.map((entry, index) => cardFor(entry, index)));
+  railEl.replaceChildren(...entries.map((entry, index) => cardFor(entry, index)));
+  // 아직 선택된 슬라이드가 없거나(최초 로드), 선택돼 있던 슬라이드가 방금 삭제됐다면 첫 번째
+  // 슬라이드로 선택을 옮긴다 — 그러지 않으면 삭제 후 레일에 활성 표시가 하나도 안 남는다.
+  const activeStillExists = entries.some((entry) => entry.id === activeSlideId);
+  if (!activeStillExists) {
+    if (entries.length > 0) {
+      selectSlide(entries[0].id);
+      return; // selectSlide()가 아래와 동일한 active 클래스 갱신을 이미 하고 끝났다
+    }
+    activeSlideId = null;
+  }
+  for (const card of railEl.querySelectorAll('.slide-card')) {
+    card.classList.toggle('active', (card as HTMLElement).dataset.id === activeSlideId);
+  }
+}
+
+// 슬라이드 카드 클릭(또는 렌더 직후 기본 선택)으로 오른쪽 캔버스에 표시할 슬라이드를 바꾼다.
+// 실제 콘텐츠 렌더링은 Task 9가 onActiveSlideChange 콜백에서 처리한다 — 여기서는 상태/표시만.
+function selectSlide(entryId: string): void {
+  activeSlideId = entryId;
+  for (const card of railEl.querySelectorAll('.slide-card')) {
+    card.classList.toggle('active', (card as HTMLElement).dataset.id === entryId);
+  }
+  onActiveSlideChange?.(entryId);
 }
 
 function setupDragAndDrop(): void {
-  gridEl.addEventListener('dragstart', (event) => {
+  railEl.addEventListener('dragstart', (event) => {
     const card = (event.target as HTMLElement).closest<HTMLElement>('.slide-card');
     if (!card) return;
     dragFromIndex = Number(card.dataset.index);
     event.dataTransfer?.setData('text/plain', card.dataset.id ?? '');
   });
-  gridEl.addEventListener('dragover', (event) => {
+  railEl.addEventListener('dragover', (event) => {
     if (dragFromIndex !== null) event.preventDefault();
   });
-  gridEl.addEventListener('drop', (event) => {
+  railEl.addEventListener('drop', (event) => {
     event.preventDefault();
     const target = (event.target as HTMLElement).closest<HTMLElement>('.slide-card');
     if (!target || dragFromIndex === null) return;
@@ -95,11 +125,18 @@ function setupDragAndDrop(): void {
 }
 
 function setupCardActions(): void {
-  gridEl.addEventListener('click', (event) => {
-    if (!canEdit) return;
+  railEl.addEventListener('click', (event) => {
     const target = event.target as HTMLElement;
     const card = target.closest<HTMLElement>('.slide-card');
     if (!card) return;
+    // 복제/삭제 버튼이 아니라 카드 자체(썸네일 등)를 클릭했다면 선택만 하고 끝난다 — 읽기
+    // 전용 열람자도 슬라이드를 넘겨 보되(canEdit 게이트 없이), 복제/삭제 버튼은 어차피
+    // cardFor()에서 이미 DOM에서 제거돼 있어 아래 분기로는 내려오지 않는다.
+    if (!target.closest('.slide-card-duplicate') && !target.closest('.slide-card-delete')) {
+      selectSlide(card.dataset.id!);
+      return;
+    }
+    if (!canEdit) return;
     const index = Number(card.dataset.index);
     const entry = slidesArray.get(index);
     if (target.closest('.slide-card-duplicate')) {

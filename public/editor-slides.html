@@ -46,7 +46,12 @@
     </div>
   </header>
 
-  <main id="slides-grid" class="slides-editor-grid" aria-label="슬라이드 목록"></main>
+  <div class="slides-editor-body">
+    <aside id="slides-rail" class="slides-rail" aria-label="슬라이드 목록"></aside>
+    <main id="slide-canvas-wrap" class="slide-canvas-wrap">
+      <div id="slide-canvas" class="slide-canvas" aria-label="선택한 슬라이드 콘텐츠"></div>
+    </main>
+  </div>
 
   <template id="slide-card-template">
     <div class="slide-card" draggable="true">
