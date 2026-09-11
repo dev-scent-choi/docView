@@ -161,6 +161,18 @@ const mountedViews = new Map<string, EditorView>();
 // 안 된다. 유일한 예외는 renderCanvasForSlide가 이 view를 destroy할 때(아래에서 별도로 null 처리).
 let focusedView: EditorView | null = null;
 
+// 지금 활성 슬라이드의 perSlide(Y.Map<shapeId, shapeMap>)에 붙여 둔 구조적 변경 구독 해제 함수.
+// perSlide 자기 자신에 대한 얕은(shallow) observe는 shapeId 키가 추가/삭제될 때만(=텍스트박스
+// 추가/삭제) 올라오고, 텍스트박스 "안" 내용 편집(타이핑)은 그보다 훨씬 깊은 Y.XmlFragment
+// 레벨에서 일어나 여기로 전혀 올라오지 않는다 — 그래서 이 구독을 renderCanvasForSlide 재호출
+// 트리거로 써도 키 입력마다 EditorView가 destroy/재생성되는 일은 없다. slideContents 자체의
+// 최상위 observe(main() 참고)는 "슬라이드가 아직 시딩 전이냐"만 보므로, 이미 시딩된 슬라이드
+// 안에서 텍스트박스가 추가/삭제되는 것(이 태스크의 핵심 기능)은 그 최상위 observe로는 잡히지
+// 않는다 — 그래서 이 별도의 perSlide 레벨 구독이 필요하다. renderCanvasForSlide가 불릴 때마다
+// (슬라이드 전환이든, 이 구독 자신이 재호출한 것이든) 맨 위에서 이전 구독을 먼저 해제하고 새로
+// 붙이므로, 활성 슬라이드가 아닌 슬라이드에 대한 구독이 남아있는 일은 없다.
+let activePerSlideUnobserve: (() => void) | null = null;
+
 /**
  * y-prosemirror의 undo/redo를 실제 키(Ctrl+Z/Ctrl+Shift+Z, Ctrl+Y)에 연결한다. 이 keymap
  * 없이는 yUndoPlugin()이 만드는 Y.UndoManager가 순전히 죽은 코드다 — 어떤 키도 그 undo/redo
@@ -178,6 +190,22 @@ function buildSlideKeymap(): Record<string, Command> {
     'Mod-y': redo,
     'Mod-Shift-z': redo,
   };
+}
+
+/**
+ * 읽기 전용 열람자가 "아직 아무도 열어본 적 없는" 슬라이드를 볼 때 캔버스에 보여줄 안내.
+ * (Task 9 리뷰에서 지적된 항목 — canEdit 세션은 subscribeSlideContent로 서버 지연 시딩을
+ * 요청할 수 있지만, 읽기 전용 연결은 room.ts가 그 요청 자체를 서버에서 거부하므로 응답이 영영
+ * 오지 않는다. 그 상태를 아무 설명 없는 빈 캔버스로 방치하지 않고, 편집자가 먼저 열어야 한다는
+ * 것을 명시적으로 알린다. 원본 슬라이드 내용/이미지를 렌더링하는 것은 이 기능 전체의 범위 밖이라
+ * 시도하지 않는다.) canvasEl.replaceChildren()이 이미 이전 내용을 비운 뒤 호출되므로 여기서는
+ * 추가만 한다.
+ */
+function showSlideUnavailablePlaceholder(): void {
+  const placeholder = document.createElement('div');
+  placeholder.className = 'slide-canvas-placeholder';
+  placeholder.textContent = '이 슬라이드는 아직 미리보기를 사용할 수 없습니다 (편집자가 먼저 열어야 합니다).';
+  canvasEl.append(placeholder);
 }
 
 /**
@@ -217,24 +245,69 @@ function renderCanvasForSlide(entryId: string): void {
     view.destroy();
   }
   mountedViews.clear();
+  // 이전에 활성이던 슬라이드의 perSlide 구조 구독을 해제한다 — 그러지 않으면 다른 슬라이드로
+  // 옮긴 뒤에도 그 슬라이드에 텍스트박스가 추가/삭제될 때마다(원격 협업자가 하는 것 포함) 이미
+  // 화면에 없는 슬라이드를 위해 불필요하게 이 함수가 다시 불린다.
+  activePerSlideUnobserve?.();
+  activePerSlideUnobserve = null;
   canvasEl.style.width = `${emuToPx(SLIDE_W_EMU)}px`;
   canvasEl.style.height = `${emuToPx(SLIDE_H_EMU)}px`;
   canvasEl.replaceChildren();
 
   const perSlide = slideContents.get(entryId);
   if (!perSlide) {
-    subscribeSlideContent(entryId); // 아직 안 열렸다 — 요청하고 observe가 다시 불러줄 때까지 대기
+    if (canEdit) {
+      subscribeSlideContent(entryId); // 아직 안 열렸다 — 요청하고 observe가 다시 불러줄 때까지 대기
+    } else {
+      // 읽기 전용 연결은 시딩(=Y.Doc 쓰기)을 트리거하는 구독 요청을 room.ts가 서버에서 직접
+      // 거부한다(MESSAGE_SLIDE_CONTENT_SUBSCRIBE 핸들러의 readOnlyConns 체크) — 그러니 보내봤자
+      // 응답이 오지 않을 요청을 굳이 보내지 않는다. 편집자가 먼저 이 슬라이드를 열어 시딩해 줄
+      // 때까지 이 뷰어는 이유를 알 수 있는 안내를 본다 — 나중에 다른 세션의 편집자가 이 슬라이드를
+      // 열면 slideContents.observe(main() 참고)가 이 함수를 다시 불러 정상적으로 대체된다.
+      showSlideUnavailablePlaceholder();
+    }
     return;
   }
+  // perSlide는 이미 존재하지만(슬라이드가 한 번은 시딩됨) 그 안에서 텍스트박스가 나중에
+  // 추가/삭제될 수 있다("텍스트 추가" 버튼, 삭제 버튼, 또는 원격 협업자의 같은 조작) — 그 구조적
+  // 변경(=perSlide 자신의 키 추가/삭제)을 감지해 다시 그린다. 얕은 observe라 텍스트박스 "안"
+  // 내용 편집(타이핑)에는 반응하지 않는다(위 activePerSlideUnobserve 선언부 주석 참고).
+  const onPerSlideStructureChange = () => renderCanvasForSlide(entryId);
+  perSlide.observe(onPerSlideStructureChange);
+  activePerSlideUnobserve = () => perSlide.unobserve(onPerSlideStructureChange);
+
   for (const [shapeId, shapeMap] of perSlide.entries()) {
     const meta = shapeMap.get('meta') as SlideShapeMeta;
     const box = document.createElement('div');
     box.className = 'slide-textbox';
+    box.dataset.shapeId = shapeId; // 디버깅/테스트에서 개별 텍스트박스를 식별하기 위함(동작에는 영향 없음)
     box.style.left = `${emuToPx(meta.x ?? SLIDE_W_EMU * 0.2)}px`;
     box.style.top = `${emuToPx(meta.y ?? SLIDE_H_EMU * 0.4)}px`;
     box.style.width = `${emuToPx(meta.w ?? SLIDE_W_EMU * NEW_TEXTBOX_WIDTH_RATIO)}px`;
     box.style.height = `${emuToPx(meta.h ?? SLIDE_H_EMU * NEW_TEXTBOX_HEIGHT_RATIO)}px`;
     canvasEl.append(box);
+
+    if (canEdit) {
+      // 호버 시에만 보이는 작은 × 삭제 버튼(CSS: .slide-textbox-delete). perSlide.delete는
+      // 위에서 이 슬라이드에 붙여 둔 onPerSlideStructureChange 구독을 트리거해 renderCanvasForSlide를
+      // 다시 부르므로, 남은 텍스트박스 전체가 destroy→재생성되는 이미 검증된 기존 경로(이 함수 맨
+      // 위의 previousViews 정리)를 그대로 타 삭제된 shapeId의 EditorView도 함께 정리된다 — 별도
+      // cleanup 로직을 새로 만들 필요가 없다.
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'slide-textbox-delete';
+      deleteBtn.textContent = '×';
+      deleteBtn.title = '텍스트 상자 삭제';
+      deleteBtn.setAttribute('aria-label', '텍스트 상자 삭제');
+      deleteBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const ydoc = slidesArray.doc!;
+        ydoc.transact(() => {
+          perSlide.delete(shapeId);
+        });
+      });
+      box.append(deleteBtn);
+    }
 
     const fragment = shapeMap.get('content') as Y.XmlFragment;
     const view = new EditorView(box, {
@@ -393,6 +466,41 @@ function setupCardActions(): void {
       { id: crypto.randomUUID(), kind: 'blank', sourceSlidePart: null, sourcePageNumber: null },
     ]);
   });
+  document.getElementById('btn-add-textbox')?.addEventListener('click', () => {
+    if (!canEdit || !activeSlideId) return;
+    const entryId = activeSlideId;
+    const ydoc = slidesArray.doc!;
+    ydoc.transact(() => {
+      // 슬라이드가 완전히 빈 상태(원본이 blank로 만들어졌거나, 아직 시딩되지 않은 것과는 다르게
+      // canEdit 세션이라면 애초에 subscribeSlideContent로 이미 시딩됐어야 하지만, 혹시라도 정말
+      // shapeless한 슬라이드라면) slideContents에 이 슬라이드의 perSlide 항목 자체가 없을 수
+      // 있다 — 그 경우 여기서 새로 만든다.
+      let perSlide = slideContents.get(entryId);
+      if (!perSlide) {
+        perSlide = new Y.Map<ShapeContentMap>();
+        slideContents.set(entryId, perSlide);
+      }
+      const shapeId = `new-${crypto.randomUUID()}`;
+      const shapeMap: ShapeContentMap = new Y.Map();
+      const meta: SlideShapeMeta = {
+        shapeId,
+        x: Math.round((SLIDE_W_EMU * (1 - NEW_TEXTBOX_WIDTH_RATIO)) / 2),
+        y: Math.round((SLIDE_H_EMU * (1 - NEW_TEXTBOX_HEIGHT_RATIO)) / 2),
+        w: Math.round(SLIDE_W_EMU * NEW_TEXTBOX_WIDTH_RATIO),
+        h: Math.round(SLIDE_H_EMU * NEW_TEXTBOX_HEIGHT_RATIO),
+      };
+      shapeMap.set('meta', meta);
+      shapeMap.set('content', new Y.XmlFragment());
+      perSlide.set(shapeId, shapeMap);
+    });
+    // perSlide가 이미 있었다면 위 변경은 slideContents 자신의 키가 아니라 그 안의 perSlide
+    // Y.Map에 대한 나머지 변경이라 최상위 slideContents.observe(main() 참고)로는 안 올라온다 —
+    // 하지만 이 슬라이드가 지금 활성 상태였다면(대부분의 경우) renderCanvasForSlide가 이미 이
+    // perSlide에 onPerSlideStructureChange 구독을 붙여 뒀으므로(위 renderCanvasForSlide 참고)
+    // 그 구독이 알아서 다시 그려준다 — perSlide를 방금 새로 만든 경우(원래 shapeless)만
+    // slideContents.set이 최상위 키 변경이라 그 observe가 대신 다시 그려준다. 두 경로 모두
+    // 여기서 별도로 renderCanvasForSlide를 부를 필요가 없다.
+  });
 }
 
 /**
@@ -456,6 +564,7 @@ async function main(): Promise<void> {
   // 차단은 room.ts의 readOnlyConns(서버 쪽)가 이미 하고 있고, 여기서는 UI만 맞춘다.
   if (!canEdit) {
     document.getElementById('btn-add-blank')?.setAttribute('hidden', '');
+    document.getElementById('btn-add-textbox')?.setAttribute('hidden', '');
     document.getElementById('format-toolbar')?.setAttribute('hidden', '');
     connStatusEl.insertAdjacentHTML('afterend', '<span class="conn-status" data-status="readonly">읽기 전용</span>');
   }

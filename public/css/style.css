@@ -857,6 +857,13 @@ h2 {
    markup-add-btn을 canEdit 아닐 때 실제로 숨기려면 이 규칙이 필요하다. */
 .icon-btn[hidden] { display: none; }
 
+/* 같은 문제가 .btn-pill(display:inline-flex 선언)에도 그대로 있다 — editor-slides.ts가
+   읽기 전용 세션에서 #btn-add-blank/#btn-add-textbox에 hidden 속성만 설정해 왔는데(Task 8
+   이후), 이 규칙이 없으면 그 hidden이 실제로는 아무 효과가 없어 두 버튼 모두 읽기 전용
+   세션에서도 계속 시각적으로 보였다(Task 11 수동 확인 중 발견 — 클릭 핸들러 자체는
+   canEdit 체크로 막혀 있어 동작은 안 하지만, 화면에는 계속 떠 있었다). */
+.btn-pill[hidden] { display: none; }
+
 .pages-container.markup-drawing,
 .pages-container.markup-drawing .page-frame { cursor: crosshair; }
 
@@ -1342,6 +1349,51 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 .slide-textbox .ProseMirror {
   outline: none;
   min-height: 1em;
+}
+
+/* 텍스트박스 우상단 삭제(×) 버튼 — 평소엔 숨겨져 있다가 텍스트박스에 마우스를 올리거나(호버)
+   포커스가 안에 들어오면(예: 키보드로 탐색) 보인다. .slide-card-actions의 hover-reveal
+   패턴(이 파일 위쪽)과 같은 의도이나, 텍스트박스는 상시 하나의 작은 원형 버튼만 필요해 opacity
+   트랜지션 없이 display로 즉시 토글한다. */
+.slide-textbox-delete {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--v-glass-line);
+  border-radius: 50%;
+  background: #fff;
+  color: #c0392b;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+.slide-textbox-delete:hover { background: #c0392b; color: #fff; }
+.slide-textbox:hover .slide-textbox-delete,
+.slide-textbox:focus-within .slide-textbox-delete {
+  display: flex;
+}
+
+/* 읽기 전용 열람자가 아직 아무도 열어본 적 없는 슬라이드를 볼 때(editor-slides.ts의
+   showSlideUnavailablePlaceholder) 빈 캔버스 대신 보여주는 안내 문구 — error-card와 달리 화면
+   전체를 덮지 않고 캔버스 안에서 중앙 정렬만 한다. */
+.slide-canvas-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  text-align: center;
+  color: var(--v-text-dim);
+  font-size: 0.9rem;
+  line-height: 1.6;
 }
 
 .slide-card {
