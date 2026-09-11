@@ -1,9 +1,11 @@
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import * as encoding from 'lib0/encoding';
-import { EditorState } from 'prosemirror-state';
+import { EditorState, type Command } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
-import { ySyncPlugin, yCursorPlugin, yUndoPlugin } from 'y-prosemirror';
+import { baseKeymap } from 'prosemirror-commands';
+import { keymap } from 'prosemirror-keymap';
+import { ySyncPlugin, yCursorPlugin, yUndoPlugin, ySyncPluginKey, undo, redo } from 'y-prosemirror';
 import {
   PPTX_SLIDES_ARRAY,
   PPTX_SLIDE_CONTENTS_MAP,
@@ -98,8 +100,17 @@ const MESSAGE_SLIDE_CONTENT_SUBSCRIBE = 5;
  * y-websocket 자신도 내부적으로 `this.ws.send(encoding.toUint8Array(encoder))`로 syncStep1을
  * 보내는 것과 같은 경로다.
  */
+// 서버에 아직 시딩 응답을 못 받은(=slideContents에 그 키가 아직 없는) 슬라이드 id 집합 —
+// 같은 슬라이드 카드를 빠르게 두 번 클릭해도 두 번째 요청은 보내지 않기 위한 것이다(서버는
+// 요청마다 디스크 읽기+unzip+XML 파싱을 새로 하므로, 첫 요청이 아직 응답하기 전의 중복
+// 요청은 그 비용을 그대로 낭비하고 두 번째는 결국 조용히 no-op된다). slideContents.observe가
+// 실제로 그 슬라이드 키가 채워진 것을 감지하면(main() 참고) 이 집합에서 제거한다.
+const pendingSlideSubscriptions = new Set<string>();
+
 function subscribeSlideContent(entryId: string, duplicateOfId?: string): void {
   if (!provider.ws || provider.ws.readyState !== WebSocket.OPEN) return;
+  if (pendingSlideSubscriptions.has(entryId)) return; // 이미 이 슬라이드에 대한 요청이 응답을 기다리는 중
+  pendingSlideSubscriptions.add(entryId);
   const encoder = encoding.createEncoder();
   encoding.writeVarUint(encoder, MESSAGE_SLIDE_CONTENT_SUBSCRIBE);
   encoding.writeVarString(encoder, JSON.stringify({ slideEntryId: entryId, duplicateOfId }));
@@ -112,6 +123,25 @@ function subscribeSlideContent(entryId: string, duplicateOfId?: string): void {
 const mountedViews = new Map<string, EditorView>();
 
 /**
+ * y-prosemirror의 undo/redo를 실제 키(Ctrl+Z/Ctrl+Shift+Z, Ctrl+Y)에 연결한다. 이 keymap
+ * 없이는 yUndoPlugin()이 만드는 Y.UndoManager가 순전히 죽은 코드다 — 어떤 키도 그 undo/redo
+ * 커맨드를 부르지 않으니 Ctrl+Z를 누르면 브라우저 자신의 contentEditable 네이티브 undo가
+ * 대신 실행되고, 그 결과 되돌아간 DOM을 ProseMirror가 "새 입력"으로 다시 읽어들여 모든
+ * 협업자에게 진짜 편집처럼 전파해 버린다 — 그 과정에서 다른 협업자가 동시에 넣은, 전혀 무관한
+ * 편집을 조용히 되돌릴 수 있다. editor.ts(docx 편집기)의 buildKeymap과 같은 패턴 — baseKeymap
+ * 위에 Mod-z/Mod-y/Mod-Shift-z만 y-prosemirror의 undo/redo로 덮어쓴다(이 스키마엔 표/목록/
+ * 제목이 없어 그 외 docx 전용 바인딩은 옮기지 않는다).
+ */
+function buildSlideKeymap(): Record<string, Command> {
+  return {
+    ...baseKeymap,
+    'Mod-z': undo,
+    'Mod-y': redo,
+    'Mod-Shift-z': redo,
+  };
+}
+
+/**
  * 오른쪽 캔버스에 activeSlideId 슬라이드의 텍스트박스를 실제 위치로 배치하고, 각 텍스트박스에
  * pptxTextSchema 기반 ProseMirror EditorView를 마운트한다(y-prosemirror 바인딩은 editor.ts의
  * 기존 docx 편집기 마운트 코드와 동일한 패턴 — ySyncPlugin/yCursorPlugin/yUndoPlugin).
@@ -121,24 +151,27 @@ const mountedViews = new Map<string, EditorView>();
  * 감지해 이 함수를 다시 불러줄 때 그려진다(main()의 observe 콜백 참고).
  */
 function renderCanvasForSlide(entryId: string): void {
-  // 곧바로 view.destroy()를 부르지 않고 한 틱(매크로태스크) 미룬다. y-prosemirror의
-  // ySyncPlugin/yCursorPlugin은 원격 갱신·커서 이동이 있을 때마다 "이 view에 적용할 setMeta"를
-  // 모듈 전역 큐에 넣고 setTimeout(0)으로 나중에 한꺼번에 flush한다(y-prosemirror 소스의
-  // updateMetas). 그 큐가 이미 이 view를 예약해 둔 상태에서 우리가 view.destroy()를 동기로
-  // 불러버리면(destroy()는 view.docView를 null로 만든다), 나중에 실행되는 그 flush가 이미
-  // 죽은 view에 대고 dispatch를 시도해 "Cannot read properties of null (reading 'matchesNode')"
-  // 예외를 던진다 — 실제로 두 탭이 동시에 타이핑하는 중 슬라이드를 전환하는 시나리오로 재현
-  // 확인했다(y-prosemirror 1.3.7 updateMetas가 binding.isDestroyed를 확인하긴 하지만, 그
-  // 라이브러리 자신이 그 플래그를 어디서도 true로 설정하지 않아 가드가 항상 무력하다 — 업스트림
-  // 결함이라 우리 쪽 코드에서 그 플래그에 기댈 수 없다). destroy()를 setTimeout(0)으로 미루면,
-  // 클릭 이전에 이미 예약돼 있던 flush가 (아직 살아있는 view에 대해) 먼저 실행되어 정상적으로
-  // 끝난 뒤에야 view가 파괴된다 — DOM에서는 아래에서 즉시 교체하므로 화면 전환 자체는 지연되지
-  // 않는다(detached된 DOM 위에서 view.destroy()를 부르는 것 자체는 안전하다).
+  // y-prosemirror(1.3.7)의 ySyncPlugin/yCursorPlugin은 원격 갱신·커서 이동이 있을 때마다
+  // "이 view에 적용할 setMeta"를 모듈 전역 큐에 넣고 setTimeout(0)으로 나중에 한꺼번에
+  // flush한다(y-prosemirror 소스의 updateMetas). updateMetas는 flush 직전
+  // `syncState.binding.isDestroyed`를 확인하긴 하지만, 라이브러리 자신은 destroy() 안
+  // 어디서도 그 플래그를 true로 설정하지 않는다(node_modules/y-prosemirror/dist/
+  // y-prosemirror.cjs의 ProsemirrorBinding.prototype.destroy와 lib.js:29 확인 완료 — 순수
+  // 업스트림 버그, 죽은 코드나 마찬가지다). 그래서 destroy()만 부르면, 이미 예약돼 있던 flush가
+  // 나중에 실행되며 죽은 view에 대고 dispatch를 시도해 "Cannot read properties of null
+  // (reading 'matchesNode')" 예외를 던진다 — 두 탭이 동시에 타이핑하는 중 슬라이드를 전환하는
+  // 시나리오로 재현 확인했다. destroy() 호출을 한 틱 미루는 방식은 그 창을 좁힐 뿐 완전히
+  // 닫지는 못한다 — 미뤄둔 그 짧은 구간에도 원격 awareness 갱신(커서 이동 등)이 도착하면
+  // setMeta가 다시 예약되어 같은 충돌이 그대로 재현될 수 있다. 실제 수정은 라이브러리가
+  // 빠뜨린 그 플래그를 우리가 destroy() 호출 "직전"에 직접 true로 설정해 두는 것이다 —
+  // view.state(그리고 그 안의 ySyncPlugin state가 들고 있는 binding 객체)는 destroy() 이후에도
+  // 참조가 살아 있으므로, 이렇게 하면 언제 예약된 flush든 실행 시점에 항상 이 가드에 걸려
+  // 안전하게 no-op된다(타이밍에 기대지 않는 결정적 해결).
   const previousViews = [...mountedViews.values()];
-  if (previousViews.length > 0) {
-    setTimeout(() => {
-      for (const view of previousViews) view.destroy();
-    }, 0);
+  for (const view of previousViews) {
+    const syncState = ySyncPluginKey.getState(view.state) as { binding?: { isDestroyed?: boolean } } | undefined;
+    if (syncState?.binding) syncState.binding.isDestroyed = true;
+    view.destroy();
   }
   mountedViews.clear();
   canvasEl.style.width = `${emuToPx(SLIDE_W_EMU)}px`;
@@ -164,7 +197,7 @@ function renderCanvasForSlide(entryId: string): void {
     const view = new EditorView(box, {
       state: EditorState.create({
         schema: pptxTextSchema,
-        plugins: [ySyncPlugin(fragment), yCursorPlugin(provider.awareness), yUndoPlugin()],
+        plugins: [ySyncPlugin(fragment), yCursorPlugin(provider.awareness), yUndoPlugin(), keymap(buildSlideKeymap())],
       }),
       editable: () => canEdit,
     });
@@ -211,6 +244,10 @@ function renderSlides(): void {
 // 슬라이드 카드 클릭(또는 렌더 직후 기본 선택)으로 오른쪽 캔버스에 표시할 슬라이드를 바꾼다.
 // 실제 콘텐츠 렌더링은 onActiveSlideChange 콜백(renderCanvasForSlide)이 처리한다 — 여기서는 상태/표시만.
 function selectSlide(entryId: string): void {
+  // 이미 활성 상태인 슬라이드를 다시 클릭한 경우 — 아무것도 바뀌지 않았으니 다시 그리지 않는다.
+  // renderCanvasForSlide는 호출될 때마다 그 슬라이드의 모든 EditorView를 destroy→재생성하므로,
+  // 이 가드가 없으면 재클릭할 때마다 편집 중이던 커서 위치/선택 영역이 이유 없이 날아간다.
+  if (entryId === activeSlideId) return;
   activeSlideId = entryId;
   for (const card of railEl.querySelectorAll('.slide-card')) {
     card.classList.toggle('active', (card as HTMLElement).dataset.id === entryId);
@@ -264,17 +301,25 @@ function setupCardActions(): void {
     const index = Number(card.dataset.index);
     const entry = slidesArray.get(index);
     if (target.closest('.slide-card-duplicate')) {
+      const newEntryId = crypto.randomUUID();
       const ydoc = slidesArray.doc!;
       ydoc.transact(() => {
         slidesArray.insert(index + 1, [
           {
-            id: crypto.randomUUID(),
+            id: newEntryId,
             kind: 'duplicate',
             sourceSlidePart: entry.sourceSlidePart,
             sourcePageNumber: null,
           },
         ]);
       });
+      // 서버가 원본 파일의(오래된) 디스크 XML이 아니라 소스 슬라이드의 "지금 세션에서 편집된"
+      // 콘텐츠를 그대로 깊은 복사해 시딩하도록, 사용자가 실제로 이 복제본을 열기 전에(활성
+      // 슬라이드가 되는 것과 무관하게) 미리 duplicateOfId를 실어 구독 요청을 보내 둔다. 이걸
+      // 빼먹으면 나중에 이 슬라이드를 열 때 renderCanvasForSlide의 지연 시딩 경로가
+      // duplicateOfId 없는 평범한 subscribeSlideContent(entryId)만 보내게 되고, 서버는 그 경우
+      // 원본 XML로 폴백해 세션 중 편집 내용을 조용히 잃어버린다.
+      subscribeSlideContent(newEntryId, entry.id);
     } else if (target.closest('.slide-card-delete')) {
       if (slidesArray.length <= 1) return; // 마지막 남은 슬라이드는 지울 수 없다
       slidesArray.delete(index, 1);
@@ -344,6 +389,10 @@ async function main(): Promise<void> {
   // 그리면, 다른 슬라이드가 시딩될 때마다(다른 참여자가 다른 슬라이드를 여는 경우 등) 지금 이미
   // 마운트돼 편집 중인 EditorView까지 destroy→재생성돼 커서/포커스가 끊기고 만다.
   slideContents.observe((event) => {
+    // 새로 채워진(=서버가 시딩을 끝낸) 슬라이드는 더 이상 "응답 대기 중"이 아니므로 in-flight
+    // 집합에서 지운다 — 그러지 않으면 그 슬라이드에 대한 이후의 정당한 subscribeSlideContent
+    // 호출이 (실제로는 이미 끝난) 이전 요청 때문에 영원히 무시된다.
+    for (const key of event.keysChanged) pendingSlideSubscriptions.delete(key);
     if (activeSlideId && event.keysChanged.has(activeSlideId)) renderCanvasForSlide(activeSlideId);
   });
   // Task 8이 남겨 둔 훅 — 슬라이드를 고를 때마다 오른쪽 캔버스를 그 슬라이드 내용으로 채운다.
