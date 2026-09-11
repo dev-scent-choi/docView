@@ -1076,4 +1076,258 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
     expect(exportedSlideXml).toContain('FROM-A: Hello World :FROM-B');
   });
+
+  // Task 13 회귀 테스트: 텍스트박스를 × 버튼으로 삭제(perSlide.delete)한 뒤 저장(export)해도 실제
+  // 저장 파일에는 그 도형이 그대로 남아있던 버그(Task 12 end-to-end 검증에서 발견)의 회귀 테스트.
+  // 도형이 두 개인 슬라이드를 손으로 만든다(Critical #2 회귀 테스트와 같은 방식) — id="2"는 남기고
+  // id="3"을 사용자가 삭제할 대상으로 삼는다.
+  test('deleting a shape then exporting actually removes it from the output XML, other shapes untouched (Task 13)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { strFromU8, strToU8, unzipSync, zipSync } = await import('fflate');
+
+    const customSlideXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+      '<p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Keep Me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Delete Me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '</p:spTree></p:cSld></p:sld>';
+
+    const baseline = makeSamplePptx(['Hello World']);
+    const entries = unzipSync(baseline);
+    entries['ppt/slides/slide1.xml'] = strToU8(customSlideXml);
+    const original = Buffer.from(zipSync(entries));
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+    expect(perSlide.has('2')).toBe(true);
+    expect(perSlide.has('3')).toBe(true);
+
+    // 사용자가 × 버튼으로 도형 "3"을 삭제한다 — Task 11이 만든 클라이언트 동작(perSlide.delete)을
+    // 그대로 흉내낸다.
+    ydoc.transact(() => {
+      perSlide.delete('3');
+    });
+
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+
+    // 핵심 단언: 삭제한 도형은 저장 파일에서 실제로 사라졌다 — 이게 이 태스크가 고치는 버그다.
+    expect(exportedSlideXml).not.toContain('Delete Me');
+    expect(exportedSlideXml).not.toContain('id="3"');
+    // 다른 도형은 전혀 건드리지 않고 그대로 남아 있다.
+    expect(exportedSlideXml).toContain('Keep Me');
+    expect(exportedSlideXml).toContain('id="2"');
+  });
+
+  // Task 13 회귀 테스트: 두 번째 저장(autosave)에서도 삭제된 도형이 되살아나지 않아야 한다 — 브리프가
+  // 지적한 "시딩이 1회성이라 서버 재시작 후 재시딩되면 부활할 수 있다"는 위험과는 별개로, 재시딩 없이
+  // 같은 룸이 반복 저장만 해도 안정적으로 삭제 상태가 유지되는지를 확인한다. room.ts의 flushToStore가
+  // 매번 "방금 디스크에 쓴 결과"를 다음 저장의 원본으로 삼는 것과 같은 방식(Critical #1 회귀 테스트와
+  // 동일한 패턴)으로, 첫 저장 결과 바이트를 두 번째 저장의 원본으로 넘긴다.
+  test('a second export does not resurrect the deleted shape (simulates a second autosave) (Task 13)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { strFromU8, strToU8, unzipSync, zipSync } = await import('fflate');
+
+    const customSlideXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+      '<p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Keep Me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Delete Me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '</p:spTree></p:cSld></p:sld>';
+
+    const baseline = makeSamplePptx(['Hello World']);
+    const entries = unzipSync(baseline);
+    entries['ppt/slides/slide1.xml'] = strToU8(customSlideXml);
+    const original = Buffer.from(zipSync(entries));
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+    ydoc.transact(() => {
+      perSlide.delete('3');
+    });
+
+    // 저장 #1.
+    const firstResult = exportPptxFromSlides(original, slidesArray, slideContents);
+    const firstXml = strFromU8(unzipSync(firstResult.bytes)[`ppt/slides/${firstResult.finalParts[0]}`]);
+    expect(firstXml).not.toContain('Delete Me');
+
+    // 저장 #2 — slideContents는 그대로다(재시딩되지 않았다 — 도형 "3"은 여전히 perSlide에서
+    // 지워진 채다). 이번 호출의 "원본"은 저장 #1이 만들어낸 바이트다.
+    const secondResult = exportPptxFromSlides(firstResult.bytes, slidesArray, slideContents);
+    const secondXml = strFromU8(unzipSync(secondResult.bytes)[`ppt/slides/${secondResult.finalParts[0]}`]);
+
+    // 핵심 단언: 두 번째 저장에서도 삭제된 도형이 되살아나지 않는다.
+    expect(secondXml).not.toContain('Delete Me');
+    expect(secondXml).not.toContain('id="3"');
+    expect(secondXml).toContain('Keep Me'); // 남은 도형은 여전히 건재하다
+  });
+
+  // Task 13 회귀 테스트: 클라이언트가 새 텍스트박스를 추가('new-' 접두어)했다가 한 번도 저장(export)
+  // 하지 않은 채로 바로 삭제하면, 제거 루프가 조용히 아무 일도 안 해야 한다(에러도, 부작용도 없이) —
+  // baseline은 원본 zip을 파싱한 결과이므로 한 번도 저장된 적 없는 이 도형은 애초에 거기 나타날 수
+  // 없고, 그래서 제거 대상 자체가 아니다.
+  test('deleting a never-exported new- shape (added then deleted before any save) is a safe no-op (Task 13)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+
+    // 클라이언트가 새 텍스트박스를 추가했다가, 한 번도 저장하지 않은 채로 바로 삭제한 상황을
+    // 흉내낸다(Critical #1 테스트와 같은 attach 순서).
+    const newShapeId = `new-${randomUUID()}`;
+    const newDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Never Saved')]),
+    ]);
+    ydoc.transact(() => {
+      const shapeMap = new Y.Map<unknown>();
+      perSlide.set(newShapeId, shapeMap); // 먼저 attach
+      shapeMap.set('meta', { shapeId: newShapeId, x: 100, y: 200, w: 300, h: 400 });
+      const fragment = new Y.XmlFragment();
+      shapeMap.set('content', fragment); // 먼저 attach
+      prosemirrorToYXmlFragment(newDoc, fragment); // 그 다음 채우기
+    });
+    ydoc.transact(() => {
+      perSlide.delete(newShapeId); // 바로 삭제 — export는 한 번도 안 했다
+    });
+
+    // 핵심 단언: 에러 없이 export가 끝난다 — 제거 루프는 baseline에 있는 shapeId만 대상으로 하므로
+    // (baselineShapes.has(...) 조건 없이도 baselineShapes.keys() 자체에 이 id가 없다) removeShape가
+    // 이 shapeId로 호출되는 일 자체가 없고, 따라서 "못 찾음" throw도 발생하지 않는다.
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+    expect(exportedSlideXml).not.toContain('Never Saved');
+    expect(exportedSlideXml).not.toContain(`id="${newShapeId}"`);
+    expect(exportedSlideXml).toContain('Hello World'); // 기존 도형은 그대로 남아 있다
+  });
+
+  // Task 13 회귀 테스트: 슬라이드의 모든 도형을 다 지워도(baseline 전체가 삭제 대상이 되는 극단적
+  // 케이스) export는 에러 없이 끝나야 하고, 결과 슬라이드에는 도형이 하나도 남아있지 않아야 한다.
+  test('deleting every shape on a slide exports without error (empty spTree) (Task 13)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { parseSlideShapes } = await import('../src/pptx/slideContent.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Only Shape']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+    const allShapeIds = [...perSlide.keys()];
+    expect(allShapeIds.length).toBeGreaterThan(0);
+
+    // 슬라이드의 모든 도형을 지운다 — 사용자가 슬라이드를 완전히 텍스트박스 없이 비운 상황.
+    ydoc.transact(() => {
+      for (const shapeId of allShapeIds) perSlide.delete(shapeId);
+    });
+
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+    expect(parseSlideShapes(exportedSlideXml)).toHaveLength(0);
+    expect(exportedSlideXml).toContain('<p:spTree>'); // 최소 구조는 그대로 남아 있다
+  });
 });

@@ -212,3 +212,30 @@ export function appendNewShape(
   }
   return slideXml.slice(0, closeIdx) + spXml + slideXml.slice(closeIdx);
 }
+
+/** shapeId에 해당하는 <p:sp> 블록 전체를 슬라이드 XML에서 제거한다(사용자가 텍스트박스를
+ * 삭제했을 때 씀 — src/pptx/collab.ts의 exportPptxFromSlides가 "baseline에는 있었는데 지금
+ * perSlide에는 없는" 도형에 대해 호출한다). hasShape/spliceShapeTxBody와 정확히 같은 블록 탐색/
+ * 속성 매칭 정규식을 쓴다(id 매칭을 숫자로 제한하지 않으므로 `new-<uuid>` 형태의 id도 그대로
+ * 매치된다) — 셋이 어긋나면 "있다"고 판단한 도형을 못 찾거나, 지워야 할 도형을 못 찾는 모순이
+ * 생길 수 있으므로 반드시 같아야 한다. 다른 도형의 <p:sp> 블록은 전혀 건드리지 않는다.
+ *
+ * 못 찾으면 throw한다(이 파일의 다른 함수들과 동일한 "절대 조용히 실패하지 않는다" 원칙) — 이
+ * 호출부(exportPptxFromSlides)는 항상 baseline에 실제로 존재하는 shapeId로만 이 함수를 부르므로,
+ * 정상적인 사용에서는 이 throw가 절대 발생하지 않아야 한다(발생한다면 그 자체가 병합 로직의
+ * 불변식이 깨졌다는 신호이므로, 조용히 넘어가지 않고 크게 실패하는 편이 "원본 유실 금지"
+ * 원칙에 맞다). */
+export function removeShape(slideXml: string, shapeId: string): string {
+  const spBlockRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
+  let removed = false;
+  const result = slideXml.replace(spBlockRe, (spBlock) => {
+    const idMatch = /<p:cNvPr\b[^>]*\bid="([^"]+)"/.exec(spBlock);
+    if (!idMatch || idMatch[1] !== shapeId) return spBlock;
+    removed = true;
+    return '';
+  });
+  if (!removed) {
+    throw new Error(`removeShape: shapeId ${shapeId}를 슬라이드 XML에서 찾지 못했습니다.`);
+  }
+  return result;
+}

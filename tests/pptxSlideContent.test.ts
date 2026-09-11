@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'vitest';
-import { appendNewShape, parseSlideShapes, serializeTxBodyXml, spliceShapeTxBody } from '../src/pptx/slideContent.js';
+import {
+  appendNewShape,
+  parseSlideShapes,
+  removeShape,
+  serializeTxBodyXml,
+  spliceShapeTxBody,
+} from '../src/pptx/slideContent.js';
 import { pptxTextSchema as schema } from '../src/pptx/textSchema.js';
 
 const XML_HEAD =
@@ -209,5 +215,44 @@ describe('serializeTxBodyXml + spliceShapeTxBody (export)', () => {
       XML_TAIL;
 
     expect(() => spliceShapeTxBody(original, '42', '<p:txBody><a:bodyPr/><a:p/></p:txBody>')).toThrow();
+  });
+});
+
+describe('removeShape', () => {
+  test('removes the matching <p:sp> block entirely, leaving other shapes untouched', () => {
+    const original =
+      XML_HEAD +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="A"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Keep me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="B"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Delete me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      XML_TAIL;
+
+    const result = removeShape(original, '3');
+
+    const shapes = parseSlideShapes(result);
+    expect(shapes).toHaveLength(1);
+    expect(shapes[0].shapeId).toBe('2');
+    expect(shapes[0].doc.textContent).toBe('Keep me');
+    expect(result).not.toContain('Delete me');
+  });
+
+  test('works on a new--prefixed shapeId (a client-added text box that was later saved then deleted)', () => {
+    const original = XML_HEAD + XML_TAIL;
+    const doc = schema.node('doc', null, [schema.node('paragraph', null, [schema.text('New')])]);
+    const withShape = appendNewShape(
+      original,
+      { shapeId: 'new-abc', x: 0, y: 0, w: 1000000, h: 500000 },
+      serializeTxBodyXml(doc),
+    );
+
+    const result = removeShape(withShape, 'new-abc');
+
+    expect(parseSlideShapes(result)).toHaveLength(0);
+  });
+
+  test('throws when the shapeId does not exist in the slide XML', () => {
+    const original = XML_HEAD + XML_TAIL;
+    expect(() => removeShape(original, '999')).toThrow();
   });
 });

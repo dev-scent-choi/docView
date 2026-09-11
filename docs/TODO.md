@@ -144,9 +144,9 @@
 
 ---
 
-## 3. pptx 텍스트박스 콘텐츠 동시편집 — 완료(2026-09-11), 알려진 문제 1건 있음
+## 3. pptx 텍스트박스 콘텐츠 동시편집 — 완료(2026-09-11), 발견된 버그 1건도 Task 13에서 수정 완료
 
-계획: `docs/superpowers/plans/2026-09-10-pptx-content-editing.md` (12개 태스크, 전부 완료).
+계획: `docs/superpowers/plans/2026-09-10-pptx-content-editing.md` (13개 태스크, 전부 완료).
 설계: `docs/superpowers/specs/2026-09-10-pptx-content-editing-design.md`.
 SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브리프·리포트·리뷰 diff,
 `progress.md`에 전체 태스크 이력).
@@ -189,32 +189,56 @@ SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브
     `ppt/presentation.xml`/`<p:sldId>` 순서에 정확히 반영됨.
   - 어떤 슬라이드에서도 도형 id 중복 없음.
 
-**알려진 문제 1건 (이번 E2E 검증에서 새로 발견, 이전 태스크 리뷰에서 잡히지 않았던 것):**
-- **텍스트박스 삭제(×버튼)가 저장된 파일에는 반영되지 않는다.** 위 수동 검증에서 텍스트박스
+**알려진 문제 1건 — 해결됨(Task 13, 2026-09-11):**
+- **텍스트박스 삭제(×버튼)가 저장된 파일에는 반영되지 않는다.** Task 12의 수동 검증에서 텍스트박스
   하나를 삭제 → 두 번 저장 → 다운로드한 실제 파일을 열어 보니, 삭제한 텍스트박스의 `<p:sp>` 블록이
   **원본 그대로 남아 있었다**(라이브 세션/화면에서는 정상적으로 사라져 보임 — 다른 접속자에게도
   실시간으로 사라진 것처럼 보임 — 그런데 저장된 파일에는 한 번도 지워지지 않음).
   - 근본 원인: `src/pptx/collab.ts`의 export 병합 루프(`exportPptxFromSlides`)가
     `for (const [shapeId, shapeMap] of perSlide.entries())`로 **지금 `slideContents`에 남아 있는
-    도형만** 순회한다. 삭제된 도형은 애초에 이 순회에 아예 안 걸리므로 "이 도형은 없어졌으니
-    XML에서 제거하라"는 코드 경로 자체가 존재하지 않는다(`src/pptx/slideContent.ts`에
-    `appendNewShape`/`spliceShapeTxBody`만 있고 도형을 XML에서 제거하는 함수가 없음).
-  - 이건 특정 태스크의 구현 실수가 아니라 **설계 문서 자체의 공백**이다 — 설계 문서
+    도형만** 순회했다. 삭제된 도형은 애초에 이 순회에 아예 안 걸리므로 "이 도형은 없어졌으니
+    XML에서 제거하라"는 코드 경로 자체가 존재하지 않았다(`src/pptx/slideContent.ts`에
+    `appendNewShape`/`spliceShapeTxBody`만 있고 도형을 XML에서 제거하는 함수가 없었음).
+  - 이건 특정 태스크의 구현 실수가 아니라 **설계 문서 자체의 공백**이었다 — 설계 문서
     (`docs/superpowers/specs/2026-09-10-pptx-content-editing-design.md`) "Export" 절은
     "기존 도형이면 교체", "새 도형이면 추가" 두 경우만 명시하고, "이전엔 있었는데 지금은 없는
-    도형(=삭제됨)을 원본 XML에서 제거"하는 세 번째 경우를 아예 다루지 않는다. 이전 태스크(Task 11)의
+    도형(=삭제됨)을 원본 XML에서 제거"하는 세 번째 경우를 아예 다루지 않았다. 이전 태스크(Task 11)의
     수동 확인도 "라이브 화면/DOM에서 사라지는지"만 봤고, 저장 → 다운로드 → 재파싱까지 가는 전체
     왕복은 검증하지 않았다(자동화 테스트인 `tests/roomPptxContent.test.ts`에도 삭제→export 시나리오를
     확인하는 테스트가 없었음).
-  - 영향: 사용자가 "텍스트박스 삭제"를 눌러도 저장되는 실제 파일에서는 절대 지워지지 않는다(현재
-    세션이 살아있는 동안은 화면상으로만 지워진 것처럼 보임). 서버가 재시작되거나 룸이 다시 열리면
-    "삭제했던" 텍스트박스가 원본 XML에서 다시 파싱돼 조용히 되살아날 수도 있다.
-  - **원본 데이터 유실 문제는 아니다**(오히려 반대 — 아무것도 안 지워지는 문제)이지만, 명시적으로
-    제공되는 편집 기능(삭제)이 실제로는 동작하지 않는 것이므로 별도 후속 작업으로 고쳐야 한다.
-    고치려면 `slideContent.ts`에 "이 shapeId의 `<p:sp>` 블록을 XML에서 제거"하는 함수를 새로 추가하고,
-    export 루프가 "baseline(원본/이전 저장본)에는 있었는데 지금 `perSlide`에는 없는 shapeId" 목록을
-    계산해 그 함수를 호출하도록 확장해야 한다. 이번 세션에서는 검증 작업(Task 12) 범위를 벗어나
-    구현하지 않고 기록만 남긴다.
+  - **수정 내용(Task 13)**: `src/pptx/slideContent.ts`에 `removeShape(slideXml, shapeId)` 추가 —
+    `hasShape`/`spliceShapeTxBody`와 정확히 같은 `<p:sp>` 블록 탐지 정규식을 써서(id 매칭을 숫자로
+    제한하지 않으므로 `new-<uuid>` 형태의 id도 매치) 해당 블록 전체를 제거한다. 다른 도형은 전혀
+    건드리지 않고, 못 찾으면 throw한다(이 파일의 기존 "절대 조용히 실패하지 않는다" 원칙과 동일).
+    `exportPptxFromSlides`의 기존 도형별 update/append 루프(`for (const [shapeId, shapeMap] of
+    perSlide.entries())`) 직후, 슬라이드 XML을 zip에 확정하기 전에 제거 단계를 추가: 이미 있는
+    `baselineShapes`(Task 6이 "수정 안 된 도형은 건드리지 않기" 최적화용으로 만든, `sourceSlidePart`별
+    원본 도형 `Map<string, ParsedShape>`)를 순회하며, `perSlide.has(shapeId)`가 false인(=baseline에는
+    있었는데 지금 라이브 상태에는 없는, 즉 사용자가 삭제한) shapeId에 대해서만 `removeShape`를 호출한다.
+    `baselineShapes`가 null인 경우(`entry.kind === 'blank'`, 애초에 baseline이 없는 슬라이드)는
+    "삭제"라는 개념이 성립하지 않으므로 자연히 건너뛴다.
+  - **회귀 위험 검증**: `removeShape` 호출 대상은 항상 "baseline에는 있고 perSlide에는 없는" shapeId로만
+    한정되므로, 위 update/append 루프가 건드리는 도형(=perSlide에 있는 도형)과는 절대 겹치지 않는다 —
+    Task 6의 두 Critical 버그(저장마다 새 텍스트박스 중복 추가, 안 건드린 도형의 서식 유실)를 만드는
+    `hasShape`/baseline-비교 로직과 이번 제거 로직은 서로 다른 shapeId 집합에서만 동작해 간섭하지
+    않는다. `removeShape`가 호출된 shapeId는 원본 XML에서 파싱해 baseline에 들어간 것이므로(=
+    export 시작 시점의 슬라이드 XML에 실제로 그 `<p:sp>` 블록이 존재), 그리고 위 루프가 `<p:sp>`
+    블록을 지우는 일은 전혀 없으므로, `removeShape`의 "못 찾으면 throw"는 정상 사용에서는 결코
+    발생하지 않는 안전장치일 뿐임을 확인했다.
+  - **테스트**: `tests/pptxSlideContent.test.ts`에 `removeShape` 단위 테스트 3개(다른 도형 안 건드림,
+    `new-` 접두어 id도 동작, 없는 id는 throw). `tests/roomPptxContent.test.ts`에 서버 통합 테스트 4개
+    (삭제 후 export하면 실제로 사라짐+다른 도형은 그대로, 두 번째 저장에서도 안 되살아남, 한 번도
+    export 안 된 `new-` 도형을 삭제하면 안전한 no-op, 슬라이드의 모든 도형을 지워도 에러 없이 빈
+    `<p:spTree>`로 export됨). 전체 스위트(`npx vitest run`, 44 files / 336 tests) + `npx tsc --noEmit`
+    모두 클린 — Task 6의 기존 회귀 테스트(Critical #1/#2, Important #6)도 전부 그대로 통과해 이번
+    변경이 그 수정들을 깨뜨리지 않았음을 확인.
+  - **실제 pptx로 재확인**: Task 12가 쓴 것과 같은 실제 6슬라이드 `.pptx` 픽스처로, 실제 production
+    함수(`seedSlidesFromPptx`/`seedSlideContentFromXml`/`exportPptxFromSlides`/`parseSlideShapes`)를
+    직접 호출해 텍스트박스 하나(굵게/일반/빨간색-기울임 런이 섞인 슬라이드의 두 도형 중 하나)를
+    삭제 → 저장 → 재파싱 → 삭제한 도형이 실제로 없어졌고 남은 도형은 서식까지 바이트 단위로 그대로
+    보존됨을 확인. 두 번째 저장(직전 저장 결과를 다음 원본으로 삼음, `flushToStore`와 동일한 패턴)
+    에서도 되살아나지 않음을 확인. 한 번도 안 연 다른 5개 슬라이드는 두 번의 저장 모두에서 원본과
+    바이트 단위로 동일했다.
 
 **그 외 참고(이번 세션 범위 밖, 새 버그 아님):** 슬라이드 레일 카드 썸네일이 `kind: 'duplicate'`
 슬라이드에 대해 깨진 이미지 요청(`/api/view/pages/null`)을 보내는 것을 수동 E2E 중 관찰함 — 이
@@ -223,5 +247,5 @@ SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브
 
 이 세션의 "원본 유실이나 버전 관리만 잘되면 됨"이라는 최우선 제약(레이아웃/마스터 상속 미해결,
 표/차트/이미지 편집 제외 등은 설계 문서에 이미 문서화된 의도된 스코프 제한)은 지켜졌다 — 위
-검증에서 확인한 대로 안 연 슬라이드·표·이미지는 전부 바이트 단위로 보존됐다. 다만 "삭제" 기능
-자체가 저장 시 무효화되는 위 문제는 별도로 반드시 후속 조치가 필요하다.
+검증에서 확인한 대로 안 연 슬라이드·표·이미지는 전부 바이트 단위로 보존됐다. "삭제" 기능 자체가
+저장 시 무효화되던 위 문제도 Task 13에서 고쳤다 — 이 계획(13개 태스크)은 이제 전부 완료다.

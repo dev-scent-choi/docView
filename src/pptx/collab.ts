@@ -2,7 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import * as Y from 'yjs';
 import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror';
-import { appendNewShape, hasShape, parseSlideShapes, serializeTxBodyXml, spliceShapeTxBody } from './slideContent.js';
+import {
+  appendNewShape,
+  hasShape,
+  parseSlideShapes,
+  removeShape,
+  serializeTxBodyXml,
+  spliceShapeTxBody,
+} from './slideContent.js';
 import type { ParsedShape } from './slideContent.js';
 import { pptxTextSchema } from './textSchema.js';
 import type { SlideEntry, SlideShapeMeta } from '../collab/pptxShared.js';
@@ -538,6 +545,23 @@ export function exportPptxFromSlides(
           );
         }
       }
+
+      // perSlide에 이미 있는 도형들은 위 루프에서 처리됐다(교체 또는 추가). 여기서는 반대 방향 —
+      // baseline(원본/편집 전)에는 있었는데 지금 perSlide에는 없는 도형, 즉 사용자가 × 버튼으로
+      // 삭제한 도형 — 을 실제로 슬라이드 XML에서 제거한다. baselineShapes가 null이면(entry.kind가
+      // 'blank'라 baseline 자체가 없는 경우) "삭제"라는 개념이 성립하지 않으므로 건너뛴다 — blank
+      // 슬라이드의 도형은 전부 이번에 막 생긴 것들이고, 위 루프가 이미 전부 append로 처리했다.
+      // perSlide.has(...)로 먼저 걸러진 shapeId만 넘기므로(baseline에는 있고 지금은 없는 것만),
+      // removeShape의 "못 찾으면 throw"는 위 루프가 <p:sp> 블록을 지우는 일이 전혀 없다는 점과
+      // 함께 정상적인 사용에서는 결코 발생하지 않는 안전장치일 뿐이다.
+      if (baselineShapes) {
+        for (const baselineShapeId of baselineShapes.keys()) {
+          if (!perSlide.has(baselineShapeId)) {
+            slideXml = removeShape(slideXml, baselineShapeId);
+          }
+        }
+      }
+
       zipEntries[partPath] = strToU8(slideXml);
     }
   }
