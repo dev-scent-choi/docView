@@ -68,7 +68,14 @@ import {
   type LazyGridSheetMeta,
   type LazyGridStore,
 } from '../xlsx/lazyGridStore.js';
-import { exportPptxFromSlides, seedSlidesFromPptx } from '../pptx/collab.js';
+import {
+  duplicateSlideContent,
+  exportPptxFromSlides,
+  seedSlideContentFromXml,
+  seedSlidesFromPptx,
+  type PerSlideContentsMap,
+  type ShapeContentMap,
+} from '../pptx/collab.js';
 import { computeGridCellDisplayAsync, formatComputedValueForStorage } from '../xlsx/formulas.js';
 import { PPTX_SLIDE_CONTENTS_MAP, PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
 import {
@@ -1165,11 +1172,16 @@ async function flushToStore(room: Room): Promise<void> {
   } else if (kind === 'pptx') {
     const original = await store.readOriginal(docId, meta.ext);
     const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
     // store.saveOriginal(디스크 쓰기, await 동안 이벤트 루프가 다른 클라이언트의 편집을 그대로
     // 받아들인다)이 끝난 뒤 배열이 이 시점과 달라졌는지 비교하기 위한 스냅샷 — 진짜 위험 구간은
     // exportPptxFromSlides의 동기적 zip 조작(끼어들 틈 없음)이 아니라 바로 이 await다.
     const snapshotBeforeSave = JSON.stringify(slidesArray.toArray());
-    const { bytes: newPptxBytes, finalParts, survivingEntryIds } = exportPptxFromSlides(original, slidesArray);
+    const { bytes: newPptxBytes, finalParts, survivingEntryIds } = exportPptxFromSlides(
+      original,
+      slidesArray,
+      slideContents,
+    );
     await store.saveOriginal(docId, meta.ext, Buffer.from(newPptxBytes));
 
     // 저장이 끝난 직후, Yjs 배열을 "방금 디스크에 쓴 내용"과 다시 일치시킨다: 모든 항목을
@@ -1230,7 +1242,9 @@ async function flushToStore(room: Room): Promise<void> {
           // 관련 이슈 참고) 여기서도 같은 패턴을 반복하지 않도록 이번 저장에서 살아남은
           // survivingEntryIds에 없는 키를 모두 정리한다. 같은 트랜잭션 안에서 하므로 "배열은
           // 갱신됐는데 slideContents는 아직 지워지기 전"인 순간이 다른 클라이언트에 보이지 않는다.
-          const slideContents = ydoc.getMap<unknown>(PPTX_SLIDE_CONTENTS_MAP);
+          // (slideContents는 이 함수 위쪽에서 이미 exportPptxFromSlides에 넘기려고 한 번 가져와
+          // 뒀다 — 같은 ydoc.getMap(name) 호출은 항상 같은 인스턴스를 돌려주므로 여기서 다시
+          // 가져올 필요가 없다.)
           const survivingIdSet = new Set(survivingEntryIds);
           for (const key of Array.from(slideContents.keys())) {
             if (!survivingIdSet.has(key)) {
@@ -1360,8 +1374,14 @@ export async function getCurrentBytes(docId: string): Promise<Uint8Array | null>
   }
   if (room.kind === 'pptx') {
     // 읽기 전용 헬퍼라 Yjs 배열은 절대 건드리지 않는다 — flushToStore의 저장-후 배열 재작성과
-    // 달리, 여기서는 바이트만 필요하다.
-    return exportPptxFromSlides(original, room.ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY)).bytes;
+    // 달리, 여기서는 바이트만 필요하다. slideContents도 함께 넘겨야 한다 — 안 그러면 "지금 바로
+    // 다운로드"가 자동저장 전까지 텍스트박스 편집이 반영 안 된 stale한 파일을 내려준다(자동저장
+    // 대기 중에도 다운로드 버튼은 항상 "지금 상태"를 내려줘야 한다는 이 함수의 원래 목적과 어긋남).
+    return exportPptxFromSlides(
+      original,
+      room.ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY),
+      room.ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP),
+    ).bytes;
   }
   const fragment = room.ydoc.getXmlFragment(XML_FRAGMENT_NAME);
   const pmDoc = yXmlFragmentToProseMirrorRootNode(fragment, docxSchema);
@@ -1572,6 +1592,56 @@ function isValidPageSubscription(parsed: unknown): parsed is { sheet: number; pa
   return pages.every((page) => Number.isInteger(page) && page >= 0 && page < MAX_SUBSCRIBABLE_PAGES);
 }
 
+function isValidSlideContentSubscription(
+  parsed: unknown,
+): parsed is { slideEntryId: string; duplicateOfId?: string } {
+  if (!parsed || typeof parsed !== 'object') return false;
+  const { slideEntryId, duplicateOfId } = parsed as { slideEntryId?: unknown; duplicateOfId?: unknown };
+  if (typeof slideEntryId !== 'string' || slideEntryId.length === 0) return false;
+  if (duplicateOfId !== undefined && typeof duplicateOfId !== 'string') return false;
+  return true;
+}
+
+/**
+ * 슬라이드 하나(slideEntryId)의 텍스트박스 콘텐츠를 지연 시딩한다 — 클라이언트가
+ * MESSAGE_SLIDE_CONTENT_SUBSCRIBE로 "이 슬라이드를 연다"고 알려올 때만 호출된다(아래 handleMessage).
+ * 이미 채워져 있으면(다른 클라이언트가 먼저 열었거나, 사용자가 이미 편집한 상태) 아무 것도 하지
+ * 않는다 — 절대 기존 콘텐츠를 덮어쓰지 않는다(has() 체크는 여기와 seedSlideContentFromXml 양쪽에
+ * 있다 — 이 함수의 체크는 "이미 열린 슬라이드에 store.readOriginal 같은 불필요한 디스크 I/O를
+ * 하지 않기 위함"이고, seedSlideContentFromXml의 체크는 동시 요청 경쟁에 대비한 마지막 방어선이다).
+ *
+ * duplicateOfId가 오면(사용자가 슬라이드를 복제해 새 SlideEntry를 만든 직후) 소스 슬라이드를
+ * 먼저 시딩한 뒤(재귀 호출, duplicateOfId 없이 — 한 단계만 지원한다) 그 "지금까지의 편집 상태"를
+ * 깊은 복사한다 — 원본 XML을 다시 파싱하지 않는다(duplicateSlideContent 주석 참고).
+ */
+async function seedSlideContentIfNeeded(
+  room: Room,
+  slideEntryId: string,
+  duplicateOfId?: string,
+): Promise<void> {
+  const slideContents = room.ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+  if (slideContents.has(slideEntryId)) return;
+  const slidesArray = room.ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+  const entry = slidesArray.toArray().find((e) => e.id === slideEntryId);
+  if (!entry) return; // 이미 삭제된 슬라이드를 늦게 요청한 경우 — 조용히 무시
+
+  if (duplicateOfId) {
+    await seedSlideContentIfNeeded(room, duplicateOfId); // 소스 먼저 채운다
+    duplicateSlideContent(slideContents, duplicateOfId, slideEntryId);
+    return;
+  }
+  if (entry.kind === 'blank') {
+    slideContents.set(slideEntryId, new Y.Map<ShapeContentMap>());
+    return;
+  }
+  if (!entry.sourceSlidePart) return;
+  // xlsx 룸은 원본 바이트를 room.lazyGrid/room.originalXlsxBytes에 들고 있지만, pptx 룸에는 그런
+  // 캐시 필드가 없다 — 매번 store에서 다시 읽는다(flushToStore의 pptx 분기도 매 저장마다 같은
+  // 방식으로 읽는다).
+  const bytes = await store.readOriginal(room.docId, 'pptx');
+  seedSlideContentFromXml(slideContents, slideEntryId, bytes, entry.sourceSlidePart);
+}
+
 function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
   try {
     const encoder = encoding.createEncoder();
@@ -1659,6 +1729,28 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
           }
         } catch (error) {
           console.error('행/열 구조 변경 메시지 처리 오류:', error);
+        }
+        break;
+      }
+      case MESSAGE_SLIDE_CONTENT_SUBSCRIBE: {
+        try {
+          const payload = decoding.readVarString(decoder);
+          const parsed: unknown = JSON.parse(payload);
+          if (!isValidSlideContentSubscription(parsed)) {
+            console.error('슬라이드 콘텐츠 구독 메시지 거부(형식 오류):', payload.slice(0, 200));
+          } else {
+            // 시딩은 store.readOriginal(디스크 I/O) + parseSlideShapes를 거치므로 비동기다 —
+            // 여기서 await하면 소켓 메시지 처리 자체가 막히므로 흘려보낸다. 실패해도 이 연결은
+            // 끊지 않되(원본 유실 금지 원칙과 별개로 시딩 실패 자체는 "아직 못 연" 상태일 뿐 이미
+            // 저장된 데이터의 손상이 아니다), 조용히 성공한 것처럼 넘어가지 않고 반드시 로그를 남긴다.
+            void seedSlideContentIfNeeded(room, parsed.slideEntryId, parsed.duplicateOfId).catch(
+              (error: unknown) => {
+                console.error(`슬라이드 콘텐츠 시딩 실패 (문서 ${room.docId}):`, error);
+              },
+            );
+          }
+        } catch (error) {
+          console.error(`슬라이드 콘텐츠 구독 메시지 처리 오류 (문서 ${room.docId}):`, error);
         }
         break;
       }
