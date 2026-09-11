@@ -144,7 +144,7 @@
 
 ---
 
-## 3. pptx 텍스트박스 콘텐츠 동시편집 — 완료(2026-09-11), 발견된 버그 1건도 Task 13에서 수정 완료
+## 3. pptx 텍스트박스 콘텐츠 동시편집 — 완료(2026-09-11), 발견된 버그는 Task 13 + Task 13 fix 라운드에서 전부 수정 완료
 
 계획: `docs/superpowers/plans/2026-09-10-pptx-content-editing.md` (13개 태스크, 전부 완료).
 설계: `docs/superpowers/specs/2026-09-10-pptx-content-editing-design.md`.
@@ -217,14 +217,16 @@ SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브
     있었는데 지금 라이브 상태에는 없는, 즉 사용자가 삭제한) shapeId에 대해서만 `removeShape`를 호출한다.
     `baselineShapes`가 null인 경우(`entry.kind === 'blank'`, 애초에 baseline이 없는 슬라이드)는
     "삭제"라는 개념이 성립하지 않으므로 자연히 건너뛴다.
-  - **회귀 위험 검증**: `removeShape` 호출 대상은 항상 "baseline에는 있고 perSlide에는 없는" shapeId로만
-    한정되므로, 위 update/append 루프가 건드리는 도형(=perSlide에 있는 도형)과는 절대 겹치지 않는다 —
-    Task 6의 두 Critical 버그(저장마다 새 텍스트박스 중복 추가, 안 건드린 도형의 서식 유실)를 만드는
-    `hasShape`/baseline-비교 로직과 이번 제거 로직은 서로 다른 shapeId 집합에서만 동작해 간섭하지
-    않는다. `removeShape`가 호출된 shapeId는 원본 XML에서 파싱해 baseline에 들어간 것이므로(=
-    export 시작 시점의 슬라이드 XML에 실제로 그 `<p:sp>` 블록이 존재), 그리고 위 루프가 `<p:sp>`
-    블록을 지우는 일은 전혀 없으므로, `removeShape`의 "못 찾으면 throw"는 정상 사용에서는 결코
-    발생하지 않는 안전장치일 뿐임을 확인했다.
+  - **회귀 위험 검증(Task 13 시점의 판단 — 아래 "Task 13 fix 라운드" 항목이 정정한다)**: `removeShape`
+    호출 대상은 항상 "baseline에는 있고 perSlide에는 없는" shapeId로만 한정되므로, 위 update/append
+    루프가 건드리는 도형(=perSlide에 있는 도형)과는 절대 겹치지 않는다는 점은 맞다. 그러나 Task 13
+    시점에는 "`removeShape`가 호출된 shapeId는 원본 XML에서 파싱해 baseline에 들어간 것이므로 그
+    `<p:sp>` 블록을 반드시 찾는다"는 전제 자체가 **틀렸다** — `hasShape`/`spliceShapeTxBody`/
+    `removeShape`가 공유하던 블록 탐지 정규식이 리터럴 `<p:sp>`만 매치해, baseline(실제 XML 파서가
+    인식)과 이 정규식(문자열 매칭)이 속성 있는 `<p:sp attr="...">` 도형에 대해 서로 다른 결론을
+    내릴 수 있었다. 즉 "정상 사용에서는 결코 발생하지 않는 안전장치"라는 이 시점의 결론은
+    **속성 없는 `<p:sp>` 도형에 한해서만** 참이었고, 실제로는 틀린 채로 커밋됐다 — 바로 아래
+    "Task 13 fix 라운드" 항목이 이 오류와 그 수정을 기록한다.
   - **테스트**: `tests/pptxSlideContent.test.ts`에 `removeShape` 단위 테스트 3개(다른 도형 안 건드림,
     `new-` 접두어 id도 동작, 없는 id는 throw). `tests/roomPptxContent.test.ts`에 서버 통합 테스트 4개
     (삭제 후 export하면 실제로 사라짐+다른 도형은 그대로, 두 번째 저장에서도 안 되살아남, 한 번도
@@ -238,7 +240,55 @@ SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브
     삭제 → 저장 → 재파싱 → 삭제한 도형이 실제로 없어졌고 남은 도형은 서식까지 바이트 단위로 그대로
     보존됨을 확인. 두 번째 저장(직전 저장 결과를 다음 원본으로 삼음, `flushToStore`와 동일한 패턴)
     에서도 되살아나지 않음을 확인. 한 번도 안 연 다른 5개 슬라이드는 두 번의 저장 모두에서 원본과
-    바이트 단위로 동일했다.
+    바이트 단위로 동일했다. (이 픽스처의 도형들은 우연히 속성 없는 `<p:sp>`였기 때문에, 이 검증은
+    바로 아래에서 고친 속성 있는 `<p:sp attr="...">` 케이스의 버그를 그때는 드러내지 못했다.)
+
+**Task 13 fix 라운드 — Critical 버그 2건 수정(코드 리뷰에서 발견, 2026-09-11):**
+- **버그 1(신규, 이번 라운드에서 발견)**: 여는 태그에 속성이 붙은 `<p:sp useBgFill="1">`(PowerPoint가
+  배경 채우기 도형에 실제로 흔히 붙이는, 표준적이고 흔한 속성) 같은 도형을 사용자가 삭제하면,
+  `removeShape`가 그 블록을 찾지 못해 "못 찾음"으로 throw했다 — parseSlideShapes(실제 XML 파서)는
+  이 도형을 정확히 인식해 baseline에 넣지만, `removeShape`가 쓰는 블록 탐지 정규식(`hasShape`/
+  `spliceShapeTxBody`와 공유)이 리터럴 `<p:sp>`만 매치해 속성 있는 형태는 놓쳤기 때문이다. 이
+  throw는 `exportPptxFromSlides`(저장/다운로드 경로) 안에서 일어나므로, 그 문서의 **이후 모든
+  저장·다운로드를 영구히 막았다** — orphan된 baseline shapeId가 절대 사라지지 않으므로 사용자
+  쪽에서 되돌릴 방법도 없었다(새 텍스트박스를 다시 추가해도 소용없음).
+- **버그 2(선재, 이번 조사 중 우연히 발견 — Task 6이 남긴 공백)**: 같은 이유로 `hasShape`도
+  속성 있는 `<p:sp>`를 "없다"고 잘못 판단해, 그런 도형을 편집(삭제가 아니라 텍스트만 수정)하면
+  `exportPptxFromSlides`의 병합 루프가 교체(`spliceShapeTxBody`) 대신 추가(`appendNewShape`) 분기를
+  타 버렸다 — 같은 shapeId 아래 옛 텍스트를 담은 원래 블록과 새 텍스트를 담은 블록이 **동시에**
+  저장 파일에 남는 조용한 중복이 생겼다(throw하지 않으므로 삭제 버그보다 더 은밀함). Task 6이
+  `new-` 접두어 id에 대해 이미 한 번 고친 것과 정확히 같은 종류의 버그가, 속성 있는 도형에 대해서는
+  전혀 고쳐지지 않은 채 남아 있었다.
+- **근본 원인(두 버그 공통)**: `hasShape`/`spliceShapeTxBody`/`removeShape` 세 함수가 공유하는
+  `<p:sp>` 블록 탐지 정규식이 `/<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g`처럼 **리터럴** `<p:sp>`만
+  매치했다 — 여는 태그 바로 뒤에 속성이 하나라도 붙으면(`<p:sp useBgFill="1">` 등) 매치에 실패했다.
+- **수정**: 세 함수의 정규식을 전부 `<p:sp>` → `<p:sp\b`(단어 경계)로 넓혔다 — `<p:sp>`(바로 뒤가
+  단어 문자가 아닌 `>`)도, `<p:sp useBgFill="1">`(바로 뒤가 단어 문자가 아닌 공백)도 매치하면서,
+  `<p:spPr>`/`<p:spTree>`(바로 뒤가 `Pr`/`Tree`처럼 단어 문자로 이어짐 — `\b`가 성립하지 않음)는
+  여전히 정확히 거른다. 세 함수 모두 같은 글자 수 변경 한 곳씩, 총 3곳만 고쳤다.
+- **문서 정정**: 이 파일의 위 "회귀 위험 검증" 항목과 `src/pptx/slideContent.ts`/`src/pptx/collab.ts`의
+  `removeShape` 관련 인라인 주석이 "이 throw는 정상 사용에서는 결코 발생하지 않는다"고 단정했던
+  부분을 정정했다 — 이 fix 라운드 **이전에는 거짓**이었고(위 버그 1이 그 반증), 이 정규식 수정이
+  실제로 반영된 지금에서야 참이 된다는 점을 명시했다.
+- **테스트**: `tests/pptxSlideContent.test.ts`에 단위 테스트 7개 추가 — 속성 있는 도형의
+  `parseSlideShapes`/`hasShape`/`spliceShapeTxBody`(제자리 갱신, 중복 안 됨)/`removeShape`(삭제,
+  형제 도형 안 건드림), 그리고 `<p:spPr>`/`<p:spTree>`를 도형으로 오인하지 않는지 확인하는 전용
+  `describe` 블록(3개). `tests/roomPptxContent.test.ts`에 서버 통합 테스트 2개 추가 — 속성 있는
+  도형을 삭제하면 실제로 사라짐(throw 안 함), 속성 있는 기존 도형을 편집하면 정확히 하나로만
+  갱신됨(중복 안 됨). RED(정규식을 되돌린 상태)에서 새 단위 테스트 6개 + 시나리오 스크립트가 정확히
+  두 버그의 증상대로 실패하는 것을 직접 확인한 뒤, GREEN(수정 반영)에서 전부 통과하는 것으로
+  재확인했다. 전체 스위트(`npx vitest run`, 44 files / 345 tests) + `npx tsc --noEmit` 모두 클린 —
+  기존 pptx 관련 테스트(Task 6/12/13의 Critical #1/#2, Important #6, byte-for-byte 테스트 포함)도
+  전부 그대로 통과해 이번 변경이 기존 동작을 전혀 바꾸지 않았음을 확인.
+- **실제 파이프라인으로 재확인**: 유닛 테스트와 별개로, `tests/helpers.ts`의 `makeSamplePptx`와
+  같은 방식으로 조립한 실제 zip 구조의 pptx(속성 있는 도형 3개 — 편집 대상 `useBgFill="1"`,
+  삭제 대상 속성 없음, 미편집 대상 `flipH="1"`)를 real production 함수
+  (`seedSlidesFromPptx`/`seedSlideContentFromXml`/`exportPptxFromSlides`/`parseSlideShapes`)로 직접
+  두 번 저장(연속 autosave 흉내)해, 삭제된 속성 있는 시나리오가 throw 없이 끝나는지, 편집한 속성
+  있는 도형이 정확히 한 번만(중복 없이) 새 텍스트로 갱신되는지, 미편집 속성 있는 형제 도형이
+  두 번의 저장 모두에서 원본 그대로인지를 확인했다 — 전부 통과. 이 스크립트를 정규식을 되돌린
+  상태로도 실행해, "편집한 속성 있는 도형이 정확히 한 번만 나타난다" 단언이 `got 2`(중복)로
+  실패하는 것을 직접 재현해 회귀 테스트가 실제 버그를 잡아낸다는 것도 확인했다.
 
 **그 외 참고(이번 세션 범위 밖, 새 버그 아님):** 슬라이드 레일 카드 썸네일이 `kind: 'duplicate'`
 슬라이드에 대해 깨진 이미지 요청(`/api/view/pages/null`)을 보내는 것을 수동 E2E 중 관찰함 — 이
@@ -248,4 +298,6 @@ SDD 기록: `.superpowers/sdd/2026-09-10-pptx-content-editing/`(태스크별 브
 이 세션의 "원본 유실이나 버전 관리만 잘되면 됨"이라는 최우선 제약(레이아웃/마스터 상속 미해결,
 표/차트/이미지 편집 제외 등은 설계 문서에 이미 문서화된 의도된 스코프 제한)은 지켜졌다 — 위
 검증에서 확인한 대로 안 연 슬라이드·표·이미지는 전부 바이트 단위로 보존됐다. "삭제" 기능 자체가
-저장 시 무효화되던 위 문제도 Task 13에서 고쳤다 — 이 계획(13개 태스크)은 이제 전부 완료다.
+저장 시 무효화되던 문제(Task 13)와, 속성이 붙은 `<p:sp>` 도형에 대해서만 삭제가 영구 실패하거나
+편집이 조용히 중복되던 문제(Task 13 fix 라운드, 코드 리뷰에서 발견) 모두 고쳤다 — 이 계획
+(13개 태스크 + 1개 fix 라운드)은 이제 전부 완료다.

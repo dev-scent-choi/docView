@@ -149,9 +149,16 @@ export function serializeTxBodyXml(doc: PMNode): string {
  * `new-<uuid>` 형태의 문자열 id를 쓴다(appendNewShape 참고). 이 함수가 숫자만 매치했다면
  * 두 번째 저장부터 그 도형을 "찾지 못했다"고 판단해 매번 새로 append하게 되어 저장할 때마다
  * 같은 텍스트박스가 중복 추가되는 버그가 있었다 — 이 완화는 순수하게 넓히는 방향이라(숫자
- * id는 전부 `[^"]+`에도 그대로 매치되므로) 기존에 매치되던 것은 전부 그대로 매치된다. */
+ * id는 전부 `[^"]+`에도 그대로 매치되므로) 기존에 매치되던 것은 전부 그대로 매치된다.
+ *
+ * 블록 탐지 정규식(`<p:sp\b...`)도 마찬가지로 순수 확장이다 — 원래 리터럴 `<p:sp>`만 매치했는데,
+ * PowerPoint가 실제로 자주 내보내는 `<p:sp useBgFill="1">`처럼 여는 태그에 속성이 붙은 형태는
+ * 매치하지 못했다(이 함수는 "못 찾음"으로 throw하지는 않지만, 아래 hasShape가 같은 이유로 "없다"고
+ * 잘못 답하면 이 함수가 아니라 appendNewShape가 불려 같은 도형이 중복 추가됐다 — Task 13 fix로
+ * `\b`(단어 경계)로 넓혀 속성 유무와 무관하게 매치하면서도 `<p:spPr>`/`<p:spTree>`는 계속
+ * 거른다: `sp` 다음이 `Pr`/`Tree`처럼 단어 문자로 이어지면 그 사이엔 경계가 없기 때문). */
 export function spliceShapeTxBody(slideXml: string, shapeId: string, txBodyXml: string): string {
-  const spBlockRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
+  const spBlockRe = /<p:sp\b(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
   let replaced = false;
   const result = slideXml.replace(spBlockRe, (spBlock) => {
     const idMatch = /<p:cNvPr\b[^>]*\bid="([^"]+)"/.exec(spBlock);
@@ -180,9 +187,17 @@ export function spliceShapeTxBody(slideXml: string, shapeId: string, txBodyXml: 
  * spliceShapeTxBody)"과 "처음 쓰는 도형(추가 — appendNewShape)"을 구분한다. 예전에는 shapeId가
  * `new-`로 시작하는지만 보고 무조건 appendNewShape를 불렀는데, 그러면 이미 한 번 저장되어 슬라이드
  * XML에 실제로 존재하는 `new-` 도형을 두 번째 저장에서 또 추가해 버려 저장할 때마다 같은
- * 텍스트박스가 중복되는 버그가 있었다 — 이 함수로 먼저 존재 여부를 확인하면 그 문제가 사라진다. */
+ * 텍스트박스가 중복되는 버그가 있었다 — 이 함수로 먼저 존재 여부를 확인하면 그 문제가 사라진다.
+ *
+ * **Task 13 fix로 고친, 그와 같은 계열의 별개 버그**: 이 함수가 쓰는 블록 탐지 정규식이 최근까지
+ * (Task 3/6이 만든 그대로) 리터럴 `<p:sp>`만 매치했다 — 여는 태그에 속성이 붙은
+ * `<p:sp useBgFill="1">` 같은, PowerPoint가 실제로 흔히 만들어내는 형태는 매치하지 못했다. 그
+ * 결과 이 함수가 실제로 존재하는 속성 있는 도형을 "없다"고 잘못 답해, 위 병합 루프가 교체
+ * (spliceShapeTxBody) 대신 추가(appendNewShape) 분기를 타 버려 그 도형이 같은 shapeId로 중복
+ * 저장됐다(구 텍스트와 새 텍스트가 둘 다 파일에 남는 조용한 데이터 손상). `\b`(단어 경계)로
+ * 정규식을 넓혀 지금은 속성 유무와 무관하게 매치한다. */
 export function hasShape(slideXml: string, shapeId: string): boolean {
-  const spBlockRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
+  const spBlockRe = /<p:sp\b(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
   for (const spBlock of slideXml.match(spBlockRe) ?? []) {
     const idMatch = /<p:cNvPr\b[^>]*\bid="([^"]+)"/.exec(spBlock);
     if (idMatch && idMatch[1] === shapeId) return true;
@@ -224,9 +239,21 @@ export function appendNewShape(
  * 호출부(exportPptxFromSlides)는 항상 baseline에 실제로 존재하는 shapeId로만 이 함수를 부르므로,
  * 정상적인 사용에서는 이 throw가 절대 발생하지 않아야 한다(발생한다면 그 자체가 병합 로직의
  * 불변식이 깨졌다는 신호이므로, 조용히 넘어가지 않고 크게 실패하는 편이 "원본 유실 금지"
- * 원칙에 맞다). */
+ * 원칙에 맞다).
+ *
+ * **주의(Task 13 fix 이전에는 이 불변식이 실제로 깨져 있었다)**: baseline은 parseSlideShapes(실제
+ * XML 파서)로 만들어지므로 여는 태그에 속성이 붙은 `<p:sp useBgFill="1">` 같은 도형도 정확히
+ * 인식해 baseline에 포함시킨다. 반면 이 함수가 쓰는 블록 탐지 정규식은 최근까지 리터럴 `<p:sp>`만
+ * 매치했다 — 그래서 baseline에는 있고(파서가 봤으니) perSlide에는 없는(사용자가 지웠으니) 속성
+ * 있는 도형을 지우려 하면, 그 블록이 XML 안에 실제로 있는데도 정규식이 찾지 못해 이 throw가
+ * 정상적인 삭제 조작만으로 발생했다 — 그리고 이 throw는 exportPptxFromSlides(저장/다운로드 경로)
+ * 안에서 일어나므로, 그 문서의 이후 모든 저장·다운로드를 영구히 막았다(orphan된 baseline id는
+ * 절대 사라지지 않으므로 사용자 쪽에서 되돌릴 방법도 없었다). 지금은 세 함수의 블록 정규식을
+ * 전부 `<p:sp\b`로 넓혀(속성 유무와 무관하게 매치하되 `<p:spPr>`/`<p:spTree>`는 여전히 제외)
+ * baseline과 이 함수가 항상 같은 도형 집합을 인식하므로, 위 "절대 발생하지 않아야 한다"는 주장이
+ * 비로소 참이 된다. */
 export function removeShape(slideXml: string, shapeId: string): string {
-  const spBlockRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
+  const spBlockRe = /<p:sp\b(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
   let removed = false;
   const result = slideXml.replace(spBlockRe, (spBlock) => {
     const idMatch = /<p:cNvPr\b[^>]*\bid="([^"]+)"/.exec(spBlock);

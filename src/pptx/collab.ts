@@ -553,7 +553,14 @@ export function exportPptxFromSlides(
       // 슬라이드의 도형은 전부 이번에 막 생긴 것들이고, 위 루프가 이미 전부 append로 처리했다.
       // perSlide.has(...)로 먼저 걸러진 shapeId만 넘기므로(baseline에는 있고 지금은 없는 것만),
       // removeShape의 "못 찾으면 throw"는 위 루프가 <p:sp> 블록을 지우는 일이 전혀 없다는 점과
-      // 함께 정상적인 사용에서는 결코 발생하지 않는 안전장치일 뿐이다.
+      // 함께 정상적인 사용에서는 결코 발생하지 않는 안전장치일 뿐이다 — 단, 이건 hasShape/
+      // spliceShapeTxBody/removeShape 셋이 공유하는 <p:sp> 블록 탐지 정규식이 baseline을 만드는
+      // parseSlideShapes(실제 XML 파서)가 인식하는 도형 집합과 정확히 일치할 때만 참이다. Task 13
+      // fix 이전에는 그 정규식이 리터럴 <p:sp>만 매치해 `<p:sp useBgFill="1">`처럼 속성이 붙은
+      // 실제 PowerPoint 도형을 못 찾았으므로, 그런 도형을 삭제하면 baseline에는 있지만
+      // removeShape는 못 찾는 모순이 생겨 이 throw가 정상 조작만으로 발생했고(export/다운로드
+      // 경로 안에서 던지므로 그 문서의 이후 모든 저장을 영구히 막았다) — 세 함수의 정규식을
+      // `<p:sp\b`로 넓힌 지금에서야 이 안전장치가 실제로 "결코 발생하지 않는" 것이 됐다.
       if (baselineShapes) {
         for (const baselineShapeId of baselineShapes.keys()) {
           if (!perSlide.has(baselineShapeId)) {

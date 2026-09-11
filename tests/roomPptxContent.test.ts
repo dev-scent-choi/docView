@@ -1330,4 +1330,158 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     expect(parseSlideShapes(exportedSlideXml)).toHaveLength(0);
     expect(exportedSlideXml).toContain('<p:spTree>'); // 최소 구조는 그대로 남아 있다
   });
+
+  // Task 13 fix 회귀 테스트(코드 리뷰에서 발견된 Critical 버그): hasShape/spliceShapeTxBody/
+  // removeShape가 공유하던 <p:sp> 블록 탐지 정규식이 리터럴 <p:sp>만 매치하고 여는 태그에 속성이
+  // 붙은 형태(PowerPoint가 배경 채우기 도형에 실제로 흔히 붙이는 useBgFill="1" 등)는 매치하지
+  // 못했다. baseline은 parseSlideShapes(실제 XML 파서)로 만들어지므로 이런 도형도 정확히
+  // 인식하지만, removeShape는 그 블록을 찾지 못해 "못 찾음"으로 throw했다 — 그리고 이 throw는
+  // exportPptxFromSlides(저장/다운로드 경로) 안에서 일어나므로, 그 문서의 이후 모든 저장·다운로드를
+  // 영구히 막았다(사용자 쪽에서 되돌릴 방법이 없는 영구 고장). id="3" 도형의 여는 태그에
+  // useBgFill="1"을 붙인 점만 빼면 위 "deleting a shape then exporting..." 테스트와 동일하다.
+  test('deleting an attributed <p:sp useBgFill="1"> shape actually removes it, instead of throwing and permanently breaking export (Task 13 fix)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { strFromU8, strToU8, unzipSync, zipSync } = await import('fflate');
+
+    const customSlideXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+      '<p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Keep Me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Delete Me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '</p:spTree></p:cSld></p:sld>';
+
+    const baseline = makeSamplePptx(['Hello World']);
+    const entries = unzipSync(baseline);
+    entries['ppt/slides/slide1.xml'] = strToU8(customSlideXml);
+    const original = Buffer.from(zipSync(entries));
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+    expect(perSlide.has('2')).toBe(true);
+    expect(perSlide.has('3')).toBe(true); // parseSlideShapes(실제 XML 파서)는 속성 있는 도형도 정확히 봄
+
+    // 사용자가 × 버튼으로 속성이 붙은 도형 "3"을 삭제한다.
+    ydoc.transact(() => {
+      perSlide.delete('3');
+    });
+
+    // 고쳐지기 전에는 이 호출 자체가 throw했다(저장/다운로드 경로 안에서) — 지금은 정상적으로
+    // 끝나고 도형이 실제로 제거되어야 한다.
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+
+    expect(exportedSlideXml).not.toContain('Delete Me');
+    expect(exportedSlideXml).not.toContain('id="3"');
+    expect(exportedSlideXml).toContain('Keep Me'); // 다른 도형은 전혀 건드리지 않고 그대로 남아 있다
+    expect(exportedSlideXml).toContain('id="2"');
+  });
+
+  // Task 13 fix 회귀 테스트(코드 리뷰에서 발견된, Task 6 시점부터 있던 별개의 선재 버그): 같은
+  // 정규식 버그 때문에 hasShape도 속성 있는 <p:sp>를 "없다"고 잘못 판단해, 이미 있는 도형을 갱신
+  // (spliceShapeTxBody)하는 대신 새 도형으로 추가(appendNewShape)해 버려 같은 shapeId 아래 옛
+  // 내용과 새 내용이 동시에 남는 조용한 중복이 생겼다 — 삭제와 달리 throw하지 않고 파일이 조용히
+  // 잘못된 채로 저장된다는 점에서 더 은밀하다.
+  test('editing a pre-existing attributed <p:sp useBgFill="1"> shape updates it in place, not duplicated (Task 13 fix — pre-existing bug found alongside the delete bug)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { parseSlideShapes } = await import('../src/pptx/slideContent.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, strToU8, unzipSync, zipSync } = await import('fflate');
+
+    const customSlideXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+      '<p:grpSpPr/>' +
+      '<p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Original Text</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '</p:spTree></p:cSld></p:sld>';
+
+    const baseline = makeSamplePptx(['Hello World']);
+    const entries = unzipSync(baseline);
+    entries['ppt/slides/slide1.xml'] = strToU8(customSlideXml);
+    const original = Buffer.from(zipSync(entries));
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+
+    // 도형 "2"(속성 있는 <p:sp>)를 편집한다 — baseline과 달라지므로 병합 루프가 hasShape/
+    // spliceShapeTxBody 경로를 실제로 탄다(내용이 그대로면 baseline 비교에서 건너뛰어 이 버그 자체가
+    // 드러나지 않는다).
+    const editedDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('New Text')]),
+    ]);
+    const fragment = perSlide.get('2')!.get('content') as Y.XmlFragment;
+    ydoc.transact(() => {
+      prosemirrorToYXmlFragment(editedDoc, fragment);
+    });
+
+    // 고쳐지기 전에는 hasShape가 이 속성 있는 도형을 "없다"고 잘못 판단해, 이 단 한 번의 저장만으로도
+    // appendNewShape 분기를 타 같은 id="2" 아래 옛 텍스트+새 텍스트가 동시에 남는 도형 두 개가
+    // 생겼다.
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+
+    const occurrences = exportedSlideXml.split('id="2"').length - 1;
+    expect(occurrences).toBe(1); // 정확히 도형 하나만 — 중복 추가되지 않았다
+    expect(exportedSlideXml).not.toContain('Original Text'); // 옛 내용이 별도 도형으로 안 남아있다
+
+    const shapes = parseSlideShapes(exportedSlideXml);
+    const matches = shapes.filter((s) => s.shapeId === '2');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].doc.textContent).toBe('New Text');
+  });
 });
