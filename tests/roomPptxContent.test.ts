@@ -422,6 +422,73 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     expect(exportedSlideXml).not.toContain('Hello World');
   });
 
+  // 회귀 테스트(Task 6 fix round): meta(x/y/w/h)는 appendNewShape 분기에서만 쓰이는데, 이전 버전은
+  // meta 유효성 검사를 hasShape 분기 판단보다 먼저 해서, 이미 슬라이드 XML에 존재하는(=meta를 전혀
+  // 읽지 않는 spliceShapeTxBody로 처리돼야 할) 도형까지 함께 건너뛰어 그 도형의 진짜 편집 내용이
+  // 영구히 유실됐다. 이 테스트는 "이미 존재하는 도형을 실제로 편집한 뒤 그 도형의 meta만 손상시켜도
+  // 편집 내용은 절대 유실되지 않는다"를 증명한다 — Important #1 테스트(append 경로)와는 별개로,
+  // splice 경로를 겨냥한다.
+  test("a malformed meta on an EXISTING (already-seeded) shape does not drop its real text edit " +
+    '(splice path)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+    // 샘플 pptx의 유일한 도형은 <p:cNvPr id="2" .../>다(helpers.ts의 pptxSlideXml 참고) — 정상
+    // 시딩 경로로 이미 원본 슬라이드 XML에 존재하는(=hasShape가 true를 돌려주는) 기존 도형이다.
+    const shapeMap = perSlide.get('2')!;
+    const fragment = shapeMap.get('content') as Y.XmlFragment;
+
+    // 실제, 잘 만들어진 편집을 한다 — hasShape가 true이므로 spliceShapeTxBody 분기를 태운다.
+    const editedDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Edited By Test')]),
+    ]);
+    ydoc.transact(() => {
+      prosemirrorToYXmlFragment(editedDoc, fragment);
+    });
+
+    // 이 도형의 meta는 splice 분기에서는 전혀 읽히지 않는데도, 악의적이거나 버그 있는 클라이언트가
+    // 원시 값(숫자)을 써 넣어 손상시킨 상황을 흉내낸다. null로도 같은 결과여야 하지만, 대표로
+    // 숫자 하나만 검증한다(과잉 테스트를 피한다).
+    ydoc.transact(() => {
+      shapeMap.set('meta', 42);
+    });
+
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedEntries = unzipSync(result.bytes);
+    const exportedSlideXml = strFromU8(exportedEntries[`ppt/slides/${result.finalParts[0]}`]);
+    // 핵심 단언: meta가 손상됐어도 이미 존재하는 도형의 실제 편집 내용은 절대 조용히 유실되지
+    // 않는다 — splice 분기는 meta 유효성과 무관하게 항상 진행돼야 한다.
+    expect(exportedSlideXml).toContain('Edited By Test');
+    expect(exportedSlideXml).not.toContain('Hello World');
+  });
+
   test('a new-<uuid> shape id is routed to appendNewShape, not spliceShapeTxBody', async () => {
     const { store } = await import('../src/storage.js');
     const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');

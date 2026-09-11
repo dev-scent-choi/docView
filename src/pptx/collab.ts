@@ -491,14 +491,6 @@ export function exportPptxFromSlides(
         if (!(shapeMap instanceof Y.Map)) continue; // 위와 같은 이유 — 이 도형 항목만 구조가 잘못됨
         const fragment = shapeMap.get('content');
         if (!(fragment instanceof Y.XmlFragment)) continue; // 위와 같은 이유 — 진짜 콘텐츠가 아니었음
-        // meta도 위 fragment/shapeMap과 같은 이유로 구조 검증이 필요하다 — 지금까지는 이 필드만
-        // 검증 없이 바로 .x/.y 등을 읽어서, 악의적이거나 버그 있는 클라이언트가 meta에 원시 값
-        // (숫자, null 등)을 써 넣으면 아래에서 TypeError가 나 이 도형뿐 아니라 이 함수 호출 전체가
-        // throw하며 자동저장이 막혔다. 이 필드도 같은 정책(구조가 잘못되면 그 도형만 건너뛴다)을
-        // 적용한다.
-        const metaRaw = shapeMap.get('meta');
-        if (!metaRaw || typeof metaRaw !== 'object') continue; // 손상된 meta — 이 도형은 건너뛴다
-        const meta = metaRaw as SlideShapeMeta;
 
         const doc = yXmlFragmentToProseMirrorRootNode(fragment, pptxTextSchema);
         const txBodyXml = serializeTxBodyXml(doc);
@@ -524,8 +516,21 @@ export function exportPptxFromSlides(
         // XML에 존재하는 `new-` 도형을 또 추가해 버려 저장할 때마다 같은 텍스트박스가 중복되는
         // 버그가 있었다 — slideContent.ts의 hasShape/spliceShapeTxBody 주석 참고).
         if (hasShape(slideXml, shapeId)) {
+          // 이미 존재하는 도형은 텍스트만 갈아 끼운다 — spliceShapeTxBody는 meta(x/y/w/h)를 전혀
+          // 읽지 않으므로, 이 분기는 meta가 손상돼 있어도(아래 append 분기와 달리) 무조건
+          // 진행해야 한다. meta 유효성 검증을 이 분기보다 먼저(hasShape 판단 전) 했었는데, 그러면
+          // meta와 무관한 이 분기까지 함께 건너뛰어 이미 슬라이드에 있던 실제 사용자 편집이(단지
+          // 같은 도형의 meta가 손상됐다는 이유만으로) 조용히 영구 유실되는 회귀가 있었다.
           slideXml = spliceShapeTxBody(slideXml, shapeId, txBodyXml);
         } else {
+          // meta는 append 분기에서만 실제로 쓰인다(x/y/w/h로 새 도형의 위치/크기를 만든다) —
+          // 그래서 유효성 검증도 여기, 실제로 meta를 읽기 직전에만 한다(위 splice 분기는 절대
+          // 이 검증의 영향을 받지 않는다). 악의적이거나 버그 있는 클라이언트가 meta에 원시 값
+          // (숫자, null 등)을 써 넣은 경우, 여기서 조용히 이 도형의 추가만 건너뛴다 — baseline에
+          // 없던 완전히 새로운 도형이므로 건너뛰어도 기존 사용자 콘텐츠가 유실되지 않는다.
+          const metaRaw = shapeMap.get('meta');
+          if (!metaRaw || typeof metaRaw !== 'object') continue; // 손상된 meta — 새 도형 추가만 건너뛴다
+          const meta = metaRaw as SlideShapeMeta;
           slideXml = appendNewShape(
             slideXml,
             { shapeId, x: meta.x ?? 0, y: meta.y ?? 0, w: meta.w ?? 1000000, h: meta.h ?? 500000 },
