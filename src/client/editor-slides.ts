@@ -105,15 +105,44 @@ const MESSAGE_SLIDE_CONTENT_SUBSCRIBE = 5;
 // 요청마다 디스크 읽기+unzip+XML 파싱을 새로 하므로, 첫 요청이 아직 응답하기 전의 중복
 // 요청은 그 비용을 그대로 낭비하고 두 번째는 결국 조용히 no-op된다). slideContents.observe가
 // 실제로 그 슬라이드 키가 채워진 것을 감지하면(main() 참고) 이 집합에서 제거한다.
+//
+// 다만 서버 쪽 시딩이 어떤 이유로든(에러 throw, 읽기 전용 연결, 잘못된 payload, 존재하지 않는
+// 슬라이드 엔트리 등) 실패하면 slideContents에는 아무것도 쓰이지 않으므로 observe가 영영 안
+// 불리고, 이 집합에 남은 entryId는 세션이 끝날 때까지 제거되지 않는다 — 그러면 그 슬라이드는
+// 이후 몇 번을 다시 클릭해도 이 함수 맨 위 가드에서 조용히 no-op되어 영구히 빈 캔버스로 남는다.
+// 이를 막기 위해 아래 subscribeSlideContent에서 항목을 추가할 때마다 유한한 수명(타임아웃)을
+// 함께 건다 — 정상적으로 시딩되면 observe가 먼저 지우고, 타임아웃이 나중에 발동해도
+// Set.delete는 이미 없는 값에 대해 안전한 no-op이라 아무 문제도 없다. 시딩이 실패한 경우엔
+// 타임아웃이 먼저 발동해 이 집합에서 빠지고, 사용자가 그 슬라이드를 다시 클릭하면 재시도된다.
 const pendingSlideSubscriptions = new Set<string>();
+// pendingSlideSubscriptions 항목 하나의 최대 수명(ms) — 정확할 필요는 없고, 정상적인 왕복
+// 시간보다 넉넉히 길어서 성공 케이스에서는 절대 발동하지 않을 정도면 된다.
+const PENDING_SUBSCRIPTION_TIMEOUT_MS = 9000;
+
+// 복제(duplicate)로 만들어진 슬라이드 entryId -> 그 원본(source) 슬라이드 entryId. 복제 버튼
+// 핸들러가 선제적으로 duplicateOfId를 실어 구독 요청을 한 번 보내지만(아래 setupCardActions
+// 참고), 그 시점에 WebSocket이 OPEN이 아니면(재연결 중 등) subscribeSlideContent는 아무것도
+// 보내지 않고 조용히 리턴한다 — 그 경우 그 복제 슬라이드에 대해 duplicateOfId를 실어 보내는
+// 유일한 시도가 사라져 버리고, 이후 renderCanvasForSlide의 "아직 안 열렸다" 폴백 경로가 보통의
+// (duplicateOfId 없는) 구독만 보내게 되어 서버가 소스의 살아있는 편집 내용 대신 오래된 디스크
+// XML로 시딩해 버린다. 이 맵은 그 간극을 구조적으로 막는다 — subscribeSlideContent가
+// duplicateOfId 없이 불릴 때마다 여기서 먼저 찾아본다(아래 참고). 실제로 시딩이 끝나면(=
+// slideContents.observe가 그 키를 감지하면) 더 이상 필요 없으니 지운다.
+const pendingDuplicateSources = new Map<string, string>();
 
 function subscribeSlideContent(entryId: string, duplicateOfId?: string): void {
   if (!provider.ws || provider.ws.readyState !== WebSocket.OPEN) return;
   if (pendingSlideSubscriptions.has(entryId)) return; // 이미 이 슬라이드에 대한 요청이 응답을 기다리는 중
+  // 이 호출이 duplicateOfId를 명시적으로 안 받았다면(예: renderCanvasForSlide의 폴백 경로,
+  // 또는 위 타임아웃으로 풀려난 뒤의 재시도) 이 슬라이드가 복제본으로 알려져 있는지 먼저
+  // 확인한다 — 있다면 그 원본 id를 그대로 duplicateOfId로 써서, 어느 경로로 결국 요청이
+  // 성공하든 항상 올바른 소스에서 시딩되게 한다.
+  const effectiveDuplicateOfId = duplicateOfId ?? pendingDuplicateSources.get(entryId);
   pendingSlideSubscriptions.add(entryId);
+  setTimeout(() => pendingSlideSubscriptions.delete(entryId), PENDING_SUBSCRIPTION_TIMEOUT_MS);
   const encoder = encoding.createEncoder();
   encoding.writeVarUint(encoder, MESSAGE_SLIDE_CONTENT_SUBSCRIBE);
-  encoding.writeVarString(encoder, JSON.stringify({ slideEntryId: entryId, duplicateOfId }));
+  encoding.writeVarString(encoder, JSON.stringify({ slideEntryId: entryId, duplicateOfId: effectiveDuplicateOfId }));
   provider.ws.send(encoding.toUint8Array(encoder));
 }
 
@@ -302,6 +331,12 @@ function setupCardActions(): void {
     const entry = slidesArray.get(index);
     if (target.closest('.slide-card-duplicate')) {
       const newEntryId = crypto.randomUUID();
+      // 아래 proactive subscribeSlideContent 호출이 그 순간 WebSocket이 OPEN이 아니라서(재연결
+      // 중 등) 아무것도 안 보내고 조용히 리턴하더라도, 이 매핑은 이미 존재하게 만들어 둔다 —
+      // 그래야 나중에 어떤 경로로든(renderCanvasForSlide의 폴백, 또는 pendingSlideSubscriptions
+      // 타임아웃 이후의 재시도) 이 슬라이드에 대한 구독이 결국 시도될 때 duplicateOfId 없는
+      // "평범한" 요청이 나가는 대신 항상 이 원본 id를 함께 실어 보낼 수 있다.
+      pendingDuplicateSources.set(newEntryId, entry.id);
       const ydoc = slidesArray.doc!;
       ydoc.transact(() => {
         slidesArray.insert(index + 1, [
@@ -315,10 +350,10 @@ function setupCardActions(): void {
       });
       // 서버가 원본 파일의(오래된) 디스크 XML이 아니라 소스 슬라이드의 "지금 세션에서 편집된"
       // 콘텐츠를 그대로 깊은 복사해 시딩하도록, 사용자가 실제로 이 복제본을 열기 전에(활성
-      // 슬라이드가 되는 것과 무관하게) 미리 duplicateOfId를 실어 구독 요청을 보내 둔다. 이걸
-      // 빼먹으면 나중에 이 슬라이드를 열 때 renderCanvasForSlide의 지연 시딩 경로가
-      // duplicateOfId 없는 평범한 subscribeSlideContent(entryId)만 보내게 되고, 서버는 그 경우
-      // 원본 XML로 폴백해 세션 중 편집 내용을 조용히 잃어버린다.
+      // 슬라이드가 되는 것과 무관하게) 미리 duplicateOfId를 실어 구독 요청을 보내 둔다. 이 전송
+      // 자체가 드롭돼도(WS가 그 순간 OPEN이 아니었던 경우) 위에서 이미 채워둔
+      // pendingDuplicateSources 덕분에, 이후 이 슬라이드에 대해 실제로 나가는 첫 구독 요청은
+      // subscribeSlideContent 내부에서 이 매핑을 찾아 duplicateOfId를 채워 보낸다.
       subscribeSlideContent(newEntryId, entry.id);
     } else if (target.closest('.slide-card-delete')) {
       if (slidesArray.length <= 1) return; // 마지막 남은 슬라이드는 지울 수 없다
@@ -391,8 +426,15 @@ async function main(): Promise<void> {
   slideContents.observe((event) => {
     // 새로 채워진(=서버가 시딩을 끝낸) 슬라이드는 더 이상 "응답 대기 중"이 아니므로 in-flight
     // 집합에서 지운다 — 그러지 않으면 그 슬라이드에 대한 이후의 정당한 subscribeSlideContent
-    // 호출이 (실제로는 이미 끝난) 이전 요청 때문에 영원히 무시된다.
-    for (const key of event.keysChanged) pendingSlideSubscriptions.delete(key);
+    // 호출이 (실제로는 이미 끝난) 이전 요청 때문에 영원히 무시된다. 같은 이유로
+    // pendingDuplicateSources에서도 지운다 — 시딩이 실제로 끝난 이상 그 매핑은 더 이상 쓸모가
+    // 없고(서버는 이미 채워진 슬라이드를 다시 덮어쓰지 않으므로 재시딩은 원래 일어나지 않지만),
+    // 남겨두면 훗날 어떤 경로로 같은 entryId가 재사용되는 예외적인 경우에 오래된 매핑이 다시
+    // 쓰일 위험이 있어 위생상 정리한다.
+    for (const key of event.keysChanged) {
+      pendingSlideSubscriptions.delete(key);
+      pendingDuplicateSources.delete(key);
+    }
     if (activeSlideId && event.keysChanged.has(activeSlideId)) renderCanvasForSlide(activeSlideId);
   });
   // Task 8이 남겨 둔 훅 — 슬라이드를 고를 때마다 오른쪽 캔버스를 그 슬라이드 내용으로 채운다.
