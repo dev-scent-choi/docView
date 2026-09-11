@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import * as Y from 'yjs';
 import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror';
-import { appendNewShape, parseSlideShapes, serializeTxBodyXml, spliceShapeTxBody } from './slideContent.js';
+import { appendNewShape, hasShape, parseSlideShapes, serializeTxBodyXml, spliceShapeTxBody } from './slideContent.js';
+import type { ParsedShape } from './slideContent.js';
 import { pptxTextSchema } from './textSchema.js';
 import type { SlideEntry, SlideShapeMeta } from '../collab/pptxShared.js';
 
@@ -194,14 +195,26 @@ export function seedSlideContentFromXml(
   slideContents.doc!.transact(() => {
     const perSlide: PerSlideContentsMap = new Y.Map();
     slideContents.set(slideEntryId, perSlide); // 먼저 attach
-    for (const shape of shapes) {
-      const shapeMap: ShapeContentMap = new Y.Map();
-      perSlide.set(shape.shapeId, shapeMap); // 먼저 attach
-      const meta: SlideShapeMeta = { shapeId: shape.shapeId, x: shape.x, y: shape.y, w: shape.w, h: shape.h };
-      shapeMap.set('meta', meta);
-      const fragment = new Y.XmlFragment();
-      shapeMap.set('content', fragment); // 먼저 attach
-      prosemirrorToYXmlFragment(shape.doc, fragment); // 그 다음 채우기 — docx 시딩과 같은 순서
+    try {
+      for (const shape of shapes) {
+        const shapeMap: ShapeContentMap = new Y.Map();
+        perSlide.set(shape.shapeId, shapeMap); // 먼저 attach
+        const meta: SlideShapeMeta = { shapeId: shape.shapeId, x: shape.x, y: shape.y, w: shape.w, h: shape.h };
+        shapeMap.set('meta', meta);
+        const fragment = new Y.XmlFragment();
+        shapeMap.set('content', fragment); // 먼저 attach
+        prosemirrorToYXmlFragment(shape.doc, fragment); // 그 다음 채우기 — docx 시딩과 같은 순서
+      }
+    } catch (error) {
+      // 도형 N개 중 일부만 채운 채로 던지면(예: shape.doc가 prosemirrorToYXmlFragment가 감당 못하는
+      // 무언가를 담고 있어 3번째 도형에서 실패) 위에서 이미 실행한 slideContents.set(slideEntryId, ...)
+      // 때문에 has(slideEntryId)가 영원히 true를 돌려주게 된다 — 이 슬라이드는 절반만 채워진 채
+      // 영구히 굳어버리고 다시는 재시도(재시딩)될 방법이 없다(Yjs의 transact()는 콜백이 던져도
+      // 이미 적용한 변경을 자동으로 롤백하지 않는다 — 트랜잭션의 finally는 트랜잭션 상태만
+      // 정리할 뿐 데이터는 그대로 남는다). 실패를 이 트랜잭션 안에서 완전히 되돌려("이번 시딩
+      // 시도 자체가 없었던 것"으로 만들어) 다음 구독 요청이 처음부터 다시 시도할 수 있게 한다.
+      slideContents.delete(slideEntryId);
+      throw error;
     }
   });
 }
@@ -225,24 +238,40 @@ export function duplicateSlideContent(
   const source = slideContents.get(sourceEntryId);
   if (!source) return;
   slideContents.doc!.transact(() => {
+    // 동시에 들어온 다른 요청이 이미 이 newEntryId를 시딩했을 수 있다 — 호출부인
+    // seedSlideContentIfNeeded는 "소스 먼저 시딩"을 위해 await를 거치는데, 그 비동기 구간 동안
+    // 같은 slideEntryId를 요청하는 두 번째 메시지가 도착하면 둘 다 최상위 has() 체크(둘 다 아직
+    // false)를 통과해 여기까지 내려온다 — 그대로 두면 나중에 도착한 쪽이 먼저 쓴 결과를 덮어써
+    // 버린다(먼저 쓴 쪽이 그 사이 이미 편집됐다면 그 편집이 통째로 사라진다). 여기서 한 번 더
+    // 확인해, 이미 누군가 시딩했다면 조용히 물러난다 — "기존 시딩은 절대 덮어쓰지 않는다"는
+    // seedSlideContentIfNeeded 최상위 진입점의 불변식을 이 depth에서도 그대로 지킨다.
+    if (slideContents.has(newEntryId)) return;
     const perSlide: PerSlideContentsMap = new Y.Map();
     slideContents.set(newEntryId, perSlide); // 먼저 attach
-    for (const [shapeId, shapeMap] of source.entries()) {
-      const newShapeMap: ShapeContentMap = new Y.Map();
-      perSlide.set(shapeId, newShapeMap); // 먼저 attach
-      newShapeMap.set('meta', shapeMap.get('meta'));
-      const newFragment = new Y.XmlFragment();
-      newShapeMap.set('content', newFragment); // 먼저 attach
-      const sourceFragment = shapeMap.get('content') as Y.XmlFragment;
-      for (const child of sourceFragment.toArray()) {
-        if (!(child instanceof Y.XmlElement) && !(child instanceof Y.XmlText)) {
-          // pptxTextSchema는 XmlHook을 만들 일이 없다(리프 노드가 없다) — 혹시라도 나타나면 조용히
-          // 건너뛰지 않고 바로 던진다: 원본 유실 금지 원칙상 복제본에서 자식 하나가 조용히 빠지는
-          // 것보다는 복제 자체가 눈에 띄게 실패하는 편이 낫다.
-          throw new Error(`duplicateSlideContent: 지원하지 않는 Y.Xml 자식 타입입니다(도형 ${shapeId}).`);
+    try {
+      for (const [shapeId, shapeMap] of source.entries()) {
+        const newShapeMap: ShapeContentMap = new Y.Map();
+        perSlide.set(shapeId, newShapeMap); // 먼저 attach
+        newShapeMap.set('meta', shapeMap.get('meta'));
+        const newFragment = new Y.XmlFragment();
+        newShapeMap.set('content', newFragment); // 먼저 attach
+        const sourceFragment = shapeMap.get('content') as Y.XmlFragment;
+        for (const child of sourceFragment.toArray()) {
+          if (!(child instanceof Y.XmlElement) && !(child instanceof Y.XmlText)) {
+            // pptxTextSchema는 XmlHook을 만들 일이 없다(리프 노드가 없다) — 혹시라도 나타나면 조용히
+            // 건너뛰지 않고 바로 던진다: 원본 유실 금지 원칙상 복제본에서 자식 하나가 조용히 빠지는
+            // 것보다는 복제 자체가 눈에 띄게 실패하는 편이 낫다.
+            throw new Error(`duplicateSlideContent: 지원하지 않는 Y.Xml 자식 타입입니다(도형 ${shapeId}).`);
+          }
+          newFragment.push([child.clone()]); // 그 다음 채우기 — 위와 같은 순서
         }
-        newFragment.push([child.clone()]); // 그 다음 채우기 — 위와 같은 순서
       }
+    } catch (error) {
+      // seedSlideContentFromXml과 같은 이유 — 도형 일부만 복사한 채 던지면 has(newEntryId)가
+      // 영원히 true가 되어 이 복제본이 절반만 채워진 채로 영구히 굳어버린다. 실패를 이 트랜잭션
+      // 안에서 완전히 되돌린 뒤(=이번 복제 시도가 아예 없었던 것으로 만든 뒤) 던진다.
+      slideContents.delete(newEntryId);
+      throw error;
     }
   });
 }
@@ -270,7 +299,14 @@ export function exportPptxFromSlides(
   slidesArray: Y.Array<SlideEntry>,
   slideContents?: SlideContentsMap,
 ): ExportedPptx {
-  const zipEntries = { ...unzipSync(pptxBytes) };
+  // 아래 zipEntries는 이 함수 안에서 계속 mutate된다(파트 추가/삭제/텍스트 병합) — 병합 루프가
+  // "이 도형이 실제로 편집됐는가"를 판단하려면 mutate되기 "전"의 원본 슬라이드 XML이 그대로
+  // 필요하다(Fix 2). unzipSync(pptxBytes)의 결과 객체 자체를 별도 변수에 붙잡아 두면, 이후
+  // zipEntries[key] = 새값 형태의 재할당이 이 객체의 프로퍼티를 건드리지 않으므로(스프레드가
+  // 만든 얕은 복사본이 zipEntries) 이 스냅샷은 함수가 끝날 때까지 항상 "저장 시작 시점의
+  // 슬라이드 XML"을 그대로 유지한다.
+  const originalZipEntries = unzipSync(pptxBytes);
+  const zipEntries = { ...originalZipEntries };
   const rawEntryList = slidesArray.toArray();
   const entryList = filterValidEntries(rawEntryList, zipEntries);
   if (entryList.length === 0) {
@@ -405,8 +441,33 @@ export function exportPptxFromSlides(
   // slideContents 인자 자체가 없으면(콘텐츠 편집을 다루지 않는 기존 호출부/테스트) 아래 루프는
   // 통째로 건너뛰어 기존 동작과 100% 동일하다.
   if (slideContents) {
+    // entry.sourceSlidePart(원본 zip 안의 실제 슬라이드 파트 이름) -> 그 파트를 파싱한 도형 목록.
+    // 'original'과 'duplicate' 둘 다 sourceSlidePart가 "원본 zip에서 이 슬라이드를 만들어낸 그
+    // 파트"를 가리킨다(client/editor-slides.ts가 복제 시 그대로 복사해 온다 — 복제본은 자기 자신의
+    // 새 파트 번호가 아니라 소스의 파트 이름을 그대로 들고 있다) — 그래서 baseline(한 번도 편집
+    // 안 된 상태) 조회는 kind에 상관없이 entry.sourceSlidePart 하나로 통일할 수 있다. 같은
+    // sourceSlidePart를 가리키는 entry가 여러 개(원본 + 그 복제본들)일 수 있으므로 파트 이름
+    // 기준으로 캐시해 중복 파싱을 피한다.
+    const baselineShapesCache = new Map<string, Map<string, ParsedShape>>();
+    const getBaselineShapes = (sourceSlidePart: string): Map<string, ParsedShape> => {
+      let cached = baselineShapesCache.get(sourceSlidePart);
+      if (!cached) {
+        // originalZipEntries에서 읽는다 — zipEntries가 아니다: zipEntries는 이 루프가 도는 동안
+        // 바로 이 병합으로 계속 mutate되므로, entryList를 도는 순서상 이미 처리된 'original'
+        // 슬라이드의 편집이 그 뒤에 오는 자신의 'duplicate' 항목의 baseline 조회에 새어 들어갈 수
+        // 있다(둘 다 같은 sourceSlidePart를 참조하니까). originalZipEntries는 저장 시작 시점의
+        // 스냅샷이라 이런 순서 의존성이 없다.
+        const xml = originalZipEntries[`ppt/slides/${sourceSlidePart}`];
+        const shapes = xml ? parseSlideShapes(strFromU8(xml)) : [];
+        cached = new Map(shapes.map((shape) => [shape.shapeId, shape]));
+        baselineShapesCache.set(sourceSlidePart, cached);
+      }
+      return cached;
+    };
+
     for (let i = 0; i < entryList.length; i += 1) {
-      const perSlide = slideContents.get(entryList[i].id);
+      const entry = entryList[i];
+      const perSlide = slideContents.get(entry.id);
       // room.ts의 flushToStore는 slideContents 값이 구조적으로 Y.Map이 아니면(예: 악의적이거나
       // 버그 있는 클라이언트가 원시 값을 써 넣은 경우) throw하지 않고 조용히 정리(prune)한다 —
       // 여기서도 같은 원칙을 따른다: 애초에 우리 시딩 코드(seedSlideContentFromXml/
@@ -420,26 +481,56 @@ export function exportPptxFromSlides(
       if (!(perSlide instanceof Y.Map)) continue; // 한 번도 안 열었거나(undefined) 구조가 잘못됨 — 원본 그대로 둔다
       const partPath = `ppt/slides/${finalParts[i]}`;
       let slideXml = strFromU8(zipEntries[partPath]);
+      // 'blank'는 baseline이 없다(애초에 아무 것도 없던 슬라이드다) — 이 슬라이드의 도형은 전부
+      // "지금 막 생겼다"는 뜻이므로 아래 baseline 비교(=편집 안 됐으면 건너뛰기)를 적용하지 않고
+      // 항상 병합한다. 'original'/'duplicate'는 baseline이 있다.
+      const baselineShapes = entry.kind !== 'blank' && entry.sourceSlidePart
+        ? getBaselineShapes(entry.sourceSlidePart)
+        : null;
       for (const [shapeId, shapeMap] of perSlide.entries()) {
         if (!(shapeMap instanceof Y.Map)) continue; // 위와 같은 이유 — 이 도형 항목만 구조가 잘못됨
         const fragment = shapeMap.get('content');
         if (!(fragment instanceof Y.XmlFragment)) continue; // 위와 같은 이유 — 진짜 콘텐츠가 아니었음
+        // meta도 위 fragment/shapeMap과 같은 이유로 구조 검증이 필요하다 — 지금까지는 이 필드만
+        // 검증 없이 바로 .x/.y 등을 읽어서, 악의적이거나 버그 있는 클라이언트가 meta에 원시 값
+        // (숫자, null 등)을 써 넣으면 아래에서 TypeError가 나 이 도형뿐 아니라 이 함수 호출 전체가
+        // throw하며 자동저장이 막혔다. 이 필드도 같은 정책(구조가 잘못되면 그 도형만 건너뛴다)을
+        // 적용한다.
+        const metaRaw = shapeMap.get('meta');
+        if (!metaRaw || typeof metaRaw !== 'object') continue; // 손상된 meta — 이 도형은 건너뛴다
+        const meta = metaRaw as SlideShapeMeta;
+
         const doc = yXmlFragmentToProseMirrorRootNode(fragment, pptxTextSchema);
         const txBodyXml = serializeTxBodyXml(doc);
-        // 'new-' 접두어는 클라이언트가 새로 추가한(원본에 없던) 텍스트박스의 shapeId 관례다 —
-        // spliceShapeTxBody는 `id="\d+"`만 매치하므로 이런 id를 넘기면 찾지 못해 throw한다(그게
-        // 맞는 동작이다 — 아래 분기가 절대 그 경로를 타지 않게 해야 한다). 그 외의 모든 shapeId는
-        // 원본에서 파싱된(parseSlideShapes) 실제 숫자 id이므로 spliceShapeTxBody로 기존
-        // <p:txBody>를 교체한다.
-        if (shapeId.startsWith('new-')) {
-          const meta = shapeMap.get('meta') as SlideShapeMeta;
+
+        // 실제로 편집된 도형만 병합한다 — baseline(원본 XML을 다시 파싱해 같은 스키마로 직렬화한
+        // 결과)과 지금 값이 완전히 같으면(=사용자가 이 도형은 한 번도 안 건드렸으면) 병합 자체를
+        // 건너뛰어 그 도형의 원본 XML을 한 글자도 바꾸지 않는다. ProseMirror 왕복 모델은 실제
+        // OOXML 속성의 부분집합만 표현하므로(굵게/기울임/밑줄/색/크기 + 문단/런 구조뿐, autofit/
+        // anchor/글머리기호/정렬/들여쓰기/<a:br/>/<a:fld/>/글꼴 등은 모델링 밖이다), 병합을
+        // "실제로 편집한 도형"에만 적용해야 그 슬라이드를 열기만 하고 다른 도형은 안 건드린
+        // 사용자의 서식이 매 저장마다 조용히 깎여나가는 일이 없다. baseline에 이 shapeId가 없으면
+        // (예: 클라이언트가 새로 추가한 `new-` 텍스트박스, 또는 원본 슬라이드에 그 사이 실제로
+        // 없던 id) 비교할 대상이 없으니 항상 편집된 것으로 보고 병합을 계속한다.
+        if (baselineShapes) {
+          const baselineShape = baselineShapes.get(shapeId);
+          if (baselineShape && serializeTxBodyXml(baselineShape.doc) === txBodyXml) {
+            continue; // 편집 안 됨 — 이 도형은 원본 그대로 둔다(병합 자체를 하지 않는다)
+          }
+        }
+
+        // 이 shapeId가 지금까지 조립된 슬라이드 XML에 이미 존재하는지로 교체/추가를 가른다(예전에는
+        // shapeId가 `new-`로 시작하는지만 보고 무조건 추가했는데, 그러면 이미 한 번 저장되어 실제
+        // XML에 존재하는 `new-` 도형을 또 추가해 버려 저장할 때마다 같은 텍스트박스가 중복되는
+        // 버그가 있었다 — slideContent.ts의 hasShape/spliceShapeTxBody 주석 참고).
+        if (hasShape(slideXml, shapeId)) {
+          slideXml = spliceShapeTxBody(slideXml, shapeId, txBodyXml);
+        } else {
           slideXml = appendNewShape(
             slideXml,
             { shapeId, x: meta.x ?? 0, y: meta.y ?? 0, w: meta.w ?? 1000000, h: meta.h ?? 500000 },
             txBodyXml,
           );
-        } else {
-          slideXml = spliceShapeTxBody(slideXml, shapeId, txBodyXml);
         }
       }
       zipEntries[partPath] = strToU8(slideXml);

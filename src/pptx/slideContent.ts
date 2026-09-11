@@ -142,12 +142,19 @@ export function serializeTxBodyXml(doc: PMNode): string {
  * 스타일)이나 다른 도형은 전혀 건드리지 않는다. 정규식으로 그 <p:sp>...</p:sp> 블록을 찾고,
  * 그 안의 <p:txBody>...</p:txBody>만 문자열 치환한다(전체를 다시 파싱해 직렬화하면 원본에
  * 있던, 우리가 모델링하지 않는 속성(원본에만 있는 <p:spPr> 하위 요소 등)이 유실될 위험이 있어
- * 문자열 서저리를 유지한다 — src/pptx/collab.ts의 기존 방식과 같은 원칙). */
+ * 문자열 서저리를 유지한다 — src/pptx/collab.ts의 기존 방식과 같은 원칙).
+ *
+ * id 매칭은 숫자로 제한하지 않는다(`id="([^"]+)"` — 따옴표로 감싸인 값이면 무엇이든 매치) —
+ * 원본 슬라이드의 도형은 항상 숫자 id를 쓰지만, 클라이언트가 새로 추가한 텍스트박스는
+ * `new-<uuid>` 형태의 문자열 id를 쓴다(appendNewShape 참고). 이 함수가 숫자만 매치했다면
+ * 두 번째 저장부터 그 도형을 "찾지 못했다"고 판단해 매번 새로 append하게 되어 저장할 때마다
+ * 같은 텍스트박스가 중복 추가되는 버그가 있었다 — 이 완화는 순수하게 넓히는 방향이라(숫자
+ * id는 전부 `[^"]+`에도 그대로 매치되므로) 기존에 매치되던 것은 전부 그대로 매치된다. */
 export function spliceShapeTxBody(slideXml: string, shapeId: string, txBodyXml: string): string {
   const spBlockRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
   let replaced = false;
   const result = slideXml.replace(spBlockRe, (spBlock) => {
-    const idMatch = /<p:cNvPr\b[^>]*\bid="(\d+)"/.exec(spBlock);
+    const idMatch = /<p:cNvPr\b[^>]*\bid="([^"]+)"/.exec(spBlock);
     if (!idMatch || idMatch[1] !== shapeId) return spBlock;
     // id는 맞아도 이 <p:sp> 블록에 <p:txBody>가 구조적으로 없을 수 있다(그림 등) — 그 경우
     // 아래 정규식 치환은 아무것도 바꾸지 못한 채 spBlock을 그대로 돌려주는데, 그걸 놓치고
@@ -163,6 +170,24 @@ export function spliceShapeTxBody(slideXml: string, shapeId: string, txBodyXml: 
     throw new Error(`spliceShapeTxBody: shapeId ${shapeId}를 슬라이드 XML에서 찾지 못했습니다.`);
   }
   return result;
+}
+
+/** shapeId를 가진 <p:sp> 블록이 슬라이드 XML 안에 이미 존재하는지만 확인한다(내용은 건드리지
+ * 않는다) — spliceShapeTxBody와 정확히 같은 블록 탐색/속성 매칭 정규식을 쓴다(둘이 어긋나면
+ * "있다"고 했는데 spliceShapeTxBody는 못 찾는 모순이 생길 수 있으므로 반드시 같아야 한다).
+ *
+ * src/pptx/collab.ts의 export 병합 루프가 도형별로 이 함수를 먼저 호출해 "이미 있는 도형(교체 —
+ * spliceShapeTxBody)"과 "처음 쓰는 도형(추가 — appendNewShape)"을 구분한다. 예전에는 shapeId가
+ * `new-`로 시작하는지만 보고 무조건 appendNewShape를 불렀는데, 그러면 이미 한 번 저장되어 슬라이드
+ * XML에 실제로 존재하는 `new-` 도형을 두 번째 저장에서 또 추가해 버려 저장할 때마다 같은
+ * 텍스트박스가 중복되는 버그가 있었다 — 이 함수로 먼저 존재 여부를 확인하면 그 문제가 사라진다. */
+export function hasShape(slideXml: string, shapeId: string): boolean {
+  const spBlockRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
+  for (const spBlock of slideXml.match(spBlockRe) ?? []) {
+    const idMatch = /<p:cNvPr\b[^>]*\bid="([^"]+)"/.exec(spBlock);
+    if (idMatch && idMatch[1] === shapeId) return true;
+  }
+  return false;
 }
 
 /** 원본에 없던 도형(새로 추가한 텍스트박스)을 <p:spTree> 끝에 끼워 넣는다. shapeId는

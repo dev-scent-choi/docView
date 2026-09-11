@@ -564,4 +564,241 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     expect(perSlide).toBeDefined();
     expect(perSlide!.size).toBe(0); // 빈 슬라이드는 파싱할 도형이 없다
   });
+
+  // Critical #1 회귀 테스트: 클라이언트가 추가한 new-<uuid> 텍스트박스가 저장할 때마다 중복 추가되지
+  // 않고, 두 번째 저장부터는 기존 것을 그 자리에서 갱신해야 한다.
+  test('a client-added text box is updated in place on the second save, not duplicated (Critical #1)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+
+    const newShapeId = `new-${randomUUID()}`;
+    const firstDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('First Save Text')]),
+    ]);
+    let fragment!: Y.XmlFragment;
+    ydoc.transact(() => {
+      const shapeMap = new Y.Map<unknown>();
+      perSlide.set(newShapeId, shapeMap); // 먼저 attach
+      shapeMap.set('meta', { shapeId: newShapeId, x: 100, y: 200, w: 300, h: 400 });
+      fragment = new Y.XmlFragment();
+      shapeMap.set('content', fragment); // 먼저 attach
+      prosemirrorToYXmlFragment(firstDoc, fragment); // 그 다음 채우기
+    });
+
+    // 저장 #1 — 새 텍스트박스가 처음으로 슬라이드 XML에 추가된다.
+    const firstResult = exportPptxFromSlides(original, slidesArray, slideContents);
+
+    // 자동저장 사이에 사용자가 같은 텍스트박스의 내용을 다시 고쳤다고 흉내낸다.
+    const secondDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Second Save Text')]),
+    ]);
+    ydoc.transact(() => {
+      prosemirrorToYXmlFragment(secondDoc, fragment);
+    });
+
+    // 저장 #2 — room.ts의 flushToStore가 매번 store.readOriginal로 "방금 디스크에 쓴 결과"를 다시
+    // 읽어 원본으로 삼는 것과 똑같이, 저장 #1이 만들어낸 바이트를 이번 저장의 원본으로 넘긴다.
+    const secondResult = exportPptxFromSlides(firstResult.bytes, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(
+      unzipSync(secondResult.bytes)[`ppt/slides/${secondResult.finalParts[0]}`],
+    );
+
+    const occurrences = exportedSlideXml.split(`id="${newShapeId}"`).length - 1;
+    expect(occurrences).toBe(1); // 정확히 한 번만 존재 — 중복 추가되지 않았다
+    expect(exportedSlideXml).toContain('Second Save Text'); // 갱신된 내용으로 바뀌었다
+    expect(exportedSlideXml).not.toContain('First Save Text'); // 옛 내용이 남아있지 않다
+  });
+
+  // Critical #2 회귀 테스트: 슬라이드를 열어(시딩) 그 안 도형 중 하나만 편집해도, 손대지 않은 다른
+  // 도형의 원본 서식(여기서는 "두 개의 문단"이라는, 스키마가 모델링하지 못하는 구조 일부를 대표하는
+  // 최소 예시)이 저장할 때마다 조용히 깎여나가서는 안 된다.
+  test('editing one shape does not touch the untouched shape\'s original XML (Critical #2)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, strToU8, unzipSync, zipSync } = await import('fflate');
+
+    // 도형이 두 개인 슬라이드를 손으로 만든다 — makeSamplePptx는 슬라이드당 텍스트박스 하나만
+    // 만드므로, 기본 pptx를 만든 뒤 slide1.xml만 두 도형짜리로 바꿔치기한다. 두 번째 도형(id="3")은
+    // 문단이 두 개다 — ProseMirror 라운드트립 자체는 문단 수/텍스트를 보존하지만, "이 도형은 아예
+    // 건드리지 않는다"는 Fix 2의 요지를 증명하는 데는 이 정도로 충분하다(브리프의 "간단한 두 문단"
+    // 예시 그대로).
+    const untouchedShapeBlock =
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/>' +
+      '<a:p><a:r><a:t>Untouched Line A</a:t></a:r></a:p>' +
+      '<a:p><a:r><a:t>Untouched Line B</a:t></a:r></a:p>' +
+      '</p:txBody></p:sp>';
+    const customSlideXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+      '<p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Hello World</a:t></a:r></a:p></p:txBody></p:sp>' +
+      untouchedShapeBlock +
+      '</p:spTree></p:cSld></p:sld>';
+
+    const baseline = makeSamplePptx(['Hello World']);
+    const entries = unzipSync(baseline);
+    entries['ppt/slides/slide1.xml'] = strToU8(customSlideXml);
+    const original = Buffer.from(zipSync(entries));
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    // 슬라이드를 연다(시딩) — 이 시점에 도형 "2"와 "3" 둘 다 slideContents에 채워진다.
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+
+    // 도형 "2"만 편집한다 — 도형 "3"은 시딩된 뒤로 한 번도 건드리지 않는다.
+    const editedDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Edited Title')]),
+    ]);
+    const shapeTwoFragment = perSlide.get('2')!.get('content') as Y.XmlFragment;
+    ydoc.transact(() => {
+      prosemirrorToYXmlFragment(editedDoc, shapeTwoFragment);
+    });
+
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(
+      unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`],
+    );
+
+    expect(exportedSlideXml).toContain('Edited Title'); // 편집한 도형은 반영됐다
+    expect(exportedSlideXml).not.toContain('Hello World'); // 편집한 도형의 옛 내용은 안 남아있다
+    // 핵심 단언: 건드리지 않은 도형 "3"의 블록은 저장 전/후로 글자 하나 안 바뀌었다 — 병합 자체를
+    // 아예 건너뛰었다는 뜻이다(문단이 2개라는, 스키마가 모델링하지 못하는 구조가 그대로 보존된다).
+    expect(exportedSlideXml).toContain(untouchedShapeBlock);
+  });
+
+  // Important #6 회귀 테스트: 구조적으로 손상된 데이터(malformed Y.Map/Y.XmlFragment 등)는 조용히
+  // 건너뛰지만, 그것과는 다른 "진짜 병합 실패"는 여전히 크게 던져야 한다 — Fix 1(존재 여부를 먼저
+  // 확인하는 hasShape 도입)과 Fix 2(baseline 비교로 건너뛰기 추가)가 이 throw 경로까지 조용한
+  // 건너뛰기로 물타기하지 않았는지 증명한다. hasShape가 "있다"고 판단하는 <p:sp> 블록(= id는
+  // 매치되지만 <p:txBody>가 없는 블록, 예: 그림이 잘못 재사용한 id)에 대해 잘 만들어진(malformed가
+  // 아닌) Y.XmlFragment로 병합을 시도하면, spliceShapeTxBody의 "id는 찾았지만 txBody가 없다" 예외가
+  // 여전히 그대로 propagate돼야 한다.
+  test('a well-formed shape whose <p:sp> block has no <p:txBody> still throws (Important #6)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strToU8, unzipSync, zipSync } = await import('fflate');
+
+    // id="5"인 <p:sp> 블록을 하나 추가하되 <p:txBody>가 없게 만든다(예: 그림 placeholder처럼)  —
+    // parseSlideShapes는 txBody가 없는 도형을 건너뛰므로(slideContent.ts 참고) 정상 시딩 경로로는
+    // 이 shapeId가 절대 slideContents에 들어오지 않는다. 이 테스트는 "그런데도 누군가(버그 있는
+    // 클라이언트, 또는 이후 리팩터로 생긴 경로)가 이 shapeId로 된 멀쩡한 Y.XmlFragment를
+    // slideContents에 넣었다면 어떻게 되는가"를 확인한다.
+    const customSlideXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+      '<p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Hello World</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="5" name="Picture Placeholder"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:spPr/></p:sp>' +
+      '</p:spTree></p:cSld></p:sld>';
+
+    const baseline = makeSamplePptx(['Hello World']);
+    const entries = unzipSync(baseline);
+    entries['ppt/slides/slide1.xml'] = strToU8(customSlideXml);
+    const original = Buffer.from(zipSync(entries));
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+    expect(perSlide.has('5')).toBe(false); // 정상 시딩 경로로는 txBody 없는 도형이 들어오지 않는다
+
+    // 잘 만들어진(malformed가 아닌) Y.Map/Y.XmlFragment를 직접 끼워 넣는다 — seedSlideContentFromXml과
+    // 같은 attach 순서(부모에 먼저 붙이고 그 다음 채운다)를 따른다.
+    const bogusDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Should Not Matter')]),
+    ]);
+    ydoc.transact(() => {
+      const shapeMap = new Y.Map<unknown>();
+      perSlide.set('5', shapeMap); // 먼저 attach
+      shapeMap.set('meta', { shapeId: '5', x: 0, y: 0, w: 100, h: 100 });
+      const fragment = new Y.XmlFragment();
+      shapeMap.set('content', fragment); // 먼저 attach
+      prosemirrorToYXmlFragment(bogusDoc, fragment); // 그 다음 채우기
+    });
+
+    expect(() => exportPptxFromSlides(original, slidesArray, slideContents)).toThrow(
+      /<p:txBody>가 없습니다/,
+    );
+  });
 });

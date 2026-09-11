@@ -1735,19 +1735,28 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
       case MESSAGE_SLIDE_CONTENT_SUBSCRIBE: {
         try {
           const payload = decoding.readVarString(decoder);
-          const parsed: unknown = JSON.parse(payload);
-          if (!isValidSlideContentSubscription(parsed)) {
-            console.error('슬라이드 콘텐츠 구독 메시지 거부(형식 오류):', payload.slice(0, 200));
+          if (room.readOnlyConns.has(conn)) {
+            // 시딩은 공유 Y.Doc에 쓰기다 — 게다가 export 병합 루프가 이제 slideContents를 그대로
+            // 다음 자동저장이 디스크에 쓰는 내용에 반영하므로, 결국 "읽기 전용으로 들어온 연결의
+            // 요청이 실제 저장 파일에 영향을 줄 수 있는" 쓰기다. MESSAGE_GRID_STRUCTURE_OP과 같은
+            // 원칙으로 서버가 직접 막는다(클라이언트가 편집 UI를 숨기는 것과 별개로) — 페이로드는
+            // 로그에 남기지 않는다(조작된 연결이 로그를 불릴 수 있는 창구를 줄인다).
+            console.error('슬라이드 콘텐츠 구독 메시지 거부(읽기 전용 연결)');
           } else {
-            // 시딩은 store.readOriginal(디스크 I/O) + parseSlideShapes를 거치므로 비동기다 —
-            // 여기서 await하면 소켓 메시지 처리 자체가 막히므로 흘려보낸다. 실패해도 이 연결은
-            // 끊지 않되(원본 유실 금지 원칙과 별개로 시딩 실패 자체는 "아직 못 연" 상태일 뿐 이미
-            // 저장된 데이터의 손상이 아니다), 조용히 성공한 것처럼 넘어가지 않고 반드시 로그를 남긴다.
-            void seedSlideContentIfNeeded(room, parsed.slideEntryId, parsed.duplicateOfId).catch(
-              (error: unknown) => {
-                console.error(`슬라이드 콘텐츠 시딩 실패 (문서 ${room.docId}):`, error);
-              },
-            );
+            const parsed: unknown = JSON.parse(payload);
+            if (!isValidSlideContentSubscription(parsed)) {
+              console.error('슬라이드 콘텐츠 구독 메시지 거부(형식 오류):', payload.slice(0, 200));
+            } else {
+              // 시딩은 store.readOriginal(디스크 I/O) + parseSlideShapes를 거치므로 비동기다 —
+              // 여기서 await하면 소켓 메시지 처리 자체가 막히므로 흘려보낸다. 실패해도 이 연결은
+              // 끊지 않되(원본 유실 금지 원칙과 별개로 시딩 실패 자체는 "아직 못 연" 상태일 뿐 이미
+              // 저장된 데이터의 손상이 아니다), 조용히 성공한 것처럼 넘어가지 않고 반드시 로그를 남긴다.
+              void seedSlideContentIfNeeded(room, parsed.slideEntryId, parsed.duplicateOfId).catch(
+                (error: unknown) => {
+                  console.error(`슬라이드 콘텐츠 시딩 실패 (문서 ${room.docId}):`, error);
+                },
+              );
+            }
           }
         } catch (error) {
           console.error(`슬라이드 콘텐츠 구독 메시지 처리 오류 (문서 ${room.docId}):`, error);
