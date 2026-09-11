@@ -1868,3 +1868,180 @@ Expected: 클린, 전부 PASS
 git add docs/TODO.md
 git commit -m "docs: mark pptx text-box content editing as complete in TODO.md"
 ```
+
+---
+
+### Task 13: 삭제한 텍스트박스가 저장 파일에 실제로 반영되지 않는 버그 수정
+
+**이 태스크가 왜 있는가**: Task 12의 실제 파워포인트 파일 end-to-end 검증 중 발견된 실제
+버그다. Task 11에서 만든 텍스트박스 삭제 버튼은 `perSlide.delete(shapeId)`로 클라이언트
+Yjs 상태에서는 정확히 지워지고 UI에도 정확히 사라지지만, `exportPptxFromSlides`의 병합
+루프(`src/pptx/collab.ts`)는 **현재 `perSlide`에 남아있는 도형만** 순회하며 갱신/추가할 뿐,
+"원본 XML에는 있었는데 지금 `perSlide`에는 없는" 도형을 실제로 제거하는 로직이 어디에도
+없다 — Task 6(병합 루프를 만든 태스크)은 Task 11(삭제 버튼을 만든 태스크)보다 먼저 만들어져
+애초에 "삭제"라는 개념 자체가 없었고, Task 11도 클라이언트 쪽만 다뤘다. 결과: 삭제 버튼을
+누르면 UI는 "삭제됨"을 보여주고 저장 상태는 "저장됨"을 보여주지만, 실제 저장된 파일에는
+그 도형이 그대로 남아있다 — 더 나쁘게는, 시딩이 1회성(`has()` 체크)이라 서버 재시작 후 그
+슬라이드가 다시 시딩되면 사용자가 명시적으로 지운 도형이 되살아날 수 있다. "원본 유실 금지"
+원칙의 반대 방향 실패(유실이 아니라 사용자가 원치 않는 내용의 "부활")이지만, 이 도구의
+핵심 신뢰 계약("편집한 대로 저장된다")을 똑같이 어기므로 반드시 고친다.
+
+**Files:**
+- Modify: `src/pptx/slideContent.ts` (새 `removeShape` 함수 추가)
+- Modify: `src/pptx/collab.ts` (`exportPptxFromSlides`의 병합 루프 뒤에 제거 단계 추가)
+- Test: `tests/pptxSlideContent.test.ts`, `tests/roomPptxContent.test.ts`
+
+**Interfaces:**
+- Consumes: `hasShape`/`spliceShapeTxBody`의 기존 `<p:sp>` 블록 탐지 정규식(Task 3/6에서
+  이미 검증됨), `exportPptxFromSlides`에 이미 존재하는 `baselineShapes` 맵(Task 6의 "수정
+  안 된 도형은 건드리지 않기" 최적화용으로 이미 만들어져 있음 — 이번엔 "삭제된 도형 찾기"
+  용도로 재사용한다).
+- Produces: `function removeShape(slideXml: string, shapeId: string): string` — 해당
+  shapeId의 `<p:sp>...</p:sp>` 블록 전체를 제거한다. 못 찾으면 throw(이 파일의 기존 "절대
+  조용히 실패하지 않는다" 원칙과 동일).
+
+- [ ] **Step 1: 실패하는 테스트 먼저 작성**
+
+`tests/pptxSlideContent.test.ts`에 추가(기존 `describe('serializeTxBodyXml + spliceShapeTxBody (export)', ...)` 블록 안, 또는 새 `describe` 블록):
+
+```ts
+describe('removeShape', () => {
+  test('removes the matching <p:sp> block entirely, leaving other shapes untouched', () => {
+    const original =
+      XML_HEAD +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="A"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Keep me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="B"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Delete me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      XML_TAIL;
+
+    const result = removeShape(original, '3');
+
+    const shapes = parseSlideShapes(result);
+    expect(shapes).toHaveLength(1);
+    expect(shapes[0].shapeId).toBe('2');
+    expect(shapes[0].doc.textContent).toBe('Keep me');
+    expect(result).not.toContain('Delete me');
+  });
+
+  test('works on a new--prefixed shapeId (a client-added text box that was later saved then deleted)', () => {
+    const original = XML_HEAD + XML_TAIL;
+    const doc = schema.node('doc', null, [schema.node('paragraph', null, [schema.text('New')])]);
+    const withShape = appendNewShape(
+      original,
+      { shapeId: 'new-abc', x: 0, y: 0, w: 1000000, h: 500000 },
+      serializeTxBodyXml(doc),
+    );
+
+    const result = removeShape(withShape, 'new-abc');
+
+    expect(parseSlideShapes(result)).toHaveLength(0);
+  });
+
+  test('throws when the shapeId does not exist in the slide XML', () => {
+    const original = XML_HEAD + XML_TAIL;
+    expect(() => removeShape(original, '999')).toThrow();
+  });
+});
+```
+
+`removeShape`/`appendNewShape`/`parseSlideShapes`/`serializeTxBodyXml`/`pptxTextSchema as schema`를
+이 파일 상단 import 목록에 추가한다(이미 대부분 import돼 있을 것 — `removeShape`만 새로 추가).
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+Run: `npx vitest run tests/pptxSlideContent.test.ts`
+Expected: FAIL(`removeShape` 정의 안 됨)
+
+- [ ] **Step 3: `removeShape` 구현** (`src/pptx/slideContent.ts`에 추가)
+
+```ts
+/** shapeId에 해당하는 <p:sp> 블록 전체를 슬라이드 XML에서 제거한다(사용자가 텍스트박스를
+ * 삭제했을 때 씀). spliceShapeTxBody와 같은 블록 탐지 정규식을 쓰되, txBody만 바꾸는 대신
+ * 블록 전체를 들어낸다. 다른 도형은 전혀 건드리지 않는다. */
+export function removeShape(slideXml: string, shapeId: string): string {
+  const spBlockRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
+  let removed = false;
+  const result = slideXml.replace(spBlockRe, (spBlock) => {
+    const idMatch = /<p:cNvPr\b[^>]*\bid="([^"]+)"/.exec(spBlock);
+    if (!idMatch || idMatch[1] !== shapeId) return spBlock;
+    removed = true;
+    return '';
+  });
+  if (!removed) {
+    throw new Error(`removeShape: shapeId ${shapeId}를 슬라이드 XML에서 찾지 못했습니다.`);
+  }
+  return result;
+}
+```
+
+- [ ] **Step 4: 테스트 통과 확인**
+
+Run: `npx vitest run tests/pptxSlideContent.test.ts`
+Expected: PASS(새 3개 포함 전부)
+
+- [ ] **Step 5: `exportPptxFromSlides`의 병합 루프에 제거 단계 추가**
+
+`src/pptx/collab.ts`를 읽고(`grep -n "baselineShapes\|perSlide.entries" src/pptx/collab.ts`로
+정확한 현재 줄 위치 재확인) 기존 도형별 update/append 루프가 끝난 직후, 그 슬라이드의 XML을
+확정하기 전(`zipEntries[partPath] = strToU8(slideXml)` 하기 전)에 추가:
+
+```ts
+// perSlide에 이미 있는 도형들은 위 루프에서 처리됐다. 여기서는 "원본/baseline에는 있었는데
+// 지금 perSlide에는 없는" 도형 — 즉 사용자가 삭제한 도형 — 을 실제로 슬라이드 XML에서
+// 제거한다. baselineShapes가 null인 경우(kind:'blank', 애초에 baseline이 없음)는 삭제
+// 개념 자체가 성립하지 않으므로 건너뛴다.
+if (baselineShapes) {
+  for (const baselineShapeId of baselineShapes.keys()) {
+    if (!perSlide.has(baselineShapeId)) {
+      slideXml = removeShape(slideXml, baselineShapeId);
+    }
+  }
+}
+```
+
+(`baselineShapes`의 정확한 타입이 `Map`인지 `Record`인지, `perSlide`가 정확히 어떤 변수명인지는
+실제 코드를 읽고 맞춘다 — 위 스니펫은 방향을 보여주는 것.) `removeShape`를 이 파일 상단의
+`slideContent.js` import에 추가한다.
+
+- [ ] **Step 6: 서버 통합 테스트 추가**
+
+`tests/roomPptxContent.test.ts`에 추가(기존 파일의 FakeSocket/flushEventLoop/subscribeSlideContent
+헬퍼 재사용, 새로 선언하지 않음):
+
+1. **삭제 후 export하면 실제로 사라지는지**: 슬라이드를 열어(seed) 도형이 2개 이상 있는
+   슬라이드를 만들고, 그 중 하나를 `perSlide.delete(shapeId)`로 지운 뒤 `exportPptxFromSlides`를
+   호출 — 결과 XML에 그 도형이 없는지, 다른 도형은 그대로인지 확인.
+2. **두 번째 저장에서도 되살아나지 않는지**: 위 상태에서 `flushToStore`를 한 번 더 트리거(또는
+   `exportPptxFromSlides`를 다시 호출)해서, 삭제된 도형이 여전히 없는지 재확인(재시딩되지
+   않는 한 baseline 비교 결과가 안정적이어야 함).
+3. **한 번도 저장 안 된 new- 도형을 삭제하면 그냥 아무 일도 안 일어나는지(no-op)**: `new-`
+   도형을 추가만 하고 export를 한 번도 안 한 상태에서 바로 삭제하면, baseline에 애초에 없던
+   도형이므로 `baselineShapes.has(...)`가 false — 제거 루프가 아무것도 안 하는 게 맞다(이미
+   존재하지 않는 도형을 지우려는 게 아니라, 애초에 export된 적 없는 도형이라 제거할 대상
+   자체가 없는 경우). 이 케이스가 에러 없이 조용히 넘어가는지 확인.
+4. **슬라이드의 모든 도형을 다 지운 경우**: 도형이 하나도 안 남은 슬라이드를 export해도
+   에러 없이 빈 `<p:spTree>`(또는 최소 구조)로 저장되는지 확인.
+
+- [ ] **Step 7: 전체 테스트 + 타입체크**
+
+Run: `npx tsc --noEmit && npx vitest run`
+Expected: 클린, 전부 PASS(특히 Task 6/12에서 이미 검증된 "수정 안 된 도형은 안 건드림"
+동작이 이번 변경으로 깨지지 않았는지 — 기존 byte-for-byte 테스트들이 여전히 통과해야 함)
+
+- [ ] **Step 8: 실제 pptx로 재확인**
+
+Task 12에서 쓴 것과 같은(또는 비슷한) 실제 pptx 파일로: 텍스트박스 하나를 삭제 → 저장 →
+다운로드 → 재파싱해서 그 도형이 실제로 없는지 확인. 두 번 저장해도 되살아나지 않는지도
+확인.
+
+- [ ] **Step 9: `docs/TODO.md` 갱신**
+
+Task 12에서 "알려진 문제"로 적어둔 삭제 버그 항목을 "해결됨"으로 갱신한다.
+
+- [ ] **Step 10: 커밋**
+
+```bash
+git add src/pptx/slideContent.ts src/pptx/collab.ts tests/pptxSlideContent.test.ts tests/roomPptxContent.test.ts docs/TODO.md
+git commit -m "fix(pptx): actually remove a deleted text box's shape from the exported slide XML"
+```
