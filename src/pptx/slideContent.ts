@@ -18,6 +18,17 @@ const parser = new XMLParser({
   // 다음 런의 " plain")이 서식 구분을 위한 의미 있는 문자라서, 잘리면 텍스트가 눈에 띄게
   // 달라진다(docx/import.ts가 같은 이유로 trimValues: false를 쓰는 것과 동일한 근거).
   trimValues: false,
+  // 기본값(true)이면 태그 텍스트가 숫자처럼 보일 때(예: "007", "1.0", "0.10", "+7", "1e3",
+  // "0x1A") fast-xml-parser가 조용히 JS 숫자로 바꾸고, 다시 문자열로 꺼낼 때 그 숫자의 "canonical"
+  // 형태로 되돌린다("007" -> "7", "1.0" -> "1" 등) — 이 파서가 읽는 태그 텍스트 중 의미 있는 건
+  // <a:t>(런 텍스트)뿐이다(위치/크기 같은 속성값은 attributeNamePrefix로 따로 읽혀
+  // parseAttributeValue 기본값 false의 영향만 받으므로 이 옵션과 무관하다). 이 문제는 그 도형을
+  // 한 번도 편집 안 하면 무해하다(baseline 비교 양쪽이 똑같이 망가지므로 "편집 안 된 도형은
+  // 건드리지 않는다" 로직이 여전히 원본을 그대로 둔다) — 하지만 그 도형 안 어느 런이든 한 번
+  // 편집되는 순간 <p:txBody> 전체가 이미 망가진 파싱 결과로부터 재조립되어, 숫자처럼 생긴 그
+  // 텍스트가 저장 파일에 영구히 다른 값으로 남는다(FINAL REVIEW C3). parseTagValue만 꺼서 태그
+  // 텍스트는 항상 원문 문자열 그대로 읽는다.
+  parseTagValue: false,
   // <a:r>가 하나뿐이면 배열이 아니라 객체로 파싱되는 fast-xml-parser의 기본 동작을 막는다 —
   // 문단 하나에 런이 하나뿐인 경우가 흔해서, 이 옵션 없이는 매번 "배열인지 객체인지" 분기해야 한다.
   isArray: (name) => ['a:p', 'a:r', 'p:sp'].includes(name),
@@ -135,6 +146,17 @@ export function serializeTxBodyXml(doc: PMNode): string {
     });
     paragraphsXml.push(`<a:p>${runsXml.join('')}</a:p>`);
   });
+  // CT_TextBody(OOXML 스키마)는 <a:p>가 최소 1개 있어야 한다(minOccurs="1") — 문단이 하나도 없는
+  // <p:txBody>는 PowerPoint가 열 수 없는 손상된 파일이다(FINAL REVIEW C2). pptxTextSchema는
+  // doc: 'paragraph+'라 정상적으로 만들어진 문서는 항상 문단이 1개 이상이지만, "텍스트박스 추가"
+  // 직후 아직 아무도 타이핑하지 않은 빈 Y.XmlFragment를 y-prosemirror가 ProseMirror 문서로
+  // 되돌릴 때는 문단이 0개인 doc이 나올 수 있다(마운트된 에디터 자신의 초기화가 최소 문단을 채워
+  // 넣기 전에 자동저장이 먼저 끼어드는 경우 등) — 그 경우에도 항상 빈 문단 하나는 반드시 내보낸다.
+  // 빈 문단의 출력 형태는 위 루프가 런이 0개인 문단에 이미 쓰는 것과 똑같이 `<a:p></a:p>`로
+  // 맞춘다(자기 닫힘 `<a:p/>` 대신 — 이 함수의 기존 출력 스타일과 일관되게).
+  if (paragraphsXml.length === 0) {
+    paragraphsXml.push('<a:p></a:p>');
+  }
   return `<p:txBody><a:bodyPr/><a:lstStyle/>${paragraphsXml.join('')}</p:txBody>`;
 }
 

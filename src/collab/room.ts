@@ -228,6 +228,26 @@ interface Room {
    * 연결이 끊기면(closeConn) 이 맵에서 즉시 제거한다. */
   readonly pageSubscriptions: Map<WebSocket, { sheet: number; pages: readonly number[] }>;
   /**
+   * pptx 룸에서만 쓰인다 — 지금 진행 중인(아직 안 끝난) 슬라이드 콘텐츠 시딩 Promise,
+   * slideEntryId별로 최대 하나씩(FINAL REVIEW I1). seedSlideContentIfNeeded가 실제 작업을
+   * 시작하기 전에 이 맵부터 확인해, 같은 슬라이드 id를 향한 두 번째 이상의 동시 요청(정상적인
+   * 다중 탭/동시 클릭이든, 조작된 소켓으로 같은 구독 메시지를 연달아 보내는 경우든)이 매번
+   * store.readOriginal + unzipSync(전체 zip)를 새로 돌리지 않고 이미 진행 중인 Promise를 그대로
+   * 기다리게 한다 — 이 프로세스는 다른 모든 문서의 룸도 함께 호스팅하므로 낭비되는 비용이 이
+   * 문서 하나에 그치지 않는다(이 저장소가 이미 겪은 Y.Doc/OOM 문제와 같은 클래스). 작업이
+   * 끝나면(성공/실패 무관) finally에서 자기 자신을 지운다.
+   */
+  readonly pendingSlideSeeds: Map<string, Promise<void>>;
+  /**
+   * pptx 룸에서만 쓰인다 — 연결별로 지금 응답을 기다리는 중인(=아직 seedSlideContentIfNeeded의
+   * Promise가 안 끝난) 슬라이드 콘텐츠 구독 요청의 slideEntryId 집합. MAX_CONCURRENT_SLIDE_SEEDS_
+   * PER_CONN 상한을 검사하는 데 쓴다 — 위 pendingSlideSeeds(슬라이드 id 기준 dedup)는 "같은
+   * 슬라이드"를 여러 번 요청하는 것만 막을 뿐, 서로 다른 슬라이드 id를 향한 구독을 한 연결이
+   * 무제한으로 동시에 띄우는 것은 막지 못한다 — 이 집합이 그 창구를 막는다. 연결이 끊기면
+   * (closeConn) 이 맵에서 즉시 제거한다.
+   */
+  readonly connSlideSeedsInFlight: Map<WebSocket, Set<string>>;
+  /**
    * xlsx 룸에서만 쓰인다 — canonical 그리드의 **큰 배열 성장**을 순서대로 이어 붙이는 백그라운드
    * 체인. 구조 변경(rowCount/colCount 확장)이 요구하는 배열 할당은 상한(30만 행)까지 갈 수 있어
    * 동기로 돌면 이벤트 루프를 통째로 멈춘다 — 이 프로젝트가 이미 여러 번 고친 그 버그 클래스다.
@@ -1430,6 +1450,8 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     sheetDisplayOrder: new Map<number, number>(),
     pageSubscriptions: new Map(),
     canonicalGrowth: Promise.resolve(),
+    pendingSlideSeeds: new Map(),
+    connSlideSeedsInFlight: new Map(),
   };
   room.ready = seedRoom(room);
   rooms.set(docId, room);
@@ -1495,6 +1517,7 @@ function closeConn(room: Room, conn: WebSocket): void {
     room.conns.delete(conn);
     room.readOnlyConns.delete(conn);
     room.pageSubscriptions.delete(conn);
+    room.connSlideSeedsInFlight.delete(conn);
     removeAwarenessStates(room.awareness, [...controlled], null);
     if (room.conns.size === 0) {
       if (room.autosaveTimer) {
@@ -1573,6 +1596,17 @@ const MAX_SUBSCRIBABLE_PAGES = Math.ceil(MAX_CANONICAL_ROWS / PAGE_SIZE_ROWS);
 const MAX_SUBSCRIBED_PAGES_PER_CONN = 32;
 
 /**
+ * 한 연결이 **동시에** 응답을 기다릴 수 있는 슬라이드 콘텐츠 시딩 요청 수의 상한(FINAL REVIEW I1) —
+ * MAX_SUBSCRIBED_PAGES_PER_CONN과 같은 이유다. room.pendingSlideSeeds(슬라이드 id 기준 dedup)는
+ * "같은 슬라이드"에 대한 중복 요청만 막으므로, 서로 다른 슬라이드 id를 향한 구독 메시지를 조작된
+ * 연결 하나가 한꺼번에 수십~수백 개 보내면 각각이 독립적으로 store.readOriginal(디스크 I/O) +
+ * unzipSync(전체 pptx 압축 해제) + parseSlideShapes를 동시에 띄운다 — 이 프로세스는 다른 모든
+ * 문서의 룸도 함께 호스팅하므로 그 부하는 이 문서 하나에 그치지 않는다. 실제 사용자는 한 번에
+ * 슬라이드 하나만 연다 — 32는 그보다 훨씬 넉넉하면서도 무제한 동시 시딩은 막는다.
+ */
+const MAX_CONCURRENT_SLIDE_SEEDS_PER_CONN = 32;
+
+/**
  * MESSAGE_PAGE_SUBSCRIBE 페이로드 검증 — 리뷰 지적 I2.
  *
  * 이 메시지는 **신뢰할 수 없는 입력**이다: 여기서 통과한 숫자가 그대로 페이지 시딩 루프의 행 범위와
@@ -1613,12 +1647,31 @@ function isValidSlideContentSubscription(
  * duplicateOfId가 오면(사용자가 슬라이드를 복제해 새 SlideEntry를 만든 직후) 소스 슬라이드를
  * 먼저 시딩한 뒤(재귀 호출, duplicateOfId 없이 — 한 단계만 지원한다) 그 "지금까지의 편집 상태"를
  * 깊은 복사한다 — 원본 XML을 다시 파싱하지 않는다(duplicateSlideContent 주석 참고).
+ *
+ * **in-flight 중복 제거(FINAL REVIEW I1)**: 위 has() 체크는 첫 `await`(store.readOriginal) 전에
+ * 있지만, 그 체크 이후 실제로 디스크를 읽고 unzip·파싱하는 동안 같은 slideEntryId에 대한 또 다른
+ * 요청이 들어오면 그 요청도 (아직 slideContents가 안 채워졌으므로) 같은 has() 체크를 통과해 똑같이
+ * 전체 zip을 다시 unzip한다 — 이 함수 자체는 그 경쟁을 막지 않는다(seedSlideContentFromXml의 내부
+ * has() 재확인은 "결과가 두 번 쓰이는 것"만 막지, "일이 두 번 도는 것"은 막지 못한다). 그래서 이
+ * 함수는 얇은 dedup 래퍼이고, 실제 작업은 doSeedSlideContent가 한다 — room.pendingSlideSeeds에
+ * 이미 이 slideEntryId를 향한 Promise가 있으면 새로 시작하지 않고 그 Promise를 그대로 기다린다.
  */
 async function seedSlideContentIfNeeded(
   room: Room,
   slideEntryId: string,
   duplicateOfId?: string,
 ): Promise<void> {
+  const existing = room.pendingSlideSeeds.get(slideEntryId);
+  if (existing) return existing;
+
+  const seedPromise = doSeedSlideContent(room, slideEntryId, duplicateOfId).finally(() => {
+    room.pendingSlideSeeds.delete(slideEntryId);
+  });
+  room.pendingSlideSeeds.set(slideEntryId, seedPromise);
+  return seedPromise;
+}
+
+async function doSeedSlideContent(room: Room, slideEntryId: string, duplicateOfId?: string): Promise<void> {
   const slideContents = room.ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
   if (slideContents.has(slideEntryId)) return;
   const slidesArray = room.ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
@@ -1626,6 +1679,8 @@ async function seedSlideContentIfNeeded(
   if (!entry) return; // 이미 삭제된 슬라이드를 늦게 요청한 경우 — 조용히 무시
 
   if (duplicateOfId) {
+    // 바깥쪽 dedup 래퍼(seedSlideContentIfNeeded)를 통해 재귀한다 — 그래야 같은 소스 슬라이드를
+    // 동시에 가리키는 여러 복제 요청도 소스 시딩 자체는 한 번만 돈다.
     await seedSlideContentIfNeeded(room, duplicateOfId); // 소스 먼저 채운다
     duplicateSlideContent(slideContents, duplicateOfId, slideEntryId);
     return;
@@ -1747,15 +1802,34 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
             if (!isValidSlideContentSubscription(parsed)) {
               console.error('슬라이드 콘텐츠 구독 메시지 거부(형식 오류):', payload.slice(0, 200));
             } else {
-              // 시딩은 store.readOriginal(디스크 I/O) + parseSlideShapes를 거치므로 비동기다 —
-              // 여기서 await하면 소켓 메시지 처리 자체가 막히므로 흘려보낸다. 실패해도 이 연결은
-              // 끊지 않되(원본 유실 금지 원칙과 별개로 시딩 실패 자체는 "아직 못 연" 상태일 뿐 이미
-              // 저장된 데이터의 손상이 아니다), 조용히 성공한 것처럼 넘어가지 않고 반드시 로그를 남긴다.
-              void seedSlideContentIfNeeded(room, parsed.slideEntryId, parsed.duplicateOfId).catch(
-                (error: unknown) => {
-                  console.error(`슬라이드 콘텐츠 시딩 실패 (문서 ${room.docId}):`, error);
-                },
-              );
+              // 연결당 동시 시딩 상한(FINAL REVIEW I1) — 이미 이 slideEntryId를 기다리는 중이면
+              // (같은 슬라이드를 빠르게 두 번 구독하는 정상적인 경우) 상한 검사 없이 그대로
+              // seedSlideContentIfNeeded로 넘긴다(어차피 room.pendingSlideSeeds가 실제 작업을
+              // dedup한다) — 상한은 "서로 다른" 슬라이드 id를 향한 동시 요청 개수만 제한한다.
+              let inFlight = room.connSlideSeedsInFlight.get(conn);
+              if (!inFlight) {
+                inFlight = new Set<string>();
+                room.connSlideSeedsInFlight.set(conn, inFlight);
+              }
+              if (!inFlight.has(parsed.slideEntryId) && inFlight.size >= MAX_CONCURRENT_SLIDE_SEEDS_PER_CONN) {
+                console.error(
+                  `슬라이드 콘텐츠 구독 메시지 거부(연결당 동시 시딩 상한 초과, 문서 ${room.docId})`,
+                );
+              } else {
+                const slideEntryId = parsed.slideEntryId;
+                inFlight.add(slideEntryId);
+                // 시딩은 store.readOriginal(디스크 I/O) + parseSlideShapes를 거치므로 비동기다 —
+                // 여기서 await하면 소켓 메시지 처리 자체가 막히므로 흘려보낸다. 실패해도 이 연결은
+                // 끊지 않되(원본 유실 금지 원칙과 별개로 시딩 실패 자체는 "아직 못 연" 상태일 뿐 이미
+                // 저장된 데이터의 손상이 아니다), 조용히 성공한 것처럼 넘어가지 않고 반드시 로그를 남긴다.
+                void seedSlideContentIfNeeded(room, slideEntryId, parsed.duplicateOfId)
+                  .catch((error: unknown) => {
+                    console.error(`슬라이드 콘텐츠 시딩 실패 (문서 ${room.docId}):`, error);
+                  })
+                  .finally(() => {
+                    inFlight!.delete(slideEntryId);
+                  });
+              }
             }
           }
         } catch (error) {

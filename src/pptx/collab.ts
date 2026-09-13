@@ -129,6 +129,15 @@ function firstSlideLayoutTarget(
  * pptx의 실제 관계/콘텐츠 타입 XML에 임의 속성을 주입할 수 있다(패키지 인젝션). */
 const SLIDE_PART_RE = /^slide\d+\.xml$/;
 
+/** appendNewShape가 검증 없이 XML 속성(`id="..."`)에 그대로 문자열 접합하는 shapeId의 유일하게
+ * 허용되는 형태(FINAL REVIEW I4) — shapeId는 Yjs perSlide 맵의 키라 클라이언트가 쓸 수 있는
+ * 데이터다(malformed meta와 같은 위협 모델, 위 SLIDE_PART_RE와 같은 원칙). 실제 클라이언트
+ * (editor-slides.ts)는 항상 `new-${crypto.randomUUID()}`(영숫자+하이픈)만 만들어내고, 원본
+ * 슬라이드에서 파싱해 온 shapeId는 항상 순수 숫자다 — 둘 다 이 패턴을 그대로 통과한다. 이 패턴
+ * 밖의 값(예: `"><script>...`처럼 속성을 깨는 문자열)을 검증 없이 appendNewShape에 넘기면 저장
+ * 파일의 슬라이드 XML에 임의 XML을 주입할 수 있다(패키지 인젝션의 또 다른 경로). */
+const SAFE_SHAPE_ID_RE = /^[A-Za-z0-9_-]+$/;
+
 /**
  * 저장 가능한 항목만 남긴다: 'blank'는 항상 통과, 'original'/'duplicate'는 sourceSlidePart가
  * 정확히 'slideN.xml' 형태이고 실제로 zip 안에 그 파트가 존재할 때만 통과시킨다. 그 외
@@ -530,6 +539,14 @@ export function exportPptxFromSlides(
           // 같은 도형의 meta가 손상됐다는 이유만으로) 조용히 영구 유실되는 회귀가 있었다.
           slideXml = spliceShapeTxBody(slideXml, shapeId, txBodyXml);
         } else {
+          // shapeId 자체도 perSlide Y.Map의 키라 클라이언트가 쓸 수 있는 데이터다(FINAL REVIEW I4)
+          // — appendNewShape는 이 값을 검증 없이 XML 속성(id="...")에 그대로 문자열 접합하므로,
+          // 그 호출 "직전"인 여기서 먼저 안전한 문자 집합인지 확인한다(SLIDE_PART_RE와 같은 원칙 —
+          // 위험한 문자열 접합 바로 앞에서 검증). splice 분기(hasShape가 true인 경우)는 shapeId를
+          // XML에 새로 쓰지 않고 기존 <p:cNvPr id="...">와 문자열 비교만 하므로 이 위험이 없다 —
+          // 그래서 검증은 append 분기에만 둔다. 통과하지 못하면 이 도형의 추가만(다른 도형의 병합/
+          // 제거는 계속) 조용히 건너뛴다 — 아래 meta 검증과 같은 정책(throw하지 않고 skip).
+          if (!SAFE_SHAPE_ID_RE.test(shapeId)) continue;
           // meta는 append 분기에서만 실제로 쓰인다(x/y/w/h로 새 도형의 위치/크기를 만든다) —
           // 그래서 유효성 검증도 여기, 실제로 meta를 읽기 직전에만 한다(위 splice 분기는 절대
           // 이 검증의 영향을 받지 않는다). 악의적이거나 버그 있는 클라이언트가 meta에 원시 값
@@ -571,7 +588,26 @@ export function exportPptxFromSlides(
       if (baselineShapes) {
         for (const baselineShapeId of baselineShapes.keys()) {
           if (!perSlide.has(baselineShapeId)) {
-            slideXml = removeShape(slideXml, baselineShapeId);
+            // removeShape 자신은 "못 찾으면 throw"가 맞는 계약이다(직접 호출자에게는 그대로
+            // 유지한다 — slideContent.ts의 removeShape doc comment 참고). 하지만 이 호출부(export
+            // 병합 루프)에서 그 throw를 그대로 흘려보내면 flushToStore/getCurrentBytes 전체가
+            // 실패해, 도형 하나를 못 지운 것보다 훨씬 나쁜 결과 — 이 문서의 이후 모든 저장·다운로드를
+            // 영구히 막는다(FINAL REVIEW I2, Task 13이 이미 겪은 것과 같은 종류의 실패 모드). 이미
+            // 지워야 할 도형 하나를 못 지운 채 슬라이드 XML에 그대로 남겨 두는 것(눈에 띄고, 되돌릴
+            // 수 있는 문제)이 문서 전체를 영구히 저장 불가로 만드는 것보다 훨씬 덜 나쁘므로, 여기서만
+            // catch해 로그만 남기고 이 도형은 건너뛴다 — 이 루프의 나머지 도형과 다음 슬라이드는
+            // 그대로 계속 처리된다. 이 슬라이드의 다른 malformed 값(meta/content)을 조용히 건너뛰는
+            // 이 export 루프의 기존 정책과 같은 원칙("절대 원본을 손상시키지 않되, 손상 못 한
+            // 부분까지 전체를 막지 않는다")이다.
+            try {
+              slideXml = removeShape(slideXml, baselineShapeId);
+            } catch (error) {
+              console.error(
+                `removeShape 실패 — shapeId ${baselineShapeId}를 슬라이드 XML에서 찾지 못해 ` +
+                  '건너뜁니다(그 도형은 원본 XML에 그대로 남습니다):',
+                error,
+              );
+            }
           }
         }
       }
