@@ -424,3 +424,74 @@ describe('<p:sp\\b block regex: boundary correctness against <p:spPr>/<p:spTree>
     expect(result).not.toContain('<p:spPr>'); // 도형과 함께 그 하위 spPr도 통째로 사라졌다
   });
 });
+
+// FINAL REVIEW C2(Critical): 문단이 하나도 없는 ProseMirror 문서를 직렬화하면 <a:p>가 하나도
+// 없는 <p:txBody>가 나왔다 — CT_TextBody(OOXML 스키마)는 <a:p> minOccurs="1"이라 그런 파일은
+// PowerPoint가 열지 못하는 손상된 파일이다. "텍스트박스 추가" 직후 아직 타이핑하지 않은 빈
+// Y.XmlFragment를 y-prosemirror가 되돌릴 때 문단이 0개인 doc이 나올 수 있다(schema 자체는
+// doc: 'paragraph+'를 요구하지만, NodeType.create/Node.fromJSON 같은 unchecked 생성 경로는 이
+// 제약을 검사하지 않는다 — 실제 y-prosemirror의 빈 XmlFragment 변환 경로가 이런 경로를 탄다).
+describe('serializeTxBodyXml: always emits at least one <a:p> (Fix 2 / FINAL REVIEW C2)', () => {
+  test('a doc with zero paragraph children still serializes with a non-empty <a:p>, and round-trips through parseSlideShapes without crashing', () => {
+    // schema.node()는 스키마의 content 제약(paragraph+)을 검사해 던지므로, 실제로 "타이핑 전"의
+    // 빈 문서를 흉내 내려면 검사를 건너뛰는 unchecked 생성 경로(NodeType.create)를 직접 써야 한다
+    // — y-prosemirror의 yXmlFragmentToProseMirrorRootNode가 빈 Y.XmlFragment에 대해 만들어내는
+    // 것과 같은 모양(문단 0개인 doc)이다.
+    const emptyDoc = schema.nodes.doc.create(null, null);
+    expect(emptyDoc.childCount).toBe(0);
+
+    const txBodyXml = serializeTxBodyXml(emptyDoc);
+    expect(txBodyXml).toContain('<a:p');
+    expect((txBodyXml.match(/<a:p\b/g) ?? []).length).toBeGreaterThanOrEqual(1);
+
+    const original =
+      XML_HEAD +
+      '<p:sp><p:nvSpPr><p:cNvPr id="20" name="Empty"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>placeholder</a:t></a:r></a:p></p:txBody></p:sp>' +
+      XML_TAIL;
+    const spliced = spliceShapeTxBody(original, '20', txBodyXml);
+
+    // parseSlideShapes(실제 XML 파서)가 이 결과를 크래시 없이 다시 읽을 수 있어야 한다 — 그리고
+    // 문단이 최소 1개(빈 문단)로 남아 있어야 한다(문단 0개인 doc은 pptxTextSchema 자체가 다시
+    // 못 읽는 잘못된 상태라 이후 재편집 시도가 크래시할 수 있다).
+    const [reparsed] = parseSlideShapes(spliced);
+    expect(reparsed.doc.childCount).toBeGreaterThanOrEqual(1);
+    expect(reparsed.doc.textContent).toBe('');
+  });
+
+  test('a doc with one paragraph and zero runs also serializes with a non-empty <a:p> element (already-correct existing behavior, pinned)', () => {
+    const doc = schema.node('doc', null, [schema.node('paragraph', null, [])]);
+    const txBodyXml = serializeTxBodyXml(doc);
+    expect(txBodyXml).toContain('<a:p></a:p>');
+  });
+});
+
+// FINAL REVIEW C3(Critical): fast-xml-parser의 기본값(parseTagValue: true)은 <a:t> 안의 텍스트가
+// 숫자처럼 보이면 조용히 JS 숫자로 바꿨다가 다시 문자열로 꺼낼 때 다른 "canonical" 형태로 되돌려
+// 버린다 — 이 도형을 한 번이라도 편집하면 그 순간 <p:txBody> 전체가 이미 망가진 파싱 결과로부터
+// 재조립되어, 숫자처럼 생긴 원문 텍스트가 저장 파일에 영구히 다른 값으로 남는다.
+describe('parseSlideShapes: numeric-looking run text round-trips unchanged (Fix 3 / FINAL REVIEW C3)', () => {
+  test.each(['007', '1.0', '0.10', '+7', '1e3', '0x1A'])(
+    'run text %j survives parseSlideShapes -> serializeTxBodyXml unchanged',
+    (text) => {
+      const xml =
+        XML_HEAD +
+        '<p:sp><p:nvSpPr><p:cNvPr id="30" name="Num"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+        `<p:txBody><a:bodyPr/><a:p><a:r><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp>` +
+        XML_TAIL;
+
+      const [shape] = parseSlideShapes(xml);
+      // 파싱 단계에서부터 이미 원문 그대로여야 한다(숫자로 코어스되지 않아야 한다).
+      expect(shape.doc.textContent).toBe(text);
+
+      const txBodyXml = serializeTxBodyXml(shape.doc);
+      expect(txBodyXml).toContain(`<a:t>${text}</a:t>`);
+
+      // parseSlideShapes -> spliceShapeTxBody 라운드트립을 한 번 더 거쳐도(export 경로가 실제로
+      // 하는 것과 같은 조합) 값이 그대로인지 다시 확인한다.
+      const spliced = spliceShapeTxBody(xml, '30', txBodyXml);
+      const [reparsed] = parseSlideShapes(spliced);
+      expect(reparsed.doc.textContent).toBe(text);
+    },
+  );
+});

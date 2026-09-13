@@ -17,7 +17,7 @@ import { prosemirrorToYXmlFragment } from 'y-prosemirror';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { makeSamplePptx } from './helpers.js';
 import type { SlideEntry } from '../src/collab/pptxShared.js';
-import type { PerSlideContentsMap } from '../src/pptx/collab.js';
+import type { PerSlideContentsMap, ShapeContentMap } from '../src/pptx/collab.js';
 
 const MESSAGE_SYNC = 0;
 /** room.ts의 내부 상수와 같은 값 — room.ts는 외부에 노출하지 않으므로 프로토콜 계약으로 여기서도
@@ -1483,5 +1483,305 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     const matches = shapes.filter((s) => s.shapeId === '2');
     expect(matches).toHaveLength(1);
     expect(matches[0].doc.textContent).toBe('New Text');
+  });
+
+  // FINAL REVIEW C1(Critical) / Fix 1: the client-side fix itself lives entirely in
+  // src/client/editor-slides.ts's "add text box" click handler and its reconnect-resubscribe logic
+  // — this repo has no DOM/jsdom test harness for src/client/*.ts files (confirmed: no test anywhere
+  // imports any src/client/*.ts module; see tests/editorSlidesAddTextboxGuard.test.ts for the direct
+  // truth-table test of the guard's boolean formula, and task-final-fix-report.md for the real-browser
+  // Playwright verification). This test instead proves, against the REAL production seeding/export
+  // code, exactly WHY that client-side guard is necessary: it documents the precise data-loss
+  // mechanism the guard now prevents from ever occurring.
+  test('a perSlide containing only a new shape, for a never-seeded non-blank slide, loses ALL original shapes on export — this is exactly the data loss the client-side add-textbox guard (Fix 1) now prevents', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    // 원본 슬라이드에는 진짜 텍스트박스가 있다(id="2", "Hello World") — 한 번도 구독(시딩)하지
+    // 않은 상태로 둔다(joinEditSession만 하고 subscribeSlideContent는 절대 보내지 않는다) — 바로
+    // 이게 "슬라이드를 열었지만 서버 시딩 응답이 아직 안 온" 상태를 흉내낸다.
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+    expect(slidesArray.get(0).kind).toBe('original'); // 이 테스트의 전제 — blank가 아니다
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    expect(slideContents.has(entryId)).toBe(false); // 아직 한 번도 시딩되지 않았다
+
+    // 고쳐지기 전 클라이언트의 "add text box" 핸들러가 했던 바로 그 동작을 그대로 흉내낸다 —
+    // 시딩 여부를 확인하지 않고 빈 perSlide를 새로 만들어 새 도형 하나만 담는다.
+    const newShapeId = `new-${randomUUID()}`;
+    const newDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Accidentally Added')]),
+    ]);
+    ydoc.transact(() => {
+      const perSlide = new Y.Map<ShapeContentMap>();
+      slideContents.set(entryId, perSlide); // 먼저 attach
+      const shapeMap = new Y.Map<unknown>();
+      perSlide.set(newShapeId, shapeMap);
+      shapeMap.set('meta', { shapeId: newShapeId, x: 100, y: 200, w: 300, h: 400 });
+      const fragment = new Y.XmlFragment();
+      shapeMap.set('content', fragment);
+      prosemirrorToYXmlFragment(newDoc, fragment);
+    });
+
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+
+    // 원본 도형("Hello World", id="2")이 완전히 사라졌다 — 이게 바로 Fix 1이 막는 데이터 유실이다.
+    expect(exportedSlideXml).not.toContain('Hello World');
+    expect(exportedSlideXml).not.toContain('id="2"');
+    // 새로 추가한 도형만 남았다.
+    expect(exportedSlideXml).toContain('Accidentally Added');
+  });
+
+  // FINAL REVIEW I1(Important) / Fix 4: seedSlideContentIfNeeded's has() check happens before the
+  // first await (store.readOriginal), so without in-flight dedup, two concurrent requests for the
+  // SAME unseeded slide id would each independently perform a full store.readOriginal + unzipSync +
+  // parseSlideShapes.
+  test('two concurrent subscribe requests for the SAME unseeded slide id only read the original file once (Fix 4 / FINAL REVIEW I1)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', makeSamplePptx(['Hello World']));
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const entryId = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY).get(0).id;
+
+    const readOriginalSpy = vi.spyOn(store, 'readOriginal');
+
+    // 같은 슬라이드에 대한 두 구독 요청을 연달아(사이에 await 없이) 보낸다 — handleMessage가 각
+    // 메시지를 동기적으로 처리하며 seedSlideContentIfNeeded를 fire-and-forget으로 흘려보내므로,
+    // 두 호출 모두 첫 번째 await(store.readOriginal) 이전의 동기 구간 안에서 시작된다 — 바로 이게
+    // in-flight dedup 없이는 실제로 경쟁이 일어나는 지점이다.
+    subscribeSlideContent(socket, entryId);
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    expect(slideContents.has(entryId)).toBe(true); // 시딩 자체는 정상적으로 끝났다
+
+    // 핵심 단언: 실제 "비싼 작업"(store.readOriginal, 이어서 unzipSync+parseSlideShapes)은 딱
+    // 한 번만 실행됐다 — room.pendingSlideSeeds의 in-flight dedup이 두 번째 요청을 새로 시작하는
+    // 대신 첫 번째 요청의 Promise를 그대로 기다리게 했기 때문이다.
+    expect(readOriginalSpy).toHaveBeenCalledTimes(1);
+    readOriginalSpy.mockRestore();
+  });
+
+  test('a connection cannot have more than the per-connection concurrent slide-seed cap in flight at once (Fix 4 / FINAL REVIEW I1)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession } = await import('../src/collab/room.js');
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', makeSamplePptx(['Hello World']));
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    // 존재하지 않는 슬라이드 id 40개를 향한 구독을 한 연결에서 연달아 보낸다(존재하지 않는 id는
+    // doSeedSlideContent가 즉시 조용히 리턴하지만, 그 "즉시"도 마이크로태스크 경계를 거치므로 이
+    // 동기 루프 안에서는 아직 하나도 정리되지 않은 채 계속 쌓인다) — 실제 사용자는 한 번에
+    // 슬라이드 하나만 여는데, 조작된 연결이 서로 다른 슬라이드 id를 향한 구독을 무제한으로 동시에
+    // 띄우는 것을 막는 상한이 실제로 발동하는지 확인한다.
+    for (let i = 0; i < 40; i += 1) {
+      subscribeSlideContent(socket, `nonexistent-${i}`);
+    }
+    await flushEventLoop();
+
+    const rejectionLogged = consoleErrorSpy.mock.calls.some(
+      ([msg]) => typeof msg === 'string' && msg.includes('연결당 동시 시딩 상한 초과'),
+    );
+    expect(rejectionLogged).toBe(true);
+    consoleErrorSpy.mockRestore();
+  });
+
+  // FINAL REVIEW I2(Important) / Fix 5: removeShape's own "not found" throw is the correct contract
+  // for direct callers, but at ITS ONE CALL SITE (the export loop), letting that throw propagate
+  // permanently blocks every future save/download for the whole document. Trigger it via a genuine
+  // (if unusual) legal XML quirk this codebase's own comments already document as a residual
+  // divergence: a single-quoted id attribute (`id='3'`) — parseSlideShapes (a real XML parser)
+  // recognizes it fine, but the id-extraction regex shared by hasShape/spliceShapeTxBody/removeShape
+  // requires a double-quoted `id="..."` and does not.
+  test("removeShape throwing for one shape (a genuine id-attribute-quoting edge case) is caught and skipped, not aborting the whole export (Fix 5 / FINAL REVIEW I2)", async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, strToU8, unzipSync, zipSync } = await import('fflate');
+
+    const customSlideXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+      '<p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Keep"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Keep Me</a:t></a:r></a:p></p:txBody></p:sp>' +
+      "<p:sp><p:nvSpPr><p:cNvPr id='3' name=\"Quirky\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>" +
+      '<p:txBody><a:bodyPr/><a:p><a:r><a:t>Quirky Quote Shape</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '</p:spTree></p:cSld></p:sld>';
+
+    const baseline = makeSamplePptx(['Hello World']);
+    const entries = unzipSync(baseline);
+    entries['ppt/slides/slide1.xml'] = strToU8(customSlideXml);
+    const original = Buffer.from(zipSync(entries));
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+    expect(perSlide.has('3')).toBe(true); // parseSlideShapes(실제 파서)는 작은따옴표 id도 잘 인식했다
+
+    // 도형 "2"는 실제로 편집하고(병합 루프가 splice를 타게 함), 도형 "3"은 사용자가 × 버튼으로
+    // 삭제했다고 흉내낸다 — baseline에는 있고 perSlide에는 없는 상태를 만든다.
+    const editedDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Kept And Edited')]),
+    ]);
+    const fragment = perSlide.get('2')!.get('content') as Y.XmlFragment;
+    ydoc.transact(() => {
+      prosemirrorToYXmlFragment(editedDoc, fragment);
+      perSlide.delete('3');
+    });
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let result!: ReturnType<typeof exportPptxFromSlides>;
+    expect(() => {
+      result = exportPptxFromSlides(original, slidesArray, slideContents);
+    }).not.toThrow(); // 핵심: 도형 3의 removeShape 실패가 export 전체를 무너뜨리지 않는다
+    consoleErrorSpy.mockRestore();
+
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+    // 도형 2는 정상적으로 병합됐다 — 다른 도형의 처리가 이 실패로 막히지 않았다.
+    expect(exportedSlideXml).toContain('Kept And Edited');
+    expect(exportedSlideXml).not.toContain('Keep Me');
+    // 도형 3은 못 지웠으므로(정책상 허용 — 조용히 사라지는 것보다 낫다) 원본 그대로 XML에 남는다.
+    expect(exportedSlideXml).toContain('Quirky Quote Shape');
+  });
+
+  // FINAL REVIEW I4(Important) / Fix 6: appendNewShape builds `id="${meta.shapeId}"` directly from a
+  // Yjs perSlide map key with no validation. The shipped client always generates safe ids
+  // (`new-${crypto.randomUUID()}`), but a client capable of writing raw Yjs updates could inject
+  // arbitrary XML via a crafted shapeId.
+  test('a shapeId containing XML-breaking characters is skipped during export instead of being interpolated into the output XML (Fix 6 / FINAL REVIEW I4)', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { parseSlideShapes } = await import('../src/pptx/slideContent.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+
+    // 정상 클라이언트라면 절대 만들 수 없는 shapeId — 원시 Yjs 업데이트를 직접 쓸 수 있는 클라이언트를
+    // 흉내낸다. 속성을 깨는 큰따옴표+꺾쇠를 담아 XML 인젝션을 시도한다.
+    const maliciousShapeId = 'new-"><injected foo="bar';
+    const newDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Malicious Payload')]),
+    ]);
+    ydoc.transact(() => {
+      const shapeMap = new Y.Map<unknown>();
+      perSlide.set(maliciousShapeId, shapeMap); // 먼저 attach
+      shapeMap.set('meta', { shapeId: maliciousShapeId, x: 100, y: 200, w: 300, h: 400 });
+      const fragment = new Y.XmlFragment();
+      shapeMap.set('content', fragment); // 먼저 attach
+      prosemirrorToYXmlFragment(newDoc, fragment); // 그 다음 채우기
+    });
+
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+
+    // 주입이 성공했다면 별도의 <injected ...> 태그나 깨진 속성이 나타난다 — 핵심 단언은 그게 전혀
+    // 없다는 것과, 이 악성 도형 자체가 통째로(내용까지) 스킵됐다는 것.
+    expect(exportedSlideXml).not.toContain('<injected');
+    expect(exportedSlideXml).not.toContain('Malicious Payload');
+    expect(exportedSlideXml).not.toContain(maliciousShapeId);
+    // 다른(정상) 도형은 export가 그대로 계속 처리했고, 결과 XML도 여전히 정상적으로 재파싱된다
+    // (=well-formed하다는 최소한의 확인).
+    expect(exportedSlideXml).toContain('Hello World');
+    const shapes = parseSlideShapes(exportedSlideXml);
+    expect(shapes).toHaveLength(1);
+    expect(shapes[0].doc.textContent).toBe('Hello World');
   });
 });
