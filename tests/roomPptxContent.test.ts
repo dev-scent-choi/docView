@@ -1784,4 +1784,77 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     expect(shapes).toHaveLength(1);
     expect(shapes[0].doc.textContent).toBe('Hello World');
   });
+
+  // 리뷰 후속: appendNewShape는 shapeId뿐 아니라 meta.x/y/w/h도 검증 없이 XML 속성
+  // (`x="..." y="..." cx="..." cy="..."`)에 그대로 문자열 접합한다. shapeId 쪽(위 테스트)은 값을
+  // 안전한 문자만 허용하면 "malformed는 아니지만 악의적인" XML만 나오는데, meta.w 같은 값에
+  // 속성을 깨는 문자열이 섞이면 결과 XML 자체가 well-formed하지 않게 된다 — 이 테스트는 그런
+  // meta를 가진 도형이 export에서 조용히 스킵되고(파일이 깨지지 않고), 다른 도형은 정상적으로
+  // 계속 처리된다는 것을 증명한다.
+  test('a new-<uuid> shape whose meta.w is a non-numeric/malicious value is skipped during export instead of producing malformed XML', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { parseSlideShapes } = await import('../src/pptx/slideContent.js');
+    const { pptxTextSchema } = await import('../src/pptx/textSchema.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const perSlide = slideContents.get(entryId)!;
+
+    // 원시 Yjs 업데이트를 직접 쓸 수 있는 클라이언트를 흉내낸다 — shapeId는 정상 관례
+    // (`new-<uuid>`)를 따르지만, meta.w에 속성을 깨는 문자열을 심어 XML 인젝션/파괴를 시도한다.
+    const newShapeId = `new-${randomUUID()}`;
+    const newDoc = pptxTextSchema.node('doc', null, [
+      pptxTextSchema.node('paragraph', null, [pptxTextSchema.text('Malicious Width Payload')]),
+    ]);
+    ydoc.transact(() => {
+      const shapeMap = new Y.Map<unknown>();
+      perSlide.set(newShapeId, shapeMap); // 먼저 attach
+      shapeMap.set('meta', { shapeId: newShapeId, x: 100, y: 200, w: '"><evil a="x', h: 400 });
+      const fragment = new Y.XmlFragment();
+      shapeMap.set('content', fragment); // 먼저 attach
+      prosemirrorToYXmlFragment(newDoc, fragment); // 그 다음 채우기
+    });
+
+    let result!: ReturnType<typeof exportPptxFromSlides>;
+    expect(() => {
+      result = exportPptxFromSlides(original, slidesArray, slideContents);
+    }).not.toThrow(); // 핵심: 손상된 meta가 export 전체를 무너뜨리지 않는다
+    const exportedSlideXml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+
+    // 주입이 성공했다면 별도의 <evil ...> 태그나 깨진 속성이 나타난다 — 핵심 단언은 그게 전혀
+    // 없다는 것과, 이 악성 도형 자체가 통째로(내용까지) 스킵됐다는 것.
+    expect(exportedSlideXml).not.toContain('<evil');
+    expect(exportedSlideXml).not.toContain('Malicious Width Payload');
+    expect(exportedSlideXml).not.toContain(newShapeId);
+    // 다른(정상) 도형은 export가 그대로 계속 처리했고, 결과 XML도 여전히 정상적으로 재파싱된다
+    // (=well-formed하다는 최소한의 확인 — parseSlideShapes가 실제 XML 파서를 쓴다).
+    expect(exportedSlideXml).toContain('Hello World');
+    const shapes = parseSlideShapes(exportedSlideXml);
+    expect(shapes).toHaveLength(1);
+    expect(shapes[0].doc.textContent).toBe('Hello World');
+  });
 });

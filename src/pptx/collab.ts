@@ -555,9 +555,32 @@ export function exportPptxFromSlides(
           const metaRaw = shapeMap.get('meta');
           if (!metaRaw || typeof metaRaw !== 'object') continue; // 손상된 meta — 새 도형 추가만 건너뛴다
           const meta = metaRaw as SlideShapeMeta;
+          // 리뷰에서 지적된, 같은 호출부(appendNewShape)의 또 다른 구멍: x/y/w/h도 shapeId와 완전히
+          // 같은 이유로 검증 없이 XML 속성(`x="${meta.x}" y="${meta.y}" cx="${meta.w}" cy="${meta.h}"`)에
+          // 그대로 문자열 접합된다. SlideShapeMeta의 `number | null` 타입은 컴파일 타임에만 강제될 뿐,
+          // meta 자체가 Yjs perSlide 맵 값(클라이언트가 쓸 수 있는 데이터)이라 런타임에는 무엇이든
+          // 들어있을 수 있다(위 shapeId 검증과 같은 위협 모델). 게다가 이쪽은 shapeId보다 결과가 더
+          // 나쁘다 — shapeId는 안전한 문자만 막으면 "malformed는 아니지만 악의적인" XML만 나오는데,
+          // x/y/w/h에 `"><evil a="` 같은 속성을 깨는 문자열이 하나라도 섞이면 저장 파일 자체가
+          // **well-formed하지도 않은** XML이 된다(리뷰에서 실증). 그래서 넷 다 진짜 유한 숫자인지
+          // (Number.isFinite — null/문자열/불리언/NaN/Infinity는 전부 걸러진다) 확인하고, 하나라도
+          // 아니면 이 도형의 추가만 조용히 건너뛴다 — 위 shapeId 검증, 바로 위 손상된 meta 검증과
+          // 같은 정책(throw하지 않고 skip, 다른 도형의 병합/제거는 계속).
+          if (
+            typeof meta.x !== 'number' ||
+            typeof meta.y !== 'number' ||
+            typeof meta.w !== 'number' ||
+            typeof meta.h !== 'number' ||
+            !Number.isFinite(meta.x) ||
+            !Number.isFinite(meta.y) ||
+            !Number.isFinite(meta.w) ||
+            !Number.isFinite(meta.h)
+          ) {
+            continue;
+          }
           slideXml = appendNewShape(
             slideXml,
-            { shapeId, x: meta.x ?? 0, y: meta.y ?? 0, w: meta.w ?? 1000000, h: meta.h ?? 500000 },
+            { shapeId, x: meta.x, y: meta.y, w: meta.w, h: meta.h },
             txBodyXml,
           );
         }
