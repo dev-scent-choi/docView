@@ -11,6 +11,7 @@ import {
   PPTX_SLIDE_CONTENTS_MAP,
   NEW_TEXTBOX_WIDTH_RATIO,
   NEW_TEXTBOX_HEIGHT_RATIO,
+  shouldBlockAddTextbox,
   type SlideEntry,
   type SlideShapeMeta,
 } from '../collab/pptxShared.js';
@@ -469,12 +470,40 @@ function setupCardActions(): void {
   document.getElementById('btn-add-textbox')?.addEventListener('click', () => {
     if (!canEdit || !activeSlideId) return;
     const entryId = activeSlideId;
+    const entry = slidesArray.toArray().find((e) => e.id === entryId);
+    if (!entry) return; // 이미 삭제된 슬라이드를 향한 레이스(카드가 지워진 직후의 늦은 클릭 등) — 방어적 no-op
+
+    // FINAL REVIEW C1(Critical): slideContents에 이 슬라이드의 perSlide가 아직 없을 때, 원인이
+    // 두 가지로 갈린다 —
+    //  - kind:'blank'(원래부터 도형이 없는, 사용자가 직접 추가한 빈 슬라이드): 지금 여기서 새로
+    //    만드는 게 맞다(원본이라 부를 것 자체가 없다).
+    //  - kind:'original'/'duplicate'인데 아직 시딩 전(구독 응답을 못 받음 — 예: 이 슬라이드를
+    //    고른 순간 WS가 재연결 중이었거나 서버 응답이 아직 안 왔거나): 여기서 새 perSlide를
+    //    만들면 그 안엔 방금 추가한 도형 "하나만" 담기고, src/pptx/collab.ts의 export 삭제 병합
+    //    루프(Task 13)는 "baseline에는 있는데 지금 perSlide에는 없는 도형 = 사용자가 삭제했다"로
+    //    해석해 다음 저장에서 이 슬라이드의 원본 도형을 전부 지워버린다 — 텍스트박스 하나
+    //    추가했을 뿐인데 슬라이드의 나머지 원본 내용이 통째로 사라지는 셈이다. 그러니 이 경우엔
+    //    텍스트박스를 추가하지 않고, 구독을 다시 보낸 뒤(끊겼을 수 있으므로 — subscribeSlideContent
+    //    자체가 이미 진행 중인 요청과 중복 전송은 막아 준다) 클릭 자체를 조용히 무시한다. 시딩이
+    //    끝나면 slideContents.observe가 캔버스를 실제 원본 내용으로 다시 그려 주므로, 사용자는
+    //    그걸 본 뒤 "텍스트 추가"를 다시 누르면 된다.
+    //
+    // 이 조건의 boolean 공식 자체는 shouldBlockAddTextbox(pptxShared.ts)로 뽑아 뒀다 — 이 파일은
+    // 모듈 최상단에서 document/location을 곧바로 읽어 브라우저 전역 없이는 import조차 안 되므로
+    // (이 저장소엔 아직 jsdom 테스트 환경이 없다), 가드의 "판단" 부분만 DOM 의존성 없는 공유
+    // 모듈로 옮겨 plain vitest로 직접 단위 테스트할 수 있게 했다 —
+    // tests/editorSlidesAddTextboxGuard.test.ts 참고.
+    if (shouldBlockAddTextbox(entry.kind, slideContents.has(entryId))) {
+      subscribeSlideContent(entryId);
+      return;
+    }
+
     const ydoc = slidesArray.doc!;
     ydoc.transact(() => {
-      // 슬라이드가 완전히 빈 상태(원본이 blank로 만들어졌거나, 아직 시딩되지 않은 것과는 다르게
-      // canEdit 세션이라면 애초에 subscribeSlideContent로 이미 시딩됐어야 하지만, 혹시라도 정말
-      // shapeless한 슬라이드라면) slideContents에 이 슬라이드의 perSlide 항목 자체가 없을 수
-      // 있다 — 그 경우 여기서 새로 만든다.
+      // 슬라이드가 완전히 빈 상태(원본이 blank로 만들어짐)라면 slideContents에 이 슬라이드의
+      // perSlide 항목 자체가 없을 수 있다 — 그 경우 여기서 새로 만든다(위 가드가 이미 kind !==
+      // 'blank'인데 아직 시딩 전인 경우를 걸러냈으므로, 여기 도달했는데 perSlide가 없다면 항상
+      // kind === 'blank'이거나 이미 시딩이 끝난 상태다).
       let perSlide = slideContents.get(entryId);
       if (!perSlide) {
         perSlide = new Y.Map<ShapeContentMap>();
@@ -583,6 +612,18 @@ async function main(): Promise<void> {
   provider.on('status', ({ status }: { status: string }) => {
     connStatusEl.dataset.status = status;
     connStatusEl.textContent = status === 'connected' ? '연결됨' : '연결 중…';
+    // 재연결 직후, 지금 보고 있는 슬라이드가 아직 시딩되지 않았다면 구독을 다시 보낸다(FINAL
+    // REVIEW C1의 결정론적 트리거 — M4). subscribeSlideContent는 WS가 OPEN이 아닌 순간엔 아무것도
+    // 안 보내고 조용히 리턴하므로(이 파일 위쪽 주석 참고), 슬라이드를 고른 바로 그 순간 마침
+    // 재연결 중이었다면 그 구독 요청은 영원히 사라지고 아무도 재시도하지 않는다 — 캔버스가 계속
+    // 빈 채로 남고, 사용자가 그걸 "진짜로 빈 슬라이드"로 오해해 "텍스트 추가"를 누르면(아래
+    // setupCardActions의 btn-add-textbox 가드가 이제 막는 바로 그 상황) 원본 손실로 이어질 수
+    // 있었다. status가 'connected'로 바뀌는 시점마다(=이제 막 WS가 다시 OPEN이 된 시점) 다시
+    // 시도한다 — 이미 시딩된 슬라이드라면 서버의 seedSlideContentIfNeeded가 has() 체크로 중복
+    // 시딩을 막아 주므로 여러 번 보내도 안전하다.
+    if (status === 'connected' && canEdit && activeSlideId && !slideContents.has(activeSlideId)) {
+      subscribeSlideContent(activeSlideId);
+    }
   });
   // 서버가 편집 세션 자체를 거부한 경우(edit.ts의 socket.close(4xxx, 이유)) — 4400대는 재시도해도
   // 같은 이유로 다시 거부될 뿐인 영구 거부다(잘못된 토큰, 문서 없음 등). 기본 동작(지수 백오프로
