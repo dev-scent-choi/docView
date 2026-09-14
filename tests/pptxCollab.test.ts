@@ -1,9 +1,31 @@
 import * as Y from 'yjs';
 import { describe, expect, test } from 'vitest';
-import { strFromU8, unzipSync } from 'fflate';
+import { strFromU8, unzipSync, zipSync } from 'fflate';
 import { PPTX_SLIDES_ARRAY, type SlideEntry } from '../src/collab/pptxShared.js';
 import { exportPptxFromSlides, seedSlidesFromPptx } from '../src/pptx/collab.js';
-import { makeSamplePptx } from './helpers.js';
+import { makeSamplePng, makeSamplePptx } from './helpers.js';
+
+/** zip 로컬 파일 헤더를 순서대로 파싱해 엔트리별 압축 방식(0=저장/무압축, 8=deflate)을 읽는다 —
+ * fflate의 zipSync는 엔트리마다 어떤 압축 레벨이 실제로 적용됐는지 공개 API로 조회할 방법을 주지
+ * 않으므로, 산출된 zip 바이트 자체(ZIP 스펙의 로컬 파일 헤더: signature@0, method@8(2B),
+ * compressedSize@18(4B), nameLen@26(2B), extraLen@28(2B), name@30)를 직접 읽어 검증한다.
+ * fflate가 데이터 기술자(data descriptor) 없이 실제 크기를 로컬 헤더에 바로 쓰기 때문에(스트리밍이
+ * 아닌 zipSync 경로) compressedSize만으로 다음 엔트리 오프셋을 정확히 계산할 수 있다. */
+function readZipCompressionMethods(zipBytes: Uint8Array): Map<string, number> {
+  const view = new DataView(zipBytes.buffer, zipBytes.byteOffset, zipBytes.byteLength);
+  const methods = new Map<string, number>();
+  let offset = 0;
+  while (offset + 30 <= zipBytes.length && view.getUint32(offset, true) === 0x04034b50) {
+    const method = view.getUint16(offset + 8, true);
+    const compressedSize = view.getUint32(offset + 18, true);
+    const nameLen = view.getUint16(offset + 26, true);
+    const extraLen = view.getUint16(offset + 28, true);
+    const name = strFromU8(zipBytes.subarray(offset + 30, offset + 30 + nameLen));
+    methods.set(name, method);
+    offset += 30 + nameLen + extraLen + compressedSize;
+  }
+  return methods;
+}
 
 describe('seedSlidesFromPptx', () => {
   test('populates one original entry per slide, in presentation order', () => {
@@ -245,5 +267,62 @@ describe('exportPptxFromSlides', () => {
     const result = exportPptxFromSlides(original, slidesArray);
 
     expect(result.survivingEntryIds).toEqual([survivingIdBefore]); // 깨진 두 번째 항목은 빠짐
+  });
+});
+
+// --- 성능 최적화: ppt/media/ 아래 이미지처럼 이미 압축된 바이너리는 zipSync 단계에서 재압축을
+// 건너뛴다(level 0/저장) — 이 아카이브의 최종 zipSync 호출은 편집 여부와 무관하게 매번 전체
+// 엔트리에 적용되는 유일한 비용이라, 자동저장/수동저장/다운로드 전부가 이 압축 레벨 선택에
+// 영향을 받는다. 아래 테스트는 (1) 그 선택이 실제로 산출된 zip 바이트에 반영되는지(로컬 파일
+// 헤더의 압축 방식 필드로 직접 검증), (2) 그 선택이 압축 해제 결과(실제 콘텐츠 바이트)를 단
+// 1바이트도 바꾸지 않는지를 함께 확인한다 — 순수 CPU 비용 최적화이지 콘텐츠 변경이 아니라는 것.
+describe('exportPptxFromSlides — media entries skip recompression', () => {
+  test('ppt/media/ 아래 이미지는 level 0(저장)으로, 슬라이드 XML은 그대로 deflate로 저장된다', () => {
+    const png = makeSamplePng();
+    const baseEntries = unzipSync(makeSamplePptx(['A']));
+    const original = Buffer.from(zipSync({ ...baseEntries, 'ppt/media/image1.png': png }));
+
+    const ydoc = new Y.Doc();
+    const slidesArray = slidesArrayFrom(ydoc);
+    seedSlidesFromPptx(original, slidesArray);
+
+    const { bytes: out } = exportPptxFromSlides(original, slidesArray);
+    const methods = readZipCompressionMethods(out);
+
+    expect(methods.get('ppt/media/image1.png')).toBe(0); // 저장만, deflate 안 함
+    expect(methods.get('ppt/slides/slide1.xml')).toBe(8); // 기존과 동일하게 deflate
+    expect(methods.get('ppt/presentation.xml')).toBe(8);
+  });
+
+  test('미디어 엔트리는 압축 레벨과 무관하게 압축 해제 결과가 원본과 byte-for-byte 동일하다', () => {
+    const png = makeSamplePng();
+    const baseEntries = unzipSync(makeSamplePptx(['A']));
+    const original = Buffer.from(zipSync({ ...baseEntries, 'ppt/media/image1.png': png }));
+
+    const ydoc = new Y.Doc();
+    const slidesArray = slidesArrayFrom(ydoc);
+    seedSlidesFromPptx(original, slidesArray);
+
+    const { bytes: out } = exportPptxFromSlides(original, slidesArray);
+    const outEntries = unzipSync(out);
+
+    expect(outEntries['ppt/media/image1.png']).toEqual(new Uint8Array(png));
+  });
+
+  test('ppt/media/ 밖에 있는 같은 확장자 파일은 압축 대상에서 제외되지 않는다(경로 프리픽스 검사)', () => {
+    const png = makeSamplePng();
+    const baseEntries = unzipSync(makeSamplePptx(['A']));
+    // 실제로 PowerPoint가 만들어내지는 않지만, isPrecompressedMediaPath가 확장자만이 아니라
+    // "ppt/media/ 아래"라는 경로 조건까지 함께 봐야 한다는 것을 확인해 둔다.
+    const original = Buffer.from(zipSync({ ...baseEntries, 'ppt/notmedia/image1.png': png }));
+
+    const ydoc = new Y.Doc();
+    const slidesArray = slidesArrayFrom(ydoc);
+    seedSlidesFromPptx(original, slidesArray);
+
+    const { bytes: out } = exportPptxFromSlides(original, slidesArray);
+    const methods = readZipCompressionMethods(out);
+
+    expect(methods.get('ppt/notmedia/image1.png')).toBe(8);
   });
 });

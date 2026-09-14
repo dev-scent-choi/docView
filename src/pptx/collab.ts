@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import type { Zippable } from 'fflate';
 import * as Y from 'yjs';
 import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror';
 import {
@@ -100,6 +101,23 @@ function maxSlideNumber(zipEntries: Record<string, Uint8Array>): number {
 function maxSldId(presentationXml: string): number {
   const ids = [...presentationXml.matchAll(/<p:sldId\b[^>]*\bid="(\d+)"/g)].map((m) => Number(m[1]));
   return ids.length > 0 ? Math.max(...ids) : 255;
+}
+
+/**
+ * ppt/media/ 아래 파일 중 "이미 압축된 바이너리"로 간주해 zip 단계에서 재압축(deflate)을 건너뛸
+ * 확장자. PowerPoint가 삽입 이미지/그림을 저장할 때 실제로 쓰는 형식들 — JPEG/PNG/GIF는 이미
+ * 자체 압축 포맷이라 deflate를 한 번 더 돌려도 크기는 거의 안 줄고 CPU만 쓰며, EMF/WMF/BMP/TIFF도
+ * 여기서는 같은 이유로 "재압축해 봐야 이득이 없는 미디어"로 취급한다. XML 파트(.xml/.rels 등)는
+ * 이 목록에 없으므로 zipSync 호출부에서 기존과 동일하게 기본 압축 레벨(6)을 그대로 쓴다 — 이
+ * 함수는 "이 경로가 압축 레벨을 낮출 대상인가"만 판단할 뿐, 어떤 바이트가 나오는지는 전혀
+ * 건드리지 않는다(순수 CPU 비용 최적화, 압축 해제 결과는 항상 동일).
+ */
+const PRECOMPRESSED_MEDIA_EXT_RE = /\.(jpe?g|png|gif|emf|wmf|bmp|tiff?)$/i;
+
+/** zip 엔트리 경로가 ppt/media/ 아래의 이미 압축된 바이너리 미디어인지 — zipSync에 넘기기 직전
+ * (exportPptxFromSlides의 마지막 return)에서만 쓰인다. */
+function isPrecompressedMediaPath(path: string): boolean {
+  return path.startsWith('ppt/media/') && PRECOMPRESSED_MEDIA_EXT_RE.test(path);
 }
 
 /** presentation.xml.rels 안 Id="rIdN" 중 가장 큰 N. */
@@ -639,5 +657,18 @@ export function exportPptxFromSlides(
     }
   }
 
-  return { bytes: zipSync(zipEntries), finalParts, survivingEntryIds };
+  // zipSync는 기본적으로 아카이브의 모든 엔트리를 deflate 레벨 6으로 재압축한다 — ppt/media/
+  // 아래 이미지/미디어 파일은 이미 자체 압축된 바이너리라 이 재압축이 CPU만 태우고 크기는 거의
+  // 줄이지 못한다(이 함수 안의 나머지 로직과 달리, 편집 여부와 무관하게 매번 전체 아카이브에
+  // 적용되는 유일한 비용이라 자동저장마다 이벤트 루프를 블로킹하는 실질적 지연의 대부분을
+  // 차지한다). fflate의 Zippable은 엔트리별로 `[Uint8Array, ZipOptions]` 튜플을 허용해 압축
+  // 레벨을 파일 단위로 지정할 수 있으므로, 이미 압축된 미디어만 level 0(저장만, 재압축 없음)으로
+  // 표시하고 나머지(XML/.rels 등, 실제로 압축 이득이 있는 텍스트)는 그대로 둬 기존 기본 레벨을
+  // 유지한다 — 어느 엔트리든 압축 해제 시 나오는 바이트 자체는 이 분기와 무관하게 항상 동일하다
+  // (압축 레벨은 압축 해제 결과에 영향을 주지 않는 순수 인코딩 파라미터).
+  const zippableEntries: Zippable = {};
+  for (const [path, data] of Object.entries(zipEntries)) {
+    zippableEntries[path] = isPrecompressedMediaPath(path) ? [data, { level: 0 }] : data;
+  }
+  return { bytes: zipSync(zippableEntries), finalParts, survivingEntryIds };
 }
