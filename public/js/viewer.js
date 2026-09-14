@@ -926,6 +926,11 @@ const gridState = {
   chunks: new Map(), // `${sheet}:${chunkIdx}` -> rows | 'loading'
   mergeStarts: new Map(),
   mergeCovered: new Map(), // `${r}:${c}` -> 그 칸을 덮는 병합(m). 같은 key로 .has()만 쓰면 예전 Set과 동일하게 동작한다.
+  // renderGridViewport가 매 렌더마다 새로 계산하는 "저하된"(앵커를 당겨오지 못해 개별 <td>로
+  // 그려진) 병합 집합 — moveSelectionSimple/moveSelectionToEdge가 mergeCovered만 보고 "자기 칸이
+  // 없는 칸"으로 오판해 건너뛰지 않도록, 가장 최근 렌더 결과를 여기 남겨 둔다. 첫 렌더 전에도
+  // 참조될 수 있으니 빈 Set으로 초기화해 둔다.
+  degradedMerges: new Set(),
   selected: null, // { row, col } — 1-based, 실제 시트 좌표(병합에 덮인 칸이면 앵커 좌표로 맞춰 둔다)
 };
 
@@ -1095,6 +1100,10 @@ function renderGridViewport() {
       extending = true;
     }
   }
+  // moveSelectionSimple/moveSelectionToEdge가 이번 렌더에서 어떤 병합이 저하됐는지 알 수 있도록
+  // gridState에 남겨 둔다(그 두 함수는 mergeCovered만으로는 "실제로 자기 <td>가 있는 덮인 칸"과
+  // "정말 건너뛰어야 할 덮인 칸"을 구분할 수 없다).
+  gridState.degradedMerges = degradedMerges;
 
   // 필요한 청크를 비동기로 요청 — 실제 데이터 범위 너머(패딩 영역)는 서버가 빈 배열을 돌려준다
   // (renderFirst부터 요청해야 위에서 새로 끌어온 병합 앵커 행의 데이터도 함께 로딩된다. 위 상한
@@ -1328,7 +1337,11 @@ function moveSelectionSimple(dRow, dCol) {
     if (nextRow === row && nextCol === col) return; // 시트 끝
     row = nextRow;
     col = nextCol;
-    if (!gridState.mergeCovered.has(`${row}:${col}`)) {
+    // 이 칸을 덮는 병합이 있어도, 그 병합이 저하돼(degradedMerges) 개별 <td>로 그려졌다면 실제로는
+    // 자기 칸이 있는 선택 가능한 칸이다 — 진짜로 건너뛸 대상은 지금도 하나로 이어붙어 그려지는
+    // (저하되지 않은) 병합에 덮인 칸뿐이다.
+    const coveringMerge = gridState.mergeCovered.get(`${row}:${col}`);
+    if (!coveringMerge || gridState.degradedMerges.has(coveringMerge)) {
       setSelected(row, col);
       return;
     }
@@ -1372,9 +1385,11 @@ async function moveSelectionToEdge(dRow, dCol) {
     row = r;
     col = c;
   }
-  // 병합에 덮인 칸(자기 <td>가 없다)에 내려앉으면 moveSelectionSimple과 같은 이유로 한 칸 더 간다.
+  // 병합에 덮인 칸(자기 <td>가 없다)에 내려앉으면 moveSelectionSimple과 같은 이유로 한 칸 더 간다 —
+  // 단, 그 병합이 저하됐다면(degradedMerges) 실제로는 자기 칸이 있으므로 건너뛰지 않는다.
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    if (!gridState.mergeCovered.has(`${row}:${col}`)) {
+    const coveringMerge = gridState.mergeCovered.get(`${row}:${col}`);
+    if (!coveringMerge || gridState.degradedMerges.has(coveringMerge)) {
       setSelected(row, col);
       return;
     }
