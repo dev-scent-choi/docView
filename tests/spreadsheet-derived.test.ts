@@ -5,6 +5,7 @@ import {
   displayValue,
   extractStyle,
   parseMergeRange,
+  parseXlsxToGrid,
   saveGridDerived,
   StylePalette,
   YIELD_EVERY_N_ROWS,
@@ -65,6 +66,38 @@ describe('spreadsheet.ts: YIELD_EVERY_N_ROWS is exported', () => {
   test('is a positive integer', () => {
     expect(Number.isInteger(YIELD_EVERY_N_ROWS)).toBe(true);
     expect(YIELD_EVERY_N_ROWS).toBeGreaterThan(0);
+  });
+});
+
+describe('parseXlsxToGrid: sparse trailing rows', () => {
+  test('a sheet with real data far below a naive actualRowCount is not truncated', async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Sheet1');
+    // 헤더 행 하나, 그리고 그 사이 348개 행은 완전히 비워둔 채(어떤 Row 객체도 건드리지 않는다)
+    // 350행에만 실데이터를 심는다 — sheet.actualRowCount는 "값이 있는 행의 개수"만 세므로 여기서는
+    // 2(1행 + 350행)를 돌려주지만, 진짜 최대 행 번호는 350이다. 이 시나리오가 바로 이 버그를 처음
+    // 발견하게 만든 실제 재현 조건이다(로우 350에 실데이터, 그 앞은 거의 비어 있는 성긴 시트).
+    sheet.getCell('A1').value = 'header';
+    sheet.getCell('B350').value = 'far-down-data';
+
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    // 재현 전제 확인 — actualRowCount가 실제로 성긴 시트를 과소평가하는지부터 검증한다. 이게 깨지면
+    // (예: exceljs가 언젠가 이 동작을 바꾸면) 아래 본 검증이 버그를 재현하지 못하는 것이므로 먼저
+    // 알아챌 수 있어야 한다.
+    const reloaded = new ExcelJS.Workbook();
+    await reloaded.xlsx.load(buffer as unknown as ArrayBuffer);
+    const reloadedSheet = reloaded.worksheets[0]!;
+    expect(reloadedSheet.actualRowCount).toBeLessThan(350);
+    expect(reloadedSheet.rowCount).toBe(350);
+
+    const grid = await parseXlsxToGrid(Buffer.from(buffer));
+    const gridSheet = grid.sheets[0]!;
+    expect(gridSheet.rowCount).toBe(350);
+    expect(gridSheet.rows.length).toBe(350);
+    const farDownRow = gridSheet.rows[349]!;
+    expect(farDownRow[1]).not.toBe(0);
+    expect((farDownRow[1] as { v: string }).v).toBe('far-down-data');
   });
 });
 

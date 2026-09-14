@@ -456,14 +456,27 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
   // 주기적으로 양보한다.
   for (const sheet of workbook.worksheets) {
     if (sheet.state && sheet.state !== 'visible') continue;
-    const rowCount = Math.min(sheet.actualRowCount || 0, MAX_ROWS);
+    // sheet.actualRowCount는 ExcelJS 자체 문서상 "실제 값이 있는 행의 '개수'"라, 성긴 시트(예:
+    // 1행과 350행에만 값이 있고 그 사이가 전부 비어 있는 시트)에서는 실제 최대 행 번호(350)보다
+    // 훨씬 작은 값(예: 2)을 돌려준다 — worksheet.js의 실제 구현(eachRow가 row.hasValues인 행만
+    // 세는 것)으로 직접 확인함. 이 값을 rowCount로 그대로 쓰면 뒤쪽의 진짜 데이터가 통째로 잘려
+    // 나간다(동시편집기 lazyGridStore.ts의 ingestXlsxLazily에서 이미 한 번 겪고 고친 것과 같은
+    // 부류의 버그 — 그쪽은 스트리밍 리더가 실제로 마주친 <row> 엘리먼트의 row.number를 그대로
+    // 신뢰하는 방식으로 고쳤다). 여기서는 대신 sheet.rowCount(내부 _lastRowNumber — worksheet.js의
+    // model setter가 `this._rows[row.number - 1] = row`로 채워서, 값이 있든 서식만 있든 실제로
+    // <row> XML 엘리먼트가 존재했던 가장 큰 행 번호를 그대로 반영한다)를 쓴다. 값 없이 서식만
+    // 남은 "유령 행"이 맨 끝에 더 포함되는 과다 계산 걱정은 없다 — 아래 lastWithValue 트리밍이
+    // 어차피 그런 꼬리 행을 실제 데이터 기준으로 다시 잘라낸다.
+    const rowCount = Math.min(sheet.rowCount || 0, MAX_ROWS);
     // actualColumnCount는 맨 오른쪽 열이 수식 셀만 있을 때 그 열을 세지 않는 경우가 있다(ExcelJS
     // 자체 버그로 보임 — 값이 아니라 수식만 있는 열은 "dimensions" 추적에서 빠지는 듯하다). 이 값만
     // 믿으면 예: 맨 오른쪽 합계(=SUM) 열이 통째로 누락되고, 그 결과 동시편집 저장 시
     // exportXlsxFromGrid의 "구조 밖 열 잘라내기" 로직이 그 열을 실제로 지워버린다. 그래서 전체
-    // 행을 훑어 실제로 쓰인 최대 열 번호도 함께 구해 더 큰 쪽을 쓴다.
+    // 행을 훑어 실제로 쓰인 최대 열 번호도 함께 구해 더 큰 쪽을 쓴다. (이 스캔 범위도 위와 같은
+    // 이유로 actualRowCount가 아니라 이미 고쳐진 rowCount를 그대로 재사용해야, 성긴 시트에서
+    // 뒤쪽 열 스캔 자체가 일찍 끊기는 일이 없다.)
     let maxColUsed = 0;
-    const scanRowCount = sheet.actualRowCount || 0;
+    const scanRowCount = rowCount;
     for (let r = 1; r <= scanRowCount; r += 1) {
       sheet.getRow(r).eachCell({ includeEmpty: false }, (_cell, colNumber) => {
         if (colNumber > maxColUsed) maxColUsed = colNumber;
