@@ -1515,6 +1515,14 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   cursor: text;
   user-select: text;
 }
+/* canCopy:false 문서에서는 #grid에 .grid-noselect가 붙어 셀 선택을 막는데, 위 user-select: text가
+   이 칸(자손) 자체 선언이라 조상의 상속값(none)을 이긴다 — 실제 복사 차단은 #grid의 copy 리스너가
+   버블링으로 잡아 이미 막고 있지만(deterrent-only 계층), 이 칸만 유독 드래그 선택 가능해 보이는
+   시각적 불일치가 남는다. .grid-noselect일 때는 이 칸도 다른 셀과 동일하게 선택 불가로 맞춘다. */
+.grid-noselect .formula-input-readonly {
+  user-select: none;
+  cursor: default;
+}
 
 .grid-edit-table {
   /* collapse는 position:sticky인 td/th의 페인트 순서를 브라우저마다 다르게 깨뜨린다(스크롤된
