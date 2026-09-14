@@ -893,6 +893,13 @@ function setupSearchBar() {
 const GRID_ROW_H = 28;
 const GRID_CHUNK = 200;
 const GRID_OVERSCAN = 12;
+// 세로 병합 앵커를 렌더 창 뒤로 당겨오는(renderGridViewport 참고) 범위의 상한. src/spreadsheet.ts의
+// MAX_ROWS(300,000)급으로 큰 시트에서, 1행에 앵커를 둔 채 시트 전체를 덮는 병합이 있으면 이 상한이
+// 없을 때 맨 아래로 스크롤하기만 해도 renderFirst가 1행까지 끌려가 수십만 개의 <tr>과 수천 건의
+// 청크 요청을 한 번에 만들어낸다 — GRID_CHUNK(200행)의 5배로 끊어, 이 확장 때문에 한 번에 추가로
+// 요청되는 청크가 최대 5개를 넘지 않게 한다. 실전 문서의 병합은 거의 항상 이 안에 들어오고, 이
+// 상한을 넘는 병합은 renderGridViewport에서 "성능 우선" 쪽으로 저하 렌더링된다.
+const GRID_MERGE_EXPAND_CAP = 1000;
 const GRID_ROWNUM_W = 52;
 // 실제 데이터 범위 너머로도 빈 칸을 넉넉히 그려서 엑셀처럼 "빈 시트도 격자가 있는" 느낌을 준다
 // (열람 전용이라 편집기처럼 입력 시 확장되지는 않지만, 화면 톤은 편집기와 맞춘다).
@@ -918,7 +925,7 @@ const gridState = {
   active: 0,
   chunks: new Map(), // `${sheet}:${chunkIdx}` -> rows | 'loading'
   mergeStarts: new Map(),
-  mergeCovered: new Set(),
+  mergeCovered: new Map(), // `${r}:${c}` -> 그 칸을 덮는 병합(m). 같은 key로 .has()만 쓰면 예전 Set과 동일하게 동작한다.
   selected: null, // { row, col } — 1-based, 실제 시트 좌표(병합에 덮인 칸이면 앵커 좌표로 맞춰 둔다)
 };
 
@@ -957,12 +964,12 @@ function injectGridStyles(styles) {
 
 function buildMergeIndex(sheet) {
   gridState.mergeStarts = new Map();
-  gridState.mergeCovered = new Set();
+  gridState.mergeCovered = new Map();
   for (const m of sheet.merges) {
     gridState.mergeStarts.set(`${m.r}:${m.c}`, m);
     for (let r = m.r; r < m.r + m.rs; r += 1) {
       for (let c = m.c; c < m.c + m.cs; c += 1) {
-        if (r !== m.r || c !== m.c) gridState.mergeCovered.add(`${r}:${c}`);
+        if (r !== m.r || c !== m.c) gridState.mergeCovered.set(`${r}:${c}`, m);
       }
     }
   }
@@ -1054,24 +1061,45 @@ function renderGridViewport() {
   // 버그). 그래서 창과 겹치는 모든 병합의 앵커 행이 실제 렌더 시작 지점 안에 들어오도록 시작
   // 지점을 앞으로 당긴다 — 한 병합을 당기며 새로 포함된 행이 또 다른(더 위에서 시작하는) 병합에
   // 덮여 있을 수도 있으므로(예: 서로 다른 열에 높이가 다른 병합 헤더가 계단식으로 겹치는 표) 더
-  // 당길 병합이 없을 때까지 반복한다 — 그래도 실제 병합 크기만큼만 유계로 늘어날 뿐, 시트 전체를
-  // 다시 그리게 되지는 않는다. (반대로 앵커가 창 안에 있고 덮인 행만 창 아래로 넘치는 경우는
+  // 당길 병합이 없을 때까지 반복한다. (반대로 앵커가 창 안에 있고 덮인 행만 창 아래로 넘치는 경우는
   // 손댈 필요가 없다 — rowspan은 실제로 그려진 <tr> 개수만큼만 걸쳐지므로 앵커 <td>만 있으면
   // 충분하고, 창 밖으로 넘치는 나머지는 그 시점에 스크롤되어 들어올 때 다시 그려진다.)
+  //
+  // 단, 이 확장에는 GRID_MERGE_EXPAND_CAP 상한이 있다 — 이 함수는 위에서 설명한 것처럼 "실제 병합
+  // 크기만큼만" 유계로 늘어나므로, 병합 자체가 극단적으로 크면(예: 1행에 앵커를 두고 시트 전체를
+  // 덮는 병합) 그 "유계"가 시트 전체 크기(최대 MAX_ROWS=300,000행, src/spreadsheet.ts)만큼 커질 수
+  // 있다 — 시트 맨 아래로 스크롤하기만 해도 renderFirst가 1행까지 끌려가 수십만 개의 <tr>과(아래
+  // 청크 프리페치 루프가 함께 늘어나) 수천 건의 동시 청크 요청을 만들어내는, 이 뷰어가 다른 곳
+  // (청크 분할·LazyGrid 등)에서 애써 피해온 "거대한 시트를 통째로 처리" 문제 그 자체를 재현한다.
+  // 그래서 앵커가 firstVisible보다 GRID_MERGE_EXPAND_CAP행 넘게 떨어져 있으면 그 병합은 당겨오지
+  // 않고 degradedMerges에 표시해둔다 — 대신 그 병합에 덮인, 지금 창에 실제로 보이는 칸들은(아래
+  // 렌더 루프에서) 병합되지 않은 각자의 <td>로 그린다. 즉 이 극단적인 경우엔 "그 병합만" 하나로
+  // 이어붙은 rowspan 셀처럼 보이지 않게 되는 대가로 성능을 지킨다 — 병합이 시각적으로 안 이어지는
+  // 것과 열이 어긋나는 것 중, 후자만은 항상 막는다는 절충이다(열 정렬이 깨지는 원래 버그보다는
+  // 훨씬 낫다). 실전 문서에서 수천 행을 넘는 단일 병합은 매우 드물다.
   let renderFirst = firstVisible;
+  const minRenderFirst = Math.max(1, firstVisible - GRID_MERGE_EXPAND_CAP);
+  const degradedMerges = new Set();
   for (let extending = true; extending; ) {
     extending = false;
     for (const m of sheet.merges) {
       if (m.r >= renderFirst || m.r > lastVisible) continue;
       const mergeLastRow = m.r + m.rs - 1;
       if (mergeLastRow < renderFirst) continue;
+      if (degradedMerges.has(m)) continue;
+      if (m.r < minRenderFirst) {
+        degradedMerges.add(m);
+        continue;
+      }
       renderFirst = m.r;
       extending = true;
     }
   }
 
   // 필요한 청크를 비동기로 요청 — 실제 데이터 범위 너머(패딩 영역)는 서버가 빈 배열을 돌려준다
-  // (renderFirst부터 요청해야 위에서 새로 끌어온 병합 앵커 행의 데이터도 함께 로딩된다)
+  // (renderFirst부터 요청해야 위에서 새로 끌어온 병합 앵커 행의 데이터도 함께 로딩된다. 위 상한
+  // 덕분에 renderFirst 자체가 firstVisible보다 GRID_MERGE_EXPAND_CAP행 넘게 당겨지지 않으므로,
+  // 이 루프가 추가로 요청하는 청크 수도 그만큼(최대 GRID_MERGE_EXPAND_CAP/GRID_CHUNK개)으로 유계다)
   const firstChunk = Math.floor((renderFirst - 1) / GRID_CHUNK);
   const lastChunk = Math.floor((Math.min(lastVisible, sheet.rowCount) - 1) / GRID_CHUNK);
   for (let c = firstChunk; c <= lastChunk; c += 1) fetchChunk(gridState.active, c);
@@ -1089,7 +1117,12 @@ function renderGridViewport() {
   for (let r = renderFirst; r <= lastVisible; r += 1) {
     const cells = [`<td class="g-rownum">${r}</td>`];
     for (let c = 1; c <= colCount; c += 1) {
-      if (gridState.mergeCovered.has(`${r}:${c}`)) continue;
+      // 이 칸을 덮는 병합이 있어도, 그 병합이 degradedMerges에 있으면(위 상한 때문에 앵커를 당겨오지
+      // 못한 병합) 이 칸을 "덮인 칸"으로 건너뛰지 않고 아래에서 보통 셀처럼 그린다 — mergeStarts에
+      // 이 좌표의 앵커가 없으므로(covered 칸은 원래 앵커가 아니다) span은 자연히 비게 되어, 시각적
+      // 병합 없이도 열 자리는 항상 채워진다(정렬 보존이 이 저하 렌더링의 유일한 목적).
+      const coveringMerge = gridState.mergeCovered.get(`${r}:${c}`);
+      if (coveringMerge && !degradedMerges.has(coveringMerge)) continue;
       const merge = gridState.mergeStarts.get(`${r}:${c}`);
       const cell = cellAt(gridState.active, r, c - 1);
       const isEmpty = !cell || cell === 0;
