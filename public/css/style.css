@@ -1489,6 +1489,33 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 }
 .formula-input:focus { background: var(--v-accent-soft); }
 
+/* ---------- 뷰어(읽기 전용)의 "선택한 칸" 값 표시 ----------
+   위 .formula-bar/.cell-ref-box/.fx-icon과 내용 구성은 같지만(이름 상자 + fx + 셀 내용), 뷰어의
+   그리드 화면은 고정 위치 카드(.grid-container, 둥근 모서리+그림자로 이미 하나의 패널)라서 편집기
+   처럼 카드 밖에 따로 뜬 테두리 박스를 또 만들지 않는다 — 대신 같은 카드 안에서 .grid-head/
+   .grid-status-bar와 같은 방식으로(여백 없이, 구분선만) 위쪽에 붙인다. */
+.grid-formula-bar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  background: #fff;
+  border-bottom: 1px solid #d7dae0;
+}
+/* 셀 내용 칸은 <input>이 아니라 <div>다(뷰어는 절대 편집 불가) — 그리드 칸은 열 폭에 맞춰 잘려
+   보일 수 있지만, 여기는 그 폭 제한이 없는 "전체 값"을 보여주는 것이 핵심이므로 한 줄로 잘라
+   감추는 대신 줄바꿈으로 다 보여주고(너무 길면 세로 스크롤). */
+.formula-input-readonly {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  max-height: 6rem;
+  padding: 0.4rem 0.75rem;
+  line-height: 1.45;
+  cursor: text;
+  user-select: text;
+}
+
 .grid-edit-table {
   /* collapse는 position:sticky인 td/th의 페인트 순서를 브라우저마다 다르게 깨뜨린다(스크롤된
      일반 셀이 sticky 고정 행/열 위로 잘못 그려지는 버그) — separate + 자체 border로 우회한다. */

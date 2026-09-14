@@ -10,6 +10,8 @@ const pageJumpInput = document.getElementById('page-jump-input');
 const pageJumpTotal = document.getElementById('page-jump-total');
 const gridCellRefEl = document.getElementById('grid-cell-ref');
 const gridRowInfoEl = document.getElementById('grid-row-info');
+const gridFormulaRefEl = document.getElementById('grid-formula-ref');
+const gridFormulaValueEl = document.getElementById('grid-formula-value');
 const gridZoomHostEl = document.getElementById('grid-zoom-host');
 const gridZoomLevelEl = document.getElementById('grid-zoom-level');
 const gridZoomSliderTrackEl = document.getElementById('grid-zoom-slider-track');
@@ -1002,6 +1004,10 @@ function ensureChunkLoaded(sheetIdx, chunkIdx) {
       const data = await fetchJsonView(`/api/view/grid/rows?${tokenQuery}&sheet=${sheetIdx}&from=${from}&count=${GRID_CHUNK}`);
       gridState.chunks.set(key, data.rows);
       renderGridViewport();
+      // 방향키를 빠르게 눌러 아직 안 불러와진(청크 로딩 중인) 칸으로 먼저 선택이 옮겨간 경우,
+      // 그 칸의 값이 지금 막 도착했을 수 있다 — 수식 입력줄 자리(값 표시)가 빈 채로 남지 않도록
+      // 선택 표시도 같이 다시 맞춘다(다른 청크 로딩이면 gridState.selected와 무관해 값은 그대로다).
+      updateSelectionDisplays();
     } catch {
       gridState.chunks.delete(key);
     } finally {
@@ -1285,16 +1291,34 @@ function activateSheet(index) {
   renderGridHead();
   gridState.selected = { row: 1, col: 1 };
   renderGridViewport();
-  updateCellRefDisplay();
+  updateSelectionDisplays();
   // A1이 시각적으로는 바로 선택돼 보이지만, 클릭을 한 번 해야만 방향키가 먹는 건 어색하다 —
   // 시트를 열거나(또는 다른 시트로 전환) 하자마자 바로 방향키가 통하도록 스크롤 컨테이너에
   // 포커스를 미리 준다(scrollIntoView는 여기서 필요 없으니 preventScroll로 막는다).
   scroll.focus({ preventScroll: true });
 }
 
-function updateCellRefDisplay() {
-  if (!gridCellRefEl) return;
-  gridCellRefEl.textContent = gridState.selected ? `${colLetter(gridState.selected.col)}${gridState.selected.row}` : '';
+/** 선택된 칸의 전체 값 텍스트 — renderGridViewport가 <td> 안에 그리는 것과 같은 cell.v를 그대로
+ * 쓴다(이 데이터 모델은 수식 원문과 계산값을 따로 보관하지 않고 하나의 표시용 문자열만 갖는다 —
+ * displayValue()/src/spreadsheet.ts 참고: 계산 결과가 있으면 결과를, 없으면 "=수식" 형태의 원문을
+ * 이미 합쳐서 내려준다). 그리드 칸 자체는 열 폭에 따라 옆 칸 위로 "넘쳐 보이거나" 다음 값 있는
+ * 칸을 만나면 그 지점에서 잘려 보이지만, 여기는 그 폭 제한이 없으니 항상 전체 값을 보여준다. */
+function selectedCellText() {
+  const sel = gridState.selected;
+  if (!sel) return '';
+  const cell = cellAt(gridState.active, sel.row, sel.col - 1);
+  if (!cell || cell === 0) return '';
+  return cell.v ?? '';
+}
+
+/** 선택된 칸이 바뀔 때마다 하단 상태줄의 작은 참조 표시(#grid-cell-ref)와, 툴바 바로 밑의 수식
+ * 입력줄 자리(읽기 전용 #grid-formula-ref/#grid-formula-value)를 한 번에 갱신한다 — 두 표시가
+ * 같은 선택 상태를 가리키므로 이 함수 하나로 중복 없이 같이 맞춘다. */
+function updateSelectionDisplays() {
+  const ref = gridState.selected ? `${colLetter(gridState.selected.col)}${gridState.selected.row}` : '';
+  if (gridCellRefEl) gridCellRefEl.textContent = ref;
+  if (gridFormulaRefEl) gridFormulaRefEl.textContent = ref;
+  if (gridFormulaValueEl) gridFormulaValueEl.textContent = selectedCellText();
 }
 
 function scrollSelectedIntoView() {
@@ -1318,7 +1342,7 @@ function scrollSelectedIntoView() {
 
 function setSelected(row, col) {
   gridState.selected = { row, col };
-  updateCellRefDisplay();
+  updateSelectionDisplays();
   renderGridViewport();
   scrollSelectedIntoView();
 }
