@@ -394,6 +394,70 @@ describe('room.ts: formula cells recompute into GRID_COMPUTED_MAP', () => {
     },
     30_000,
   );
+
+  // da53baf(FormulaParser 풀링)가 실제로 고치려던 원래 버그 리포트의 패턴: 서로 참조하지 않는
+  // *독립된* 수식 셀들 — 위 체인형(cascading) 테스트와 달리 memo는 여기서 전혀 도움이 안 된다
+  // (각 칸이 정확히 한 번씩만 계산되므로). memo 없이 풀링도 없던 시절엔 칸마다 `new
+  // FormulaParser(...)`를 새로 만드는 비용(실측 ~1.9ms/칸, formulaParserPool.ts 문서 주석 참고)을
+  // 그대로 물어 페이지 하나(500행 × 2개 수식 컬럼 = 1000칸)를 재계산하는 데만 수 초가 걸렸다.
+  // room.ts의 실제 프로덕션 경로(joinEditSession → 페이지 구독 → recomputeFormulasForPage)를 그대로
+  // 거치므로, recomputeFormulasForPage가 실제로 풀링된 파서를 쓰도록 배선돼 있는지(단위 테스트가
+  // 아니라 배선 자체)를 검증하는 종단 간(end-to-end) 회귀 테스트다.
+  test(
+    'end-to-end: subscribing to a page with 500 rows of two independent (non-chained) formula ' +
+      'columns computes all values quickly and correctly (matches the original page-load bug report)',
+    async () => {
+      const { store } = await import('../src/storage.js');
+      const { joinEditSession } = await import('../src/collab/room.js');
+      const { gridCellKey, GRID_COMPUTED_MAP } = await import('../src/collab/gridShared.js');
+
+      const ROWS = 500;
+      const docId = randomUUID();
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      for (let r = 1; r <= ROWS; r += 1) {
+        sheet.getCell(r, 1).value = r; // A{r} = r
+        sheet.getCell(r, 2).value = r * 2; // B{r} = 2r
+        // C{r}과 D{r}은 오직 A{r}/B{r}(수식이 아닌 입력 칸)만 참조한다 — 서로도, 다른 수식 칸도
+        // 참조하지 않는 독립된 수식이다(체인형과 대비되는 이 테스트의 핵심 성질).
+        sheet.getCell(r, 3).value = { formula: `A${r}*B${r}` }; // C{r} = A{r}*B{r}
+        sheet.getCell(r, 4).value = { formula: `A${r}+B${r}` }; // D{r} = A{r}+B{r}
+      }
+      const original = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+      await store.saveOriginal(docId, 'xlsx', original);
+      await store.writeMeta({
+        id: docId,
+        name: 'x.xlsx',
+        ext: 'xlsx',
+        status: 'ready',
+        pageCount: 1,
+        createdAt: new Date().toISOString(),
+        progress: 100,
+        viewKind: 'grid',
+      });
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+
+      const start = Date.now();
+      sendSubscribe(socket, 0, [0]); // 500행 = 페이지 0 하나 전체
+      await flushEventLoop(300);
+      const elapsedMs = Date.now() - start;
+
+      const computed = socket.mirror.getMap<string>(GRID_COMPUTED_MAP);
+      // 정확성: C{r} = A{r}*B{r} = r*2r = 2r², D{r} = A{r}+B{r} = 3r.
+      expect(computed.get(gridCellKey(0, 9, 2))).toBe(String(10 * 20)); // C10 = A10*B10 = 200
+      expect(computed.get(gridCellKey(0, 9, 3))).toBe(String(10 + 20)); // D10 = A10+B10 = 30
+      expect(computed.get(gridCellKey(0, ROWS - 1, 2))).toBe(String(ROWS * (ROWS * 2))); // C500 = A500*B500
+      expect(computed.get(gridCellKey(0, ROWS - 1, 3))).toBe(String(ROWS + ROWS * 2)); // D500 = A500+B500
+
+      // 속도: 리뷰의 실측(이 정확한 시나리오가 풀링된 파서로 ~41ms)과 대비되는 넉넉한 상한 — 풀링
+      // 없이 칸마다 새 FormulaParser를 만들던 시절의 수 초짜리 지연으로 되돌아가면 절대 넘길 수
+      // 없을 만큼 두세 자릿수 낮게 잡되, CI/느린 머신의 변동성에는 여유를 둔다.
+      expect(elapsedMs).toBeLessThan(2_000);
+    },
+    30_000,
+  );
 });
 
 describe('xlsx/formulas.ts: computeGridCellDisplayAsync (LazyGridStore, cache-miss retry)', () => {
