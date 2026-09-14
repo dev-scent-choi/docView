@@ -87,6 +87,59 @@ describe('xlsx/formulas.ts: computeGridCellDisplay', () => {
     const grid = makeGrid(rows);
     expect(computeGridCellDisplay(grid, 0, 50, 0)).toBe(500);
   });
+
+  // 성능 수정(체인형 수식의 O(N²) 재계산을 막는 memo)이 기존 계산 결과를 바꾸지 않는지 확인하는
+  // 회귀 테스트 — memo를 명시적으로 공유해도, 아예 안 써도(기본값) 같은 값이 나와야 한다.
+  describe('memo (performance fix) does not change any computed value', () => {
+    test('a chain of formula cells each referencing the previous one (A2=A1+1, A3=A2+1, ...) computes ' +
+      'the mathematically correct value at the end of the chain, with or without a shared memo', () => {
+      const N = 30;
+      const rows: Array<Array<{ v: string } | 0>> = [[{ v: '1' }]];
+      for (let r = 2; r <= N; r += 1) rows.push([{ v: `=A${r - 1}+1` }]);
+      const grid = makeGrid(rows);
+
+      // memo 없이(기본값 — 매 호출마다 새 Map): 재귀적으로 A1까지 완전히 다시 계산한다.
+      expect(computeGridCellDisplay(grid, 0, N - 1, 0)).toBe(N);
+
+      // memo를 명시적으로 공유해도 정확히 같은 값이어야 한다(체인 끝까지 재귀로 한 번에 계산되므로
+      // 이 특정 호출 하나만으로는 memo가 실제로 캐시 적중을 만들어내지 않지만, 결과가 동일해야
+      // 한다는 게 핵심 — memo 도입이 계산 로직 자체를 바꾸지 않았다는 증거).
+      const memo = new Map<string, unknown>();
+      expect(computeGridCellDisplay(grid, 0, N - 1, 0, new Set(), memo)).toBe(N);
+    });
+
+    test('two sibling formula cells that both depend on the same third formula cell (a "diamond" ' +
+      'dependency: D references B and C, both of which reference A) get the correct value whether ' +
+      'or not they share a memo across separate top-level calls', () => {
+      // A1 = 10 (수식), B1 = A1*2 (수식), C1 = A1+5 (수식), D1 = B1+C1 (수식) — B1과 C1이 각각
+      // 독립적으로 A1을 참조하는 재귀(재진입) 평가를 만든다. D1 = 20+15 = 35.
+      const grid = makeGrid([[{ v: '=5+5' }, { v: '=A1*2' }, { v: '=A1+5' }, { v: '=B1+C1' }]]);
+
+      // 각 셀을 memo 없이 독립적으로 호출해도 정확해야 한다(기존 동작 그대로).
+      expect(computeGridCellDisplay(grid, 0, 0, 0)).toBe(10); // A1
+      expect(computeGridCellDisplay(grid, 0, 0, 1)).toBe(20); // B1
+      expect(computeGridCellDisplay(grid, 0, 0, 2)).toBe(15); // C1
+      expect(computeGridCellDisplay(grid, 0, 0, 3)).toBe(35); // D1
+
+      // 하나의 memo를 여러 "최상위" 호출에 걸쳐 공유해도(recomputeFormulasForPage가 페이지 하나의
+      // 모든 수식 셀에 걸쳐 하나의 memo를 쓰는 것과 같은 패턴) 같은 결과가 나와야 한다 — A1이 B1과
+      // C1 양쪽에서 재참조되므로, 이게 바로 memo가 실제로 적중하는(그리고 여전히 정확해야 하는)
+      // 경우다.
+      const memo = new Map<string, unknown>();
+      expect(computeGridCellDisplay(grid, 0, 0, 0, new Set(), memo)).toBe(10);
+      expect(computeGridCellDisplay(grid, 0, 0, 1, new Set(), memo)).toBe(20);
+      expect(computeGridCellDisplay(grid, 0, 0, 2, new Set(), memo)).toBe(15);
+      expect(computeGridCellDisplay(grid, 0, 0, 3, new Set(), memo)).toBe(35);
+    });
+
+    test('a genuine circular reference (A1=B1, B1=A1) still returns the REF error name, not a stale ' +
+      'or incorrect memoized value, even when a memo is shared across the two top-level calls', () => {
+      const grid = makeGrid([[{ v: '=B1' }, { v: '=A1' }]]);
+      const memo = new Map<string, unknown>();
+      expect(computeGridCellDisplay(grid, 0, 0, 0, new Set(), memo)).toBe('#REF!');
+      expect(computeGridCellDisplay(grid, 0, 0, 1, new Set(), memo)).toBe('#REF!');
+    });
+  });
 });
 
 describe('xlsx/formulas.ts: formatComputedValueForStorage', () => {

@@ -337,6 +337,63 @@ describe('room.ts: formula cells recompute into GRID_COMPUTED_MAP', () => {
     },
     20_000,
   );
+
+  // 실제 버그 리포트의 시나리오 그대로: 페이지 하나(500행)에 체인형(cascading) 수식 컬럼 하나
+  // (러닝 합계, B{r} = B{r-1} + A{r}) — 브리프에 따르면 memo 없이는 90초 안에도 끝나지 않던 경우.
+  // room.ts의 실제 프로덕션 경로(joinEditSession → 페이지 구독 → recomputeFormulasForPage)를 그대로
+  // 거치므로, recomputeFormulasForPage가 실제로 페이지 하나 전체에 걸쳐 memo를 공유하도록 배선돼
+  // 있는지(단위 테스트가 아니라 배선 자체)를 검증하는 종단 간(end-to-end) 회귀 테스트다.
+  test(
+    'end-to-end: subscribing to a page with 500 rows of a chained running-total formula computes ' +
+      'all values quickly and correctly (matches the real page-load bug report)',
+    async () => {
+      const { store } = await import('../src/storage.js');
+      const { joinEditSession } = await import('../src/collab/room.js');
+      const { gridCellKey, GRID_COMPUTED_MAP } = await import('../src/collab/gridShared.js');
+
+      const ROWS = 500;
+      const docId = randomUUID();
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      for (let r = 1; r <= ROWS; r += 1) {
+        sheet.getCell(r, 1).value = r; // A{r} = r
+        sheet.getCell(r, 2).value = r === 1 ? { formula: 'A1' } : { formula: `B${r - 1}+A${r}` }; // B{r}
+      }
+      const original = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+      await store.saveOriginal(docId, 'xlsx', original);
+      await store.writeMeta({
+        id: docId,
+        name: 'x.xlsx',
+        ext: 'xlsx',
+        status: 'ready',
+        pageCount: 1,
+        createdAt: new Date().toISOString(),
+        progress: 100,
+        viewKind: 'grid',
+      });
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+
+      const start = Date.now();
+      sendSubscribe(socket, 0, [0]); // 500행 = 페이지 0 하나 전체
+      await flushEventLoop(300);
+      const elapsedMs = Date.now() - start;
+
+      const computed = socket.mirror.getMap<string>(GRID_COMPUTED_MAP);
+      // 정확성: B{r} = 1+2+...+r = r(r+1)/2.
+      expect(computed.get(gridCellKey(0, 0, 1))).toBe('1'); // B1
+      expect(computed.get(gridCellKey(0, 9, 1))).toBe('55'); // B10
+      expect(computed.get(gridCellKey(0, 99, 1))).toBe('5050'); // B100
+      expect(computed.get(gridCellKey(0, ROWS - 1, 1))).toBe(String((ROWS * (ROWS + 1)) / 2)); // B500 = 125250
+
+      // 속도: 브리프의 실측(같은 시나리오가 90초 넘게도 끝나지 않았음)과 대비되는 넉넉한 상한.
+      // 전체 테스트 스위트를 병렬로 돌릴 때의 CPU 경합까지 고려해 여유를 넉넉히 둔다(격리 실행
+      // 시엔 1.5초 안팎) — 그래도 O(N²) 상태로 되돌아가면 절대 넘길 수 없는 상한이라는 게 핵심.
+      expect(elapsedMs).toBeLessThan(15_000);
+    },
+    30_000,
+  );
 });
 
 describe('xlsx/formulas.ts: computeGridCellDisplayAsync (LazyGridStore, cache-miss retry)', () => {
@@ -373,4 +430,56 @@ describe('xlsx/formulas.ts: computeGridCellDisplayAsync (LazyGridStore, cache-mi
 
     await fs.rm(store.rowStorePath, { force: true });
   });
+
+  // 이 태스크의 핵심 회귀 테스트: 체인형(cascading) 수식 — 러닝 합계처럼 B{r}이 B{r-1}을 참조하는
+  // 패턴 — 를 memo 없이 재계산하면 셀 N개에 대해 총 계산 횟수가 O(N²)로 폭증한다(N번째 셀을 계산할
+  // 때 1..N-1번째를 전부 재귀로 다시 계산하고, N-1번째 셀이 "그 자신도 재계산 대상 수식 셀이라"
+  // 별도로 다시 계산될 때 또 1..N-2번째를 전부 다시 계산하는 식). 500개 셀이면 250,000번 가까운
+  // FormulaParser 생성/파싱이 필요해, 실측(브리프 참고)으로는 90초 안에 끝나지 않았다.
+  // recomputeFormulasForPage가 페이지 하나(최대 PAGE_SIZE_ROWS=500행)의 모든 수식 셀에 걸쳐 공유하는
+  // memo(Map<cellKey, result>)를 만들어 computeGridCellDisplayAsync에 넘기면, 이미 이 패스에서
+  // 계산된 셀은 다시 계산하지 않으므로 총 계산 횟수가 O(N)으로 줄어든다 — 이 테스트는 그 memo를
+  // recomputeFormulasForPage와 똑같은 방식(모든 호출이 같은 Map 인스턴스를 공유)으로 직접 사용해
+  // "빠르다"(관대하지만 명확한 시간 상한)와 "정확하다"(몇몇 행의 러닝 합계 값)를 함께 검증한다.
+  test(
+    '500 rows of a chained/cascading formula (running total, B{r} = B{r-1} + A{r}) recompute quickly ' +
+      'and correctly when computeGridCellDisplayAsync calls share one memo Map, matching recomputeFormulasForPage',
+    async () => {
+      const ROWS = 500;
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      for (let r = 1; r <= ROWS; r += 1) {
+        sheet.getCell(r, 1).value = r; // A{r} = r
+        sheet.getCell(r, 2).value = r === 1 ? { formula: 'A1' } : { formula: `B${r - 1}+A${r}` }; // B{r}
+      }
+      const bytes = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+      const store = await ingestXlsxLazily(randomUUID(), bytes);
+
+      // recomputeFormulasForPage가 한 페이지의 모든 수식 셀에 걸쳐 공유하는 것과 똑같은 memo — 오름차순
+      // 행 순서로 호출해 "앞 셀을 먼저 계산해 memo에 남기고, 뒤 셀은 그걸 재사용"하는 실제 패턴을 그대로 재현한다.
+      const memo = new Map<string, unknown>();
+      const start = Date.now();
+      const results: unknown[] = [];
+      for (let r = 0; r < ROWS; r += 1) {
+        results.push(await computeGridCellDisplayAsync(store, 0, r, 1, new Set(), memo));
+      }
+      const elapsedMs = Date.now() - start;
+
+      // 정확성: 러닝 합계 B{r} = 1+2+...+r = r(r+1)/2.
+      expect(results[0]).toBe(1); // B1
+      expect(results[1]).toBe(3); // B2
+      expect(results[9]).toBe(55); // B10
+      expect(results[99]).toBe(5050); // B100
+      expect(results[ROWS - 1]).toBe((ROWS * (ROWS + 1)) / 2); // B500 = 125250
+
+      // 속도: memo가 없으면(O(N²)) 90초 넘게도 끝나지 않던 것이(브리프 실측) memo 공유로
+      // O(N)이 되어 훨씬 빨리 끝나야 한다 — 전체 스위트를 병렬로 돌릴 때의 CPU 경합까지 고려해
+      // 여유를 넉넉히 둔다(격리 실행 시엔 1.5초 안팎). 타이트한 타이밍 어서션으로 인한 플레이크를
+      // 피하면서도, O(N²)로 되돌아가면 절대 넘길 수 없는 상한이라는 게 핵심.
+      expect(elapsedMs).toBeLessThan(15_000);
+
+      await fs.rm(store.rowStorePath, { force: true });
+    },
+    30_000,
+  );
 });

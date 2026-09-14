@@ -756,6 +756,15 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
   const computed = room.ydoc.getMap<string>(GRID_COMPUTED_MAP);
   const pageStart = page * PAGE_SIZE_ROWS;
   const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, meta.rowCount);
+  // 이 페이지 재계산 패스 전체(모든 청크)가 공유하는 결과 캐시 — 체인형 수식(예: 러닝 합계처럼
+  // 뒤 칸이 앞 칸을 참조하는 패턴)에서 앞 칸이 이미 이 패스 동안 계산됐다면 다시 계산하지 않는다
+  // (computeGridCellDisplayAsync/computeGridCellDisplay 문서 주석 참고 — memo가 없으면 이런 사슬은
+  // 총 계산 횟수가 O(N²)로 폭증한다). 이 함수 호출 하나 = "그리드 내용이 바뀌지 않는다고 보장되는
+  // 재계산 패스 하나"이므로 매 호출마다 새 Map을 만든다 — 다른(이전/동시) recomputeFormulasForPage
+  // 호출과는 공유하지 않는다. 편집 하나가 이 함수를 여러 페이지에 걸쳐 다시 부르더라도, 그 각각의
+  // 호출은 그 시점의 "현재" canonical 데이터를 그대로 읽으므로(더 이전에 끝난 다른 호출이 이미 써둔
+  // memo를 들고 오지 않으므로) 나중에 도착한 편집을 놓치지 않는다.
+  const memo = new Map<string, unknown>();
   for (let start = pageStart; start < pageEnd; start += RECOMPUTE_YIELD_EVERY_N_ROWS) {
     const end = Math.min(start + RECOMPUTE_YIELD_EVERY_N_ROWS, pageEnd);
     // "이 칸이 수식인가"를 판정하려면 원본 텍스트가 필요하다 — getCell은 더티 오버레이를 먼저
@@ -786,7 +795,7 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
     // 이미 계산된 값만 동기 콜백 안에서 쓴다(seedGridPageFromXlsx가 getRow를 Promise.all로 먼저
     // 기다린 뒤 transact하는 것과 같은 패턴, xlsx/collab.ts 참고).
     const values = await Promise.all(
-      formulaCells.map(({ r, c }) => computeGridCellDisplayAsync(store, sheetIdx, r, c)),
+      formulaCells.map(({ r, c }) => computeGridCellDisplayAsync(store, sheetIdx, r, c, new Set(), memo)),
     );
     room.ydoc.transact(() => {
       for (const key of nonFormulaKeys) {
