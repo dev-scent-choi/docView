@@ -1046,8 +1046,33 @@ function renderGridViewport() {
   const lastVisible = Math.min(displayRowCount(sheet), firstVisible + visibleCount);
   const colCount = displayColCount(sheet);
 
+  // 세로 병합(rowspan)의 앵커 행(rowspan 속성을 실제로 지닌 <td>가 그려지는, 병합의 맨 위 행)이
+  // 가상 스크롤 창보다 위로 스크롤되어 나가 있어도, 그 병합에 덮인 나중 행들은 여전히 창 안에 보일
+  // 수 있다 — table.innerHTML을 매번 통째로 새로 그리는 구조라 이전 렌더의 앵커 <td>는 남아있지
+  // 않으므로, 이번 패스에서 앵커 행 자체를 함께 그려주지 않으면 그 칸이 통째로 비어(덮인 행이라는
+  // 이유로 <td> 자체를 건너뛰므로) 이후 모든 열이 한 칸씩 밀려 보인다(세로로 긴 병합에서 재현되는
+  // 버그). 그래서 창과 겹치는 모든 병합의 앵커 행이 실제 렌더 시작 지점 안에 들어오도록 시작
+  // 지점을 앞으로 당긴다 — 한 병합을 당기며 새로 포함된 행이 또 다른(더 위에서 시작하는) 병합에
+  // 덮여 있을 수도 있으므로(예: 서로 다른 열에 높이가 다른 병합 헤더가 계단식으로 겹치는 표) 더
+  // 당길 병합이 없을 때까지 반복한다 — 그래도 실제 병합 크기만큼만 유계로 늘어날 뿐, 시트 전체를
+  // 다시 그리게 되지는 않는다. (반대로 앵커가 창 안에 있고 덮인 행만 창 아래로 넘치는 경우는
+  // 손댈 필요가 없다 — rowspan은 실제로 그려진 <tr> 개수만큼만 걸쳐지므로 앵커 <td>만 있으면
+  // 충분하고, 창 밖으로 넘치는 나머지는 그 시점에 스크롤되어 들어올 때 다시 그려진다.)
+  let renderFirst = firstVisible;
+  for (let extending = true; extending; ) {
+    extending = false;
+    for (const m of sheet.merges) {
+      if (m.r >= renderFirst || m.r > lastVisible) continue;
+      const mergeLastRow = m.r + m.rs - 1;
+      if (mergeLastRow < renderFirst) continue;
+      renderFirst = m.r;
+      extending = true;
+    }
+  }
+
   // 필요한 청크를 비동기로 요청 — 실제 데이터 범위 너머(패딩 영역)는 서버가 빈 배열을 돌려준다
-  const firstChunk = Math.floor((firstVisible - 1) / GRID_CHUNK);
+  // (renderFirst부터 요청해야 위에서 새로 끌어온 병합 앵커 행의 데이터도 함께 로딩된다)
+  const firstChunk = Math.floor((renderFirst - 1) / GRID_CHUNK);
   const lastChunk = Math.floor((Math.min(lastVisible, sheet.rowCount) - 1) / GRID_CHUNK);
   for (let c = firstChunk; c <= lastChunk; c += 1) fetchChunk(gridState.active, c);
 
@@ -1061,7 +1086,7 @@ function renderGridViewport() {
   for (let i = 1; i <= colCount; i += 1) totalColWidthPx += colWidthAt(sheet, i);
 
   const rowsHtml = [];
-  for (let r = firstVisible; r <= lastVisible; r += 1) {
+  for (let r = renderFirst; r <= lastVisible; r += 1) {
     const cells = [`<td class="g-rownum">${r}</td>`];
     for (let c = 1; c <= colCount; c += 1) {
       if (gridState.mergeCovered.has(`${r}:${c}`)) continue;
@@ -1100,7 +1125,7 @@ function renderGridViewport() {
   const table = document.getElementById('grid-table');
   table.innerHTML = cols + rowsHtml.join('');
   table.style.width = `${totalColWidthPx}px`;
-  table.style.transform = `translateY(${(firstVisible - 1) * GRID_ROW_H}px)`;
+  table.style.transform = `translateY(${(renderFirst - 1) * GRID_ROW_H}px)`;
 
   if (gridRowInfoEl) {
     const currentRow = Math.min(sheet.rowCount, Math.floor(scroll.scrollTop / GRID_ROW_H) + 1);
