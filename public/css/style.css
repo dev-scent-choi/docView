@@ -1058,9 +1058,19 @@ h2 {
 
 /* ---------- 그리드 뷰 (스프레드시트) ---------- */
 
+/* 뷰어는 문서 종류를 가리지 않는 공용 블루 액센트(.viewer-body의 --v-accent)를 쓰지만,
+   엑셀 그리드 화면만은 그리드 동시편집기(.grid-editor-page)와 시트 탭 활성색·선택 셀
+   테두리색까지 완전히 똑같아야 하므로 이 안에서만 같은 브랜드 그린으로 오버라이드한다 —
+   PDF/docx/pptx 등 다른 문서 종류의 뷰어 화면은 이 선택자 밖이라 영향받지 않는다. */
 .grid-container {
+  --v-accent: #217346;
+  --v-accent-ink: #ffffff;
   position: fixed;
-  inset: 4.4rem 0.75rem 0.75rem;
+  /* .pages-container(PDF 등)의 top padding(6.2rem)과 같은 값 — 실측해 보면 .viewer-toolbar는
+     2줄(제목줄+도구줄)이라 늘 4.4rem보다 커서(그리드 문서는 도구줄 아이콘이 많이 줄어도 여전히
+     ~90px), 예전 4.4rem 값으로는 그리드 맨 위 열 머리글 행(.grid-head)이 고정 툴바 밑에 깔려
+     안 보였다. */
+  inset: 6.2rem 0.75rem 0.75rem;
   display: flex;
   flex-direction: column;
   border-radius: 14px;
@@ -1190,46 +1200,19 @@ h2 {
 
 .grid-noselect { user-select: none; -webkit-user-select: none; }
 
-.sheet-tabs {
-  flex: none;
-  display: flex;
-  gap: 2px;
-  padding: 4px 6px;
-  background: #eceef2;
-  border-top: 1px solid #d7dae0;
-  overflow-x: auto;
-}
+/* 시트 탭(.grid-sheet-tabs/.grid-sheet-tab)과 하단 상태줄(.grid-status-bar 등)은 이제 그리드
+   동시편집기(.grid-editor-page)와 완전히 같은 클래스·규칙을 공유한다 — 실제 정의는 아래
+   "그리드(엑셀) 동시편집기" 섹션에 있다(.grid-tabs-row/.grid-sheet-tabs/.grid-sheet-tab/
+   .grid-status-bar/.grid-status-row/.grid-status-text/.zoom-group 등). 뷰어는 시트 추가(+)
+   버튼·이름 바꾸기·우클릭 메뉴 같은 편집 전용 자식만 만들지 않을 뿐, 탭 자체의 모양과
+   하단 상태줄 레이아웃은 별도 규칙 없이 그대로 물려받는다.
 
-.sheet-tab {
-  border: none;
-  border-radius: 7px 7px 0 0;
-  padding: 5px 14px;
-  font-size: 0.78rem;
-  background: transparent;
-  color: #5b6270;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.sheet-tab:hover { background: rgba(0, 0, 0, 0.06); }
-.sheet-tab.active { background: #fff; color: #1c1b1a; font-weight: 600; box-shadow: 0 -1px 4px rgba(0,0,0,0.08); }
-
-/* 선택한 셀 참조·행 수 같은 "지금 어디 있는지" 정보 — 스프레드시트 관례대로 화면 맨 아래에
-   둔다(예전엔 상단 툴바의 줌 컨트롤 옆에 작게 끼어 있어 눈에 잘 안 띄었다). */
-.grid-status-bar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 3px 10px;
-  background: #eceef2;
-  border-top: 1px solid #d7dae0;
-  font-size: 0.72rem;
-  color: #6b7280;
-  font-variant-numeric: tabular-nums;
-}
+   선택한 셀 참조·행 수 표시는 그 상태줄 대신 시트 탭과 같은 줄(.grid-tabs-row) 오른쪽 끝에
+   둔다 — 편집기 쪽 그 자리(오른쪽)에는 커스텀 가로 스크롤바(.grid-hscroll)가 있지만, 뷰어는
+   가상 스크롤 아키텍처를 그대로 유지하기 위해 네이티브 스크롤바를 계속 쓰므로(.grid-scroll
+   참고) 그 자리를 대신 이 정보로 채운다. */
 .grid-cell-ref { font-weight: 600; color: #3d434e; min-width: 2.5em; }
-.grid-row-info { margin-left: auto; }
+.grid-row-info { margin-left: auto; padding-bottom: 2px; }
 
 /* ---------- 그리드(엑셀) 동시편집기 ---------- */
 

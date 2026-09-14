@@ -141,16 +141,37 @@
   <main id="pages" class="pages-container"></main>
 
   <main id="grid" class="grid-container" hidden>
-    <div id="grid-head" class="grid-head"></div>
-    <div id="grid-scroll" class="grid-scroll" tabindex="0">
-      <div id="grid-inner" class="grid-inner">
-        <table id="grid-table" class="grid-table"></table>
+    <div id="grid-zoom-host">
+      <div id="grid-head" class="grid-head"></div>
+      <div id="grid-scroll" class="grid-scroll" tabindex="0">
+        <div id="grid-inner" class="grid-inner">
+          <table id="grid-table" class="grid-table"></table>
+        </div>
       </div>
     </div>
-    <div id="sheet-tabs" class="sheet-tabs" role="tablist"></div>
-    <div id="grid-status-bar" class="grid-status-bar">
-      <span id="grid-cell-ref" class="grid-cell-ref"></span>
-      <span id="grid-row-info" class="grid-row-info"></span>
+    <div class="grid-status-bar">
+      <div class="grid-tabs-row">
+        <div id="sheet-tabs" class="grid-sheet-tabs" role="tablist"></div>
+        <span id="grid-cell-ref" class="grid-cell-ref"></span>
+        <span id="grid-row-info" class="grid-row-info"></span>
+      </div>
+      <div class="grid-status-row">
+        <span id="grid-status-text" class="grid-status-text">읽기 전용</span>
+        <div class="zoom-group" role="group" aria-label="확대/축소">
+          <button id="grid-zoom-out" type="button" class="zoom-btn" title="축소" aria-label="축소">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg>
+          </button>
+          <div class="zoom-slider-track" id="grid-zoom-slider-track">
+            <div class="zoom-slider-fill" id="grid-zoom-slider-fill"></div>
+            <div class="zoom-slider-handle" id="grid-zoom-slider-handle"></div>
+          </div>
+          <button id="grid-zoom-in" type="button" class="zoom-btn" title="확대" aria-label="확대">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          </button>
+          <span class="zoom-sep"></span>
+          <span id="grid-zoom-level" class="zoom-level">100%</span>
+        </div>
+      </div>
     </div>
     <div class="grid-watermark-overlay" aria-hidden="true"></div>
   </main>

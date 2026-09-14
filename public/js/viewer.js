@@ -10,6 +10,11 @@ const pageJumpInput = document.getElementById('page-jump-input');
 const pageJumpTotal = document.getElementById('page-jump-total');
 const gridCellRefEl = document.getElementById('grid-cell-ref');
 const gridRowInfoEl = document.getElementById('grid-row-info');
+const gridZoomHostEl = document.getElementById('grid-zoom-host');
+const gridZoomLevelEl = document.getElementById('grid-zoom-level');
+const gridZoomSliderTrackEl = document.getElementById('grid-zoom-slider-track');
+const gridZoomSliderFillEl = document.getElementById('grid-zoom-slider-fill');
+const gridZoomSliderHandleEl = document.getElementById('grid-zoom-slider-handle');
 const zoomLevelLabel = document.getElementById('zoom-level');
 const printBtn = document.getElementById('print-btn');
 const downloadBtn = document.getElementById('download-btn');
@@ -1115,6 +1120,83 @@ function renderGridHead() {
   head.firstChild.style.transform = `translateX(${-scroll.scrollLeft}px)`;
 }
 
+/* ==================== 그리드 확대/축소 ====================
+ * grid-editor.ts의 확대/축소(줌 슬라이더 + [－]/[＋])와 동일한 UI·동작·범위를 그대로 옮겨온다.
+ * 편집기와 똑같이 CSS zoom을 #grid-zoom-host(헤더 행 + 스크롤 영역을 함께 감싼 래퍼)에 걸어
+ * 화면에 그려지는 픽셀만 바꾼다 — renderGridViewport()가 읽는 scroll.clientHeight/scrollTop 등은
+ * 줌이 적용되기 전 좌표계 기준 값을 그대로 돌려주므로(grid-editor.ts의 renderCountsFor 주석 참고),
+ * 열/행 폭 계산 쪽은 전혀 손댈 필요가 없고 줌이 바뀔 때마다 보이는 범위만 다시 그리면 된다. */
+const GRID_ZOOM_MIN = 0.6;
+const GRID_ZOOM_MAX = 2;
+let gridZoom = 1;
+let gridZoomRefitScheduled = false;
+
+function scheduleGridZoomRefit() {
+  if (gridZoomRefitScheduled) return;
+  gridZoomRefitScheduled = true;
+  requestAnimationFrame(() => {
+    gridZoomRefitScheduled = false;
+    if (gridState.sheets.length === 0) return;
+    renderGridViewport();
+    const headTrack = document.querySelector('.g-head-track');
+    const scroll = document.getElementById('grid-scroll');
+    if (headTrack && scroll) headTrack.style.transform = `translateX(${-scroll.scrollLeft}px)`;
+  });
+}
+
+function applyGridZoom() {
+  if (!gridZoomHostEl) return;
+  gridZoomHostEl.style.zoom = String(gridZoom);
+  if (gridZoomLevelEl) gridZoomLevelEl.textContent = `${Math.round(gridZoom * 100)}%`;
+  const ratio = (gridZoom - GRID_ZOOM_MIN) / (GRID_ZOOM_MAX - GRID_ZOOM_MIN);
+  if (gridZoomSliderFillEl) gridZoomSliderFillEl.style.width = `${ratio * 100}%`;
+  if (gridZoomSliderHandleEl) gridZoomSliderHandleEl.style.left = `${ratio * 100}%`;
+  scheduleGridZoomRefit();
+}
+
+function setGridZoomFromRatio(ratio) {
+  const clamped = Math.max(0, Math.min(1, ratio));
+  gridZoom = Math.round((GRID_ZOOM_MIN + clamped * (GRID_ZOOM_MAX - GRID_ZOOM_MIN)) * 20) / 20; // 5%p 단위로 스냅
+  applyGridZoom();
+}
+
+let gridZoomSetupDone = false;
+function setupGridZoom() {
+  if (gridZoomSetupDone) return; // initGridView는 시트 전환 시가 아니라 문서 로드 시 한 번만 불린다
+  gridZoomSetupDone = true;
+
+  document.getElementById('grid-zoom-in')?.addEventListener('click', () => {
+    gridZoom = Math.min(GRID_ZOOM_MAX, Math.round((gridZoom + 0.1) * 10) / 10);
+    applyGridZoom();
+  });
+  document.getElementById('grid-zoom-out')?.addEventListener('click', () => {
+    gridZoom = Math.max(GRID_ZOOM_MIN, Math.round((gridZoom - 0.1) * 10) / 10);
+    applyGridZoom();
+  });
+
+  function ratioFromClientX(clientX) {
+    const rect = gridZoomSliderTrackEl.getBoundingClientRect();
+    return (clientX - rect.left) / rect.width;
+  }
+  gridZoomSliderTrackEl?.addEventListener('mousedown', (event) => {
+    if (event.target === gridZoomSliderHandleEl) return; // 핸들 자체 드래그는 아래 리스너가 처리
+    setGridZoomFromRatio(ratioFromClientX(event.clientX));
+  });
+  gridZoomSliderHandleEl?.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    const onMove = (moveEvent) => setGridZoomFromRatio(ratioFromClientX(moveEvent.clientX));
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  window.addEventListener('resize', scheduleGridZoomRefit);
+  applyGridZoom();
+}
+
 function activateSheet(index) {
   gridState.active = index;
   const sheet = gridState.sheets[index];
@@ -1125,8 +1207,12 @@ function activateSheet(index) {
   for (let c = 1; c <= displayColCount(sheet); c += 1) totalWidth += colWidthAt(sheet, c);
   inner.style.width = `${GRID_ROWNUM_W + totalWidth}px`;
   const scroll = document.getElementById('grid-scroll');
+  // 시트를 바꿀 때마다 항상 A1(왼쪽 위)부터 보이도록 세로·가로 스크롤을 모두 되돌린다 — 가로
+  // 스크롤(scrollLeft)을 빼먹으면, 이전 시트를 오른쪽으로 스크롤해 둔 채로 다른 시트 탭을
+  // 누를 때 새 시트도 그 스크롤 위치 그대로(A1이 안 보이는 채로) 열리는 문제가 있었다.
   scroll.scrollTop = 0;
-  for (const [i, tab] of [...document.querySelectorAll('.sheet-tab')].entries()) {
+  scroll.scrollLeft = 0;
+  for (const [i, tab] of [...document.querySelectorAll('.grid-sheet-tab')].entries()) {
     tab.classList.toggle('active', i === index);
   }
   renderGridHead();
@@ -1273,13 +1359,18 @@ async function initGridView() {
   tabs.replaceChildren(
     ...meta.sheets.map((sheet, i) => {
       const tab = document.createElement('button');
-      tab.className = 'sheet-tab';
+      // 그리드 동시편집기(grid-editor.ts의 renderSheetTabs)와 같은 .grid-sheet-tab 모양을
+      // 그대로 쓴다 — 다만 추가(+)/이름 바꾸기/우클릭 메뉴 같은 편집 동작은 달지 않는다.
+      tab.className = 'grid-sheet-tab';
+      tab.type = 'button';
       tab.role = 'tab';
       tab.textContent = sheet.name;
       tab.addEventListener('click', () => activateSheet(i));
       return tab;
     }),
   );
+
+  setupGridZoom();
 
   const scroll = document.getElementById('grid-scroll');
   let ticking = false;
