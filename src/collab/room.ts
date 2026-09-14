@@ -765,6 +765,9 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
   // 호출은 그 시점의 "현재" canonical 데이터를 그대로 읽으므로(더 이전에 끝난 다른 호출이 이미 써둔
   // memo를 들고 오지 않으므로) 나중에 도착한 편집을 놓치지 않는다.
   const memo = new Map<string, unknown>();
+  // memo와 같은 패스 동안 공유되는 "이 칸은 순환 참조의 일부라 결과를 영구 캐시하면 안 된다"
+  // 표시 집합 — computeGridCellDisplay/computeGridCellDisplayAsync 문서 주석의 tainted 규칙 참고.
+  const tainted = new Set<string>();
   for (let start = pageStart; start < pageEnd; start += RECOMPUTE_YIELD_EVERY_N_ROWS) {
     const end = Math.min(start + RECOMPUTE_YIELD_EVERY_N_ROWS, pageEnd);
     // "이 칸이 수식인가"를 판정하려면 원본 텍스트가 필요하다 — getCell은 더티 오버레이를 먼저
@@ -795,7 +798,7 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
     // 이미 계산된 값만 동기 콜백 안에서 쓴다(seedGridPageFromXlsx가 getRow를 Promise.all로 먼저
     // 기다린 뒤 transact하는 것과 같은 패턴, xlsx/collab.ts 참고).
     const values = await Promise.all(
-      formulaCells.map(({ r, c }) => computeGridCellDisplayAsync(store, sheetIdx, r, c, new Set(), memo)),
+      formulaCells.map(({ r, c }) => computeGridCellDisplayAsync(store, sheetIdx, r, c, new Set(), memo, tainted)),
     );
     room.ydoc.transact(() => {
       for (const key of nonFormulaKeys) {

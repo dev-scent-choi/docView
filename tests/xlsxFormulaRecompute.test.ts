@@ -415,6 +415,48 @@ describe('xlsx/formulas.ts: computeGridCellDisplayAsync (LazyGridStore, cache-mi
     await fs.rm(store.rowStorePath, { force: true });
   });
 
+  // memo write-log(LayeredMemo) 회귀 테스트: 미스가 난 "더러운" 시도 도중 체인 여러 칸(B1→C1→D1)이
+  // 전부 blank(빈 칸) 취급된 A1000을 바탕으로 잘못된 중간값을 계산해 각자의 writeLog에 적어 넣는다
+  // — 이 시도는 결국 버려져야 하고(공유 memo에 절대 섞이면 안 됨), 캐시가 채워진 뒤의 "깨끗한" 마지막
+  // 시도에서 다시 계산된 올바른 값만 공유 memo에 들어가야 한다. 또한 이 호출과 무관한, 공유 memo에
+  // 이미 들어있던 다른 항목은 시도가 몇 번 버려지든 그대로 보존돼야 한다(LayeredMemo.set은 writeLog
+  // 에만 쓰고, 승격은 writeLog의 새 항목만 옮기지 base를 건드리지 않으므로).
+  test(
+    'a chain of formula cells (B1→C1→D1) that only resolves after a deeper cache-miss retry ' +
+      'promotes only the correctly-recomputed values into the shared memo, discarding whatever the ' +
+      'dirty (blank-substituted) attempt computed for those same keys along the way',
+    async () => {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      sheet.getCell('B1').value = { formula: 'A1000+1' };
+      sheet.getCell('C1').value = { formula: 'B1+1' };
+      sheet.getCell('D1').value = { formula: 'C1+1' };
+      sheet.getCell('A1000').value = 42;
+      const bytes = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+
+      const store = await ingestXlsxLazily(randomUUID(), bytes);
+      expect(store.readCache.size).toBe(0); // 캐시가 비어있는 상태로 시작 — row 0도, row 999도 미스가 난다.
+
+      // 이 호출과 무관한, 공유 memo에 이미 들어있던 항목 — 시도가 버려지고 재시도되는 과정에서
+      // 사라지거나 바뀌면 안 된다.
+      const memo = new Map<string, unknown>([['0:5:5', 'unrelated-preexisting-value']]);
+
+      const result = await computeGridCellDisplayAsync(store, 0, 0, 3, new Set(), memo); // D1
+      expect(result).toBe(45); // D1 = C1+1 = (B1+1)+1 = (A1000+1+1)+1 = 42+1+1+1
+
+      // 공유 memo에는 각 칸의 "정확한" 최종 값만 들어가 있어야 한다 — 미스가 난 더러운 시도가
+      // A1000을 빈 칸(0)으로 취급해 계산했을 B1=1/C1=2/D1=3 같은 값이 남아있으면 안 된다.
+      expect(memo.get('0:0:1')).toBe(43); // B1
+      expect(memo.get('0:0:2')).toBe(44); // C1
+      expect(memo.get('0:0:3')).toBe(45); // D1
+
+      // 무관한 기존 항목은 그대로 보존된다.
+      expect(memo.get('0:5:5')).toBe('unrelated-preexisting-value');
+
+      await fs.rm(store.rowStorePath, { force: true });
+    },
+  );
+
   test('IF() with a value-dependent branch resolves only the branch actually taken, without prefetching the other branch', async () => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Sheet1');
