@@ -1180,6 +1180,16 @@ h2 {
   white-space: nowrap;
   position: relative;
   z-index: 1;
+  /* 이 span은 "오른쪽 빈 칸들 위로 넘쳐 보이게" 하려고 그 칸들을 실제로 덮을 만큼 넓어진다
+     (applySpillDisplay가 인라인 width를 얹는다). 그래서 pointer-events를 살려 두면 그 빈 칸을
+     클릭해도 클릭이 이 span에게 먹히고, 이벤트 위임이 closest('td[data-row][data-col]')로
+     올라가며 **왼쪽(스필을 소유한) 칸**으로 해석돼 사용자가 친 값이 엉뚱한 칸에 들어갔다.
+     (옆 칸이 비었는지에 따라 스필 폭이 정해지므로, 동시편집 중 상대가 그 칸을 채웠다 지웠다
+     하면 증상이 실시간으로 나타났다 사라져 "협업 때만 생기는 버그"처럼 보였다.)
+     클릭·포커스·편집은 전부 <td> 자신의 몫이고(td가 tabIndex/contentEditable를 갖는다), 편집
+     중에는 renderCellDisplay가 이 span을 아예 만들지 않고 td에 직접 텍스트를 넣으므로, 이 span이
+     포인터 이벤트를 받아야 할 이유가 전혀 없다 — 순수하게 보여주기만 하는 요소다. */
+  pointer-events: none;
 }
 
 .grid-table .g-rownum {
