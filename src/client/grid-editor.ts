@@ -511,8 +511,17 @@ async function main(): Promise<void> {
     const sheet = structure.get(String(sheetIdx));
     if (!sheet) return;
     const colWidthOf = (c: number) => sheet.colWidths?.[c] ?? DEFAULT_COL_WIDTH_PX;
-    const colCount = renderCountsFor(sheet).cols;
-    const { anchors, covered } = buildMergeLookup(sheetIdx);
+    // renderCountsFor()는 scrollHostEl.clientWidth/clientHeight를 읽는데, 이 값들은 레이아웃이
+    // 최신 상태여야만 정확해서 브라우저가 그 자리에서 강제로 레이아웃을 다시 계산한다(forced
+    // synchronous layout). 스크롤 패치(updateScrollWindow)처럼 한 번에 수십~수백 칸을 새로 그리는
+    // 도중 renderCellDisplay→applySpillDisplay가 칸마다 이걸 부르면, DOM을 막 바꾼 직후 레이아웃을
+    // 다시 읽는 패턴(레이아웃 스래싱)이 칸 수만큼 반복되어 렌더 비용이 실측상 눈에 띄게 늘었다.
+    // 지금 칸이 속한 시트가 마지막 실제 렌더(vw* 캐시)와 같다면 그 열 수·병합 조회표를 그대로
+    // 쓴다 — 스필 폭은 어차피 "지금 화면에 그려진 레이아웃" 기준이라 매번 새로 재는 것보다 이
+    // 캐시가 더 일관되게 맞다. (시트 전환 직후처럼 캐시가 아직 안 맞을 때만 예전처럼 새로 계산한다.)
+    const useCache = vwValid && sheetIdx === vwSheetIdx;
+    const colCount = useCache ? vwRenderColCount : renderCountsFor(sheet).cols;
+    const { anchors, covered } = useCache ? { anchors: vwAnchors, covered: vwCovered } : buildMergeLookup(sheetIdx);
     let width = colWidthOf(col);
     for (let cc = col + 1; cc < colCount; cc += 1) {
       if (covered.has(`${row}:${cc}`) || anchors.has(`${row}:${cc}`)) break;
@@ -1085,6 +1094,275 @@ async function main(): Promise<void> {
     return { anchors, covered };
   }
 
+  /** ---------- 스크롤 전용 증분 패치 상태 ----------
+   * renderTableVirtualized()는 스크롤이 한 번 일어날 때마다 <colgroup>/<thead>/보이는 모든
+   * <tr>·<td>를 통째로 버리고 다시 만들었다 — 각 <td>에 붙는 5~8개의 이벤트 리스너(focus/
+   * mousedown/blur/dblclick/input/paste/compositionstart/keydown)까지 매 프레임 떼고 다시
+   * 붙이는 셈이라, 실측(Chrome longtask) 기준 한 번에 54~108ms가 걸렸다(16ms 프레임 예산의
+   * 3~6배). 스크롤만으로 인한 재호출은 "화면에 보이는 행 창(window)"만 바뀔 뿐 시트/구조/
+   * 틀고정/병합/열 폭은 그대로이므로, updateScrollWindow()가 직전에 그렸던 행 창과 새 행 창을
+   * 비교해 새로 들어온 행만 만들고 나간 행만 지우고 나머지는 기존 DOM 노드(와 거기 걸린 리스너)를
+   * 그대로 재사용한다. 시트 전환·구조 변경·확대축소처럼 실제로 다시 그려야 하는 경우는 여전히
+   * renderTableVirtualized()의 전체 재빌드를 그대로 타므로(sync/시트탭 클릭/structure.observe/
+   * scheduleViewportRefit 등은 지금처럼 renderTableVirtualized를 직접 부른다) 정확성 리스크가
+   * 없다 — 이 캐시는 "지금 화면에 그려진 것과 정확히 같은 문맥(시트/열 폭/틀고정/병합)에서
+   * 스크롤만 됐다"는 게 보장된 경우에만 쓰이고, 그 전제가 조금이라도 의심되면(vwValid===false거나
+   * 시트/열·행 수가 다르면) 곧바로 전체 재빌드로 물러난다. */
+  let vwValid = false;
+  let vwSheetIdx = -1;
+  let vwRenderColCount = 0;
+  let vwRenderRowCount = 0;
+  let vwFreezeRows = 0;
+  let vwFreezeCols = 0;
+  let vwAnchors: Map<string, { rs: number; cs: number }> = new Map();
+  let vwCovered: Set<string> = new Set();
+  let vwFirstVisible = -1;
+  let vwLastVisible = -1;
+  let vwTbody: HTMLTableSectionElement | null = null;
+  let vwTopSpacer: HTMLTableRowElement | null = null;
+  let vwBottomSpacer: HTMLTableRowElement | null = null;
+  /** r(0-based 행 번호) → 지금 DOM에 있는 그 행의 <tr> — 틀 고정 행(0..freezeRows-1)과 지금
+   * 스크롤 창 안의 행이 모두 들어있다(스페이서는 여기 포함되지 않는다 — 리스너가 없어 재사용할
+   * 이유가 없으므로 updateScrollWindow는 스페이서를 매번 새로 만든다). */
+  let vwRowEls: Map<number, HTMLTableRowElement> = new Map();
+
+  /** 화면 밖(위/아래) 구간 전체를 대신 차지하는 "안 보이는" 스페이서 한 행 — buildRow 설명 참고.
+   * rowCount<=0(그릴 게 없는 구간)이면 아예 만들지 않는다. 리스너가 없는 단순한 <tr>/<td> 한 쌍이라
+   * updateScrollWindow()도 재사용하지 않고 매번 새로 만든다(재사용을 위한 위치 계산 비용이 굳이
+   * 만드는 비용보다 크다). */
+  function buildSpacerRow(rowCount: number): HTMLTableRowElement | null {
+    if (rowCount <= 0) return null;
+    const heightPx = `${rowCount * ROW_HEIGHT_PX}px`;
+    const tr = document.createElement('tr');
+    tr.setAttribute('aria-hidden', 'true');
+    tr.style.height = heightPx;
+    const td = document.createElement('td');
+    td.colSpan = vwRenderColCount + 1; // 행번호 열까지 포함해 표 전체 폭을 덮는다
+    // .grid-edit-table th/td에 공통으로 걸린 height:1.7rem(고정 행 높이용)을 인라인 스타일로
+    // 덮어써야 스페이서가 의도한 실제 높이(수천 px일 수 있음)로 그려진다 — 인라인 스타일이
+    // 클래스 규칙보다 항상 이긴다.
+    td.style.height = heightPx;
+    td.style.padding = '0';
+    td.style.border = 'none';
+    tr.appendChild(td);
+    return tr;
+  }
+
+  /** 행 하나(<tr>)를 만든다 — 셀 생성·서식·이벤트 바인딩은 예전 renderTable과 동일하다. 이제는
+   * 틀 고정 행이든 스크롤 윈도우 안의 행이든 항상 정상 흐름(<colgroup>이 적용되는 진짜 표 행)으로
+   * 그린다 — 화면에 없는 구간은 이 함수가 아니라 buildSpacerRow가 대신 높이를 차지한다.
+   * renderTableVirtualized()의 전체 재빌드와 updateScrollWindow()의 증분 패치 양쪽에서 함께
+   * 쓰므로, 매개변수 대신 vw*(직전 렌더가 채워 둔) 캐시를 읽는다 — 두 호출부 모두 이 함수를 부르기
+   * 전에 그 캐시가 지금 그리려는 행과 같은 문맥으로 맞춰져 있음을 보장한다. */
+  function buildRow(r: number): HTMLTableRowElement {
+    const tr = document.createElement('tr');
+    // Chromium은 서로 다른 <tr> 소속인 position:sticky 셀들 사이의 z-index 비교를 신뢰할 수 없게
+    // 처리한다(고정된 행의 배경보다 스크롤된 다른 행의 셀이 위로 그려지는 버그) — 각 행을
+    // position+z-index로 그 자체의 스태킹 컨텍스트로 격리하면, 셀별 z-index는 그 행 안에서만
+    // 비교되고 행 간 우열은 이 tr의 z-index로만 결정되어 늘 정확하다.
+    tr.style.position = 'relative';
+    tr.style.zIndex = r < vwFreezeRows ? '2' : '1';
+    const rowHead = document.createElement('th');
+    rowHead.className = 'g-edit-rownum';
+    rowHead.textContent = String(r + 1);
+    rowHead.dataset.row = String(r);
+    rowHead.addEventListener('click', () => selectRow(r));
+    if (canEdit) {
+      rowHead.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        openRowContextMenu(r, event.clientX, event.clientY);
+      });
+    }
+    tr.appendChild(rowHead);
+    for (let c = 0; c < vwRenderColCount; c += 1) {
+      if (vwCovered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커 쪽에서 colspan/rowspan으로 대신 차지한다
+      const key = gridCellKey(activeSheet, r, c);
+      const td = document.createElement('td');
+      const span = vwAnchors.get(`${r}:${c}`);
+      if (span) {
+        if (span.rs > 1) td.rowSpan = span.rs;
+        if (span.cs > 1) td.colSpan = span.cs;
+      }
+      const isLocked = styles.get(key)?.lk === 1;
+      const canEditThisCell = !isLocked && canEdit;
+      // 클릭만으로는 "선택"만 되고 편집모드로 들어가지 않는다(엑셀과 동일) — 실제 편집모드는
+      // enterEditMode()가 필요할 때만 이 값을 'true'로 바꾼다. 잠긴 칸/읽기전용 문서는 애초에
+      // canEditThisCell이 false라 keydown 핸들러가 편집 진입 자체를 막는다.
+      td.contentEditable = 'false';
+      // 잠긴 칸도 화살표 키로 지나가거나 선택해서 볼 수 있어야 하므로(엑셀도 보호된 칸을 선택은
+      // 할 수 있음) 편집 가능 여부와 무관하게 모든 칸을 포커스 가능하게 만든다. tabIndex=-1은 Tab
+      // 키 순서에는 안 끼지만 클릭·프로그램적 focus()는 그대로 받는다.
+      td.tabIndex = -1;
+      if (canEditThisCell) td.classList.add('g-editable');
+      td.dataset.row = String(r);
+      td.dataset.col = String(c);
+      // 엑셀 "틀 고정" — 위 N행/왼쪽 N열은 스크롤해도 계속 보여야 한다. 실제 sticky 좌표(top/left)는
+      // 렌더링이 끝나 실제 셀 크기를 잴 수 있게 된 뒤 applyFreezePanes()에서 한 번에 계산한다.
+      if (r < vwFreezeRows) td.classList.add('g-frozen-row');
+      if (c < vwFreezeCols) td.classList.add('g-frozen-col');
+      renderCellDisplay(td, key);
+      applyStyleToTd(td, styles.get(key));
+      // 잠겨 있으면서 맨 위 행에 있고 내용이 실제로 있는 칸(제목 배너, "조회쿼리" 버튼 등)은 클릭
+      // 시 부모 창(이 문서를 iframe으로 임베드한 화면)에 알림만 보낸다 — 무엇을 보여줄지(예: 연도
+      // 목록 드롭다운, 쿼리 팝업)는 전적으로 부모 쪽 책임이다. webviewer 자신은 "연도"/"쿼리" 같은
+      // 특정 문서의 의미를 전혀 알 필요가 없고, 클릭된 칸의 위치·텍스트만 그대로 전달한다.
+      const hasContent = (cells.get(key) ?? '').trim() !== '';
+      if (isLocked && r === 0 && hasContent) {
+        td.classList.add('g-clickable-header');
+        // 맨 왼쪽(제목 배너)만 "목록에서 고른다"는 의미의 드롭다운 화살표를 보여준다 — 그 옆의
+        // 다른 클릭 가능한 칸(조회쿼리 버튼 등)은 텍스트 자체에 "(클릭)"을 넣어 알려주므로
+        // 화살표가 필요 없다.
+        if (c === 0) td.classList.add('g-header-dropdown');
+        td.addEventListener('click', () => {
+          if (window.parent !== window) {
+            // 셀의 화면상 위치(이 iframe 안에서의 좌표)를 같이 보내, 부모 쪽이 임베드한 iframe의
+            // 위치와 합쳐 팝오버를 셀 바로 밑에 자연스럽게 놓을 수 있게 한다 — webviewer는 "연도
+            // 팝오버를 어디에 그릴지" 자체는 몰라도 되고, 그저 클릭된 칸의 위치만 알려준다.
+            const rect = td.getBoundingClientRect();
+            window.parent.postMessage(
+              {
+                type: 'docview:title-click',
+                row: r,
+                col: c,
+                text: cells.get(key) ?? '',
+                rect: { top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height },
+              },
+              '*',
+            );
+          }
+        });
+      }
+      // 이 칸이 어느 "세대"(renderGeneration)에 만들어졌는지 기록해 둔다 — 아래 delegated
+      // focusout의 stale 판정에 쓰인다: 스크롤 패치(updateScrollWindow)는 살아남는 칸을 다시
+      // 만들지 않으므로 renderGeneration을 새로 올리지 않고, 그 사이 전체 재빌드가 한 번도
+      // 없었다면 이 값은 여전히 "지금" 세대와 같다 — 즉 이 판정은 "이 특정 DOM 노드가 방금
+      // 만들어졌는가"가 아니라 "마지막 전체 재빌드 이후로 편집 세션이 안전한가"를 묻는다.
+      td.dataset.gen = String(renderGeneration);
+      tr.appendChild(td);
+    }
+    return tr;
+  }
+
+  /** 이벤트 위임(delegation)에서 실제 <td>를 찾는다 — 화면에 보일 때는 스필 span(g-cell-spill)이
+   * <td> 안에 들어있어 event.target이 그 span일 수 있으므로 closest로 조상을 거슬러 올라간다. */
+  function cellFromEvent(event: Event): { td: HTMLTableCellElement; row: number; col: number; key: string } | null {
+    const target = event.target as HTMLElement | null;
+    const td = target?.closest<HTMLTableCellElement>('td[data-row][data-col]') ?? null;
+    if (!td) return null;
+    const row = Number(td.dataset.row);
+    const col = Number(td.dataset.col);
+    return { td, row, col, key: gridCellKey(activeSheet, row, col) };
+  }
+
+  /**
+   * <td>마다 5~8개씩(focus/mousedown/blur/dblclick/input/paste/compositionstart/keydown) 걸던
+   * 리스너를 표 전체에 단 한 번만 거는 위임 리스너로 대체한다 — buildRow()가 스크롤 패치
+   * (updateScrollWindow)로 자주 다시 불리므로, 리스너를 셀마다 붙였다 뗐다 하는 비용 자체를 렌더
+   * 경로에서 없앤다. 각 핸들러는 event.target에서 실제 칸을 역추적해(cellFromEvent) 예전에
+   * r/c/key/canEditThisCell 클로저로 갖고 있던 정보를 그때그때 다시 구한다(canEditThisCell은
+   * buildRow가 같은 시점에 붙여 둔 g-editable 클래스로 복원한다).
+   */
+  tableEl.addEventListener('focusin', (event) => {
+    const hit = cellFromEvent(event);
+    if (!hit) return;
+    const { td, row: r, col: c, key } = hit;
+    const canEditThisCell = td.classList.contains('g-editable');
+    activeCellKey = key;
+    selAnchorRow = r;
+    selAnchorCol = c;
+    selFocusRow = r;
+    selFocusCol = c;
+    renderRangeHighlight();
+    syncCellToolbarState(key);
+    setActiveHeaders(r, c);
+    cellRefBoxEl.textContent = cellRefLabel(r, c);
+    formulaInputEl.value = cells.get(key) ?? '';
+    positionFillHandle(canEditThisCell ? td : null);
+  });
+  // 다중 셀 드래그 선택 시작 — 편집 중인 칸 안에서는 텍스트 드래그 선택이 우선이라 건드리지 않는다.
+  tableEl.addEventListener('mousedown', (event) => {
+    if (event.button !== 0) return;
+    const hit = cellFromEvent(event);
+    if (!hit) return;
+    const { td, row: r, col: c, key } = hit;
+    if (editingKey === key) return;
+    // 기본 동작을 그대로 두면 브라우저가 "텍스트 드래그 선택"도 같이 시작해버린다 — 그건 사각형이
+    // 아니라 문서(행) 순서로 훑어서, 계산한 범위보다 훨씬 넓게(중간 행의 다른 칸까지) 파랗게/회색으로
+    // 잡혀 보인다. preventDefault로 그 기본 동작을 끄고, 그때 같이 꺼지는 포커스만 아래에서 직접
+    // 다시 걸어준다.
+    event.preventDefault();
+    clearHeaderSelection();
+    selAnchorRow = r;
+    selAnchorCol = c;
+    selFocusRow = r;
+    selFocusCol = c;
+    isRangeDragging = true;
+    renderRangeHighlight();
+    td.focus();
+    document.addEventListener('mousemove', onRangeDragMove);
+    document.addEventListener('mouseup', onRangeDragEnd);
+  });
+  // focus의 위임 버전인 focusin과 대칭으로, blur 대신 focusout(버블링됨)에 건다 — 이미 아래에
+  // "그리드 영역을 완전히 벗어났는지"만 보는 별개의 focusout 리스너가 있고, 이건 그것과 별도로
+  // "이 칸이 편집 중이었다면 커밋한다"만 담당한다.
+  tableEl.addEventListener('focusout', (event) => {
+    const hit = cellFromEvent(event);
+    if (!hit) return;
+    const { td, key } = hit;
+    if (editingKey !== key) return; // 편집 중이 아니었으면(그냥 선택만) 커밋할 것이 없다
+    // 붙여넣기/자동채우기로 시트 범위(rowCount/colCount)가 늘어나거나 스크롤로 가상 렌더가 다시
+    // 그리면 renderTableVirtualized()가 트랜잭션 도중 동기적으로 표 전체를 다시 그리며 이 <td>를
+    // DOM에서 떼어내는데, 포커스가 있던 칸이 떨어져 나가면 브라우저가 focusout을 보낸다 — 그
+    // 시점의 td.textContent는 그 작업 "전" 값이라, 그대로 commitCell을 부르면 방금 쓴 값을
+    // 덮어써 버린다. 제거 시점과 focusout 디스패치 시점이 완전히 동기적이진 않아 isConnected만으로는
+    // 못 거르므로, "이 칸이 만들어진 세대"가 지금도 최신인지로 판정한다(buildRow의 data-gen 참고).
+    const cellGeneration = Number(td.dataset.gen);
+    if (cellGeneration !== renderGeneration) {
+      editingKey = null;
+      provider.awareness.setLocalStateField('cell', null);
+      return;
+    }
+    commitCell(td);
+    editingKey = null;
+    provider.awareness.setLocalStateField('cell', null);
+    td.contentEditable = 'false';
+    renderCellDisplay(td, key); // 편집 종료 — 수식이면 계산 결과로 되돌린다
+    recalcFormulaCells(); // 이 셀 값이 바뀌었으니 이를 참조하는 다른 수식 셀도 갱신
+    setGridStatusText('준비');
+    flushPendingStructureRender(); // 편집 중이라 미뤄 뒀던 구조 변경이 있으면 지금 반영한다
+  });
+  tableEl.addEventListener('dblclick', (event) => {
+    const hit = cellFromEvent(event);
+    if (!hit || !hit.td.classList.contains('g-editable')) return;
+    enterEditMode(hit.td, hit.key);
+  });
+  tableEl.addEventListener('input', (event) => {
+    const hit = cellFromEvent(event);
+    if (!hit || !hit.td.classList.contains('g-editable')) return;
+    if (activeCellKey === hit.key) formulaInputEl.value = hit.td.textContent ?? '';
+  });
+  tableEl.addEventListener('paste', (event) => {
+    const hit = cellFromEvent(event);
+    if (!hit || !hit.td.classList.contains('g-editable')) return;
+    handlePaste(event, hit.td);
+  });
+  // 셀을 선택만 한 채(더블클릭 없이) 바로 한글 등 IME 문자를 치는 경우 — 조합 중인 글자는 keydown의
+  // event.key가 길이 1이 아니라("Process" 등) handleCellKeydown의 "글자 하나 치면 편집모드 진입"
+  // 분기를 못 타서, 셀이 그대로 선택 상태에 머물며 입력이 통째로 사라졌었다. compositionstart
+  // 시점에 직접 편집모드로 들어가면(내용은 비워서 시작 — 엑셀처럼 선택된 채 타이핑하면 기존 값을
+  // 덮어쓴다) 그 뒤 IME 조합이 이 칸에서 이어진다.
+  tableEl.addEventListener('compositionstart', (event) => {
+    const hit = cellFromEvent(event);
+    if (!hit || !hit.td.classList.contains('g-editable')) return;
+    if (editingKey !== hit.key) enterEditMode(hit.td, hit.key, '');
+  });
+  tableEl.addEventListener('keydown', (event) => {
+    const hit = cellFromEvent(event);
+    if (!hit) return;
+    const canEditThisCell = hit.td.classList.contains('g-editable');
+    handleCellKeydown(event, hit.td, hit.row, hit.col, hit.key, canEditThisCell);
+  });
+
   /** 전체 행만큼 <tr>을 만들던 예전 renderTable()을 대체한다 — 시트가 아무리 커도 실제 DOM에는
    * "지금 보이는 범위 + 여유분(OVERSCAN_ROWS)"만큼의 행만 만든다.
    *
@@ -1118,6 +1396,10 @@ async function main(): Promise<void> {
     const scrollTopSnapshot = scrollHostEl.scrollTop;
     const viewportHeightSnapshot = scrollHostEl.clientHeight;
     const sheet = structure.get(String(activeSheet));
+    // 전체 재빌드가 시작되면 지금까지의 증분 패치 캐시(vw*)는 곧 통째로 버려질 DOM을 가리키게
+    // 되므로 즉시 무효화한다 — 이 함수가 아래서 일찍 return하더라도(sheet 없음) updateScrollWindow가
+    // 낡은 참조로 패치를 시도하지 않고 안전하게 다시 전체 재빌드로 물러난다.
+    vwValid = false;
     tableEl.replaceChildren();
     if (!sheet) return;
 
@@ -1127,6 +1409,16 @@ async function main(): Promise<void> {
     // freezeRows는 항상 정상 흐름으로 그려지므로, 실제 렌더 행 수를 넘지 않게 안전하게 자른다.
     const freezeRows = Math.min(sheet.freezeRows ?? 0, renderRowCount);
     const freezeCols = sheet.freezeCols ?? 0;
+    // 아래 buildRow/buildSpacerRow(hoisted)는 이 문맥을 매개변수가 아니라 vw* 캐시로 읽는다 — 이
+    // 재빌드가 끝난 뒤 updateScrollWindow()가 스크롤만으로 인한 재호출에서 같은 캐시를 그대로
+    // 재사용해 전체 재빌드를 건너뛸 수 있게 하기 위해서다.
+    vwSheetIdx = activeSheet;
+    vwRenderColCount = renderColCount;
+    vwRenderRowCount = renderRowCount;
+    vwFreezeRows = freezeRows;
+    vwFreezeCols = freezeCols;
+    vwAnchors = anchors;
+    vwCovered = covered;
 
     // table-layout:fixed에서 열 너비를 정확히 고정하려면 <colgroup>이 가장 확실하다(그 전까진
     // 첫 번째 행 셀 너비에 의존해 왔음 — 실제 엑셀 열 너비 정보가 없던 시절의 임시 방편이었다).
@@ -1188,197 +1480,25 @@ async function main(): Promise<void> {
 
     const tbody = document.createElement('tbody');
 
-    /** 스크롤 범위 밖이라 실제로 그리지 않는 구간(위/아래) 전체를 대신 차지하는 "안 보이는" <tr>
-     * 하나. 진짜 데이터 행이 하나도 없으니 렌더 비용은 사실상 없고, 정상 흐름의 <tr>이라 표의
-     * 전체 스크롤 높이에 이 구간만큼을 정확히 더해 준다. rowCount<=0(그릴 게 없는 구간, 예: 이미
-     * 맨 위/맨 아래까지 다 보이는 경우)이면 아예 만들지 않는다. */
-    const buildSpacerRow = (rowCount: number): HTMLTableRowElement | null => {
-      if (rowCount <= 0) return null;
-      const heightPx = `${rowCount * ROW_HEIGHT_PX}px`;
-      const tr = document.createElement('tr');
-      tr.setAttribute('aria-hidden', 'true');
-      tr.style.height = heightPx;
-      const td = document.createElement('td');
-      td.colSpan = renderColCount + 1; // 행번호 열까지 포함해 표 전체 폭을 덮는다
-      // .grid-edit-table th/td에 공통으로 걸린 height:1.7rem(고정 행 높이용)을 인라인 스타일로
-      // 덮어써야 스페이서가 의도한 실제 높이(수천 px일 수 있음)로 그려진다 — 인라인 스타일이
-      // 클래스 규칙보다 항상 이긴다.
-      td.style.height = heightPx;
-      td.style.padding = '0';
-      td.style.border = 'none';
-      tr.appendChild(td);
-      return tr;
-    };
-
-    /** 행 하나(<tr>)를 만든다 — 셀 생성·서식·이벤트 바인딩은 예전 renderTable과 동일하다. 이제는
-     * 틀 고정 행이든 스크롤 윈도우 안의 행이든 항상 정상 흐름(<colgroup>이 적용되는 진짜 표 행)으로
-     * 그린다 — 화면에 없는 구간은 이 함수가 아니라 buildSpacerRow가 대신 높이를 차지한다. */
-    const buildRow = (r: number): HTMLTableRowElement => {
-      const tr = document.createElement('tr');
-      // Chromium은 서로 다른 <tr> 소속인 position:sticky 셀들 사이의 z-index 비교를 신뢰할 수 없게
-      // 처리한다(고정된 행의 배경보다 스크롤된 다른 행의 셀이 위로 그려지는 버그) — 각 행을
-      // position+z-index로 그 자체의 스태킹 컨텍스트로 격리하면, 셀별 z-index는 그 행 안에서만
-      // 비교되고 행 간 우열은 이 tr의 z-index로만 결정되어 늘 정확하다.
-      tr.style.position = 'relative';
-      tr.style.zIndex = r < freezeRows ? '2' : '1';
-      const rowHead = document.createElement('th');
-      rowHead.className = 'g-edit-rownum';
-      rowHead.textContent = String(r + 1);
-      rowHead.dataset.row = String(r);
-      rowHead.addEventListener('click', () => selectRow(r));
-      if (canEdit) {
-        rowHead.addEventListener('contextmenu', (event) => {
-          event.preventDefault();
-          openRowContextMenu(r, event.clientX, event.clientY);
-        });
-      }
-      tr.appendChild(rowHead);
-      for (let c = 0; c < renderColCount; c += 1) {
-        if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커 쪽에서 colspan/rowspan으로 대신 차지한다
-        const key = gridCellKey(activeSheet, r, c);
-        const td = document.createElement('td');
-        const span = anchors.get(`${r}:${c}`);
-        if (span) {
-          if (span.rs > 1) td.rowSpan = span.rs;
-          if (span.cs > 1) td.colSpan = span.cs;
-        }
-        const isLocked = styles.get(key)?.lk === 1;
-        const canEditThisCell = !isLocked && canEdit;
-        // 클릭만으로는 "선택"만 되고 편집모드로 들어가지 않는다(엑셀과 동일) — 실제 편집모드는
-        // enterEditMode()가 필요할 때만 이 값을 'true'로 바꾼다. 잠긴 칸/읽기전용 문서는 애초에
-        // canEditThisCell이 false라 keydown 핸들러가 편집 진입 자체를 막는다.
-        td.contentEditable = 'false';
-        // 잠긴 칸도 화살표 키로 지나가거나 선택해서 볼 수 있어야 하므로(엑셀도 보호된 칸을 선택은
-        // 할 수 있음) 편집 가능 여부와 무관하게 모든 칸을 포커스 가능하게 만든다. tabIndex=-1은 Tab
-        // 키 순서에는 안 끼지만 클릭·프로그램적 focus()는 그대로 받는다.
-        td.tabIndex = -1;
-        if (canEditThisCell) td.classList.add('g-editable');
-        td.dataset.row = String(r);
-        td.dataset.col = String(c);
-        // 엑셀 "틀 고정" — 위 N행/왼쪽 N열은 스크롤해도 계속 보여야 한다. 실제 sticky 좌표(top/left)는
-        // 렌더링이 끝나 실제 셀 크기를 잴 수 있게 된 뒤 applyFreezePanes()에서 한 번에 계산한다.
-        if (r < freezeRows) td.classList.add('g-frozen-row');
-        if (c < freezeCols) td.classList.add('g-frozen-col');
-        renderCellDisplay(td, key);
-        applyStyleToTd(td, styles.get(key));
-        // 잠겨 있으면서 맨 위 행에 있고 내용이 실제로 있는 칸(제목 배너, "조회쿼리" 버튼 등)은 클릭
-        // 시 부모 창(이 문서를 iframe으로 임베드한 화면)에 알림만 보낸다 — 무엇을 보여줄지(예: 연도
-        // 목록 드롭다운, 쿼리 팝업)는 전적으로 부모 쪽 책임이다. webviewer 자신은 "연도"/"쿼리" 같은
-        // 특정 문서의 의미를 전혀 알 필요가 없고, 클릭된 칸의 위치·텍스트만 그대로 전달한다.
-        const hasContent = (cells.get(key) ?? '').trim() !== '';
-        if (isLocked && r === 0 && hasContent) {
-          td.classList.add('g-clickable-header');
-          // 맨 왼쪽(제목 배너)만 "목록에서 고른다"는 의미의 드롭다운 화살표를 보여준다 — 그 옆의
-          // 다른 클릭 가능한 칸(조회쿼리 버튼 등)은 텍스트 자체에 "(클릭)"을 넣어 알려주므로
-          // 화살표가 필요 없다.
-          if (c === 0) td.classList.add('g-header-dropdown');
-          td.addEventListener('click', () => {
-            if (window.parent !== window) {
-              // 셀의 화면상 위치(이 iframe 안에서의 좌표)를 같이 보내, 부모 쪽이 임베드한 iframe의
-              // 위치와 합쳐 팝오버를 셀 바로 밑에 자연스럽게 놓을 수 있게 한다 — webviewer는 "연도
-              // 팝오버를 어디에 그릴지" 자체는 몰라도 되고, 그저 클릭된 칸의 위치만 알려준다.
-              const rect = td.getBoundingClientRect();
-              window.parent.postMessage(
-                {
-                  type: 'docview:title-click',
-                  row: r,
-                  col: c,
-                  text: cells.get(key) ?? '',
-                  rect: { top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height },
-                },
-                '*',
-              );
-            }
-          });
-        }
-        const cellGeneration = renderGeneration;
-
-        // 포커스 = "선택"이다(엑셀처럼 클릭 한 번은 선택만, 편집모드가 아님) — 잠긴 칸도 포함해
-        // 모든 칸에 건다. 편집 가능한 칸일 때만 채우기 핸들을 그 칸 오른쪽 아래에 놓는다.
-        td.addEventListener('focus', () => {
-          activeCellKey = key;
-          selAnchorRow = r;
-          selAnchorCol = c;
-          selFocusRow = r;
-          selFocusCol = c;
-          renderRangeHighlight();
-          syncCellToolbarState(key);
-          setActiveHeaders(r, c);
-          cellRefBoxEl.textContent = cellRefLabel(r, c);
-          formulaInputEl.value = cells.get(key) ?? '';
-          positionFillHandle(canEditThisCell ? td : null);
-        });
-        // 다중 셀 드래그 선택 시작 — 편집 중인 칸 안에서는 텍스트 드래그 선택이 우선이라 건드리지 않는다.
-        td.addEventListener('mousedown', (event) => {
-          if (event.button !== 0 || editingKey === key) return;
-          // 기본 동작을 그대로 두면 브라우저가 "텍스트 드래그 선택"도 같이 시작해버린다 — 그건
-          // 사각형이 아니라 문서(행) 순서로 훑어서, 내가 계산한 범위보다 훨씬 넓게(중간 행의 다른
-          // 칸까지) 파랗게/회색으로 잡혀 보인다. preventDefault로 그 기본 동작을 끄고, 그때 같이
-          // 꺼지는 포커스만 아래에서 직접 다시 걸어준다.
-          event.preventDefault();
-          clearHeaderSelection();
-          selAnchorRow = r;
-          selAnchorCol = c;
-          selFocusRow = r;
-          selFocusCol = c;
-          isRangeDragging = true;
-          renderRangeHighlight();
-          td.focus();
-          document.addEventListener('mousemove', onRangeDragMove);
-          document.addEventListener('mouseup', onRangeDragEnd);
-        });
-        td.addEventListener('blur', () => {
-          if (editingKey !== key) return; // 편집 중이 아니었으면(그냥 선택만) 커밋할 것이 없다
-          // 붙여넣기/자동채우기로 시트 범위(rowCount/colCount)가 늘어나거나 스크롤로 가상 렌더가
-          // 다시 그리면 renderTableVirtualized()가 트랜잭션 도중 동기적으로 표 전체를 다시 그리며
-          // 이 <td>를 DOM에서 떼어내는데, 포커스가 있던 칸이 떨어져 나가면 브라우저가 blur를
-          // 보낸다 — 그 시점의 td.textContent는 그 작업 "전" 값이라, 그대로 commitCell을 부르면
-          // 방금 쓴 값을 덮어써 버린다. 제거 시점과 blur 디스패치 시점이 완전히 동기적이진 않아
-          // isConnected만으로는 못 거르므로, "이 칸이 만들어진 세대"가 지금도 최신인지로 판정한다.
-          if (cellGeneration !== renderGeneration) {
-            editingKey = null;
-            provider.awareness.setLocalStateField('cell', null);
-            return;
-          }
-          commitCell(td);
-          editingKey = null;
-          provider.awareness.setLocalStateField('cell', null);
-          td.contentEditable = 'false';
-          renderCellDisplay(td, key); // 편집 종료 — 수식이면 계산 결과로 되돌린다
-          recalcFormulaCells(); // 이 셀 값이 바뀌었으니 이를 참조하는 다른 수식 셀도 갱신
-          setGridStatusText('준비');
-          flushPendingStructureRender(); // 편집 중이라 미뤄 뒀던 구조 변경이 있으면 지금 반영한다
-
-        });
-        if (canEditThisCell) {
-          td.addEventListener('dblclick', () => enterEditMode(td, key));
-          td.addEventListener('input', () => {
-            if (activeCellKey === key) formulaInputEl.value = td.textContent ?? '';
-          });
-          td.addEventListener('paste', (event) => handlePaste(event, td));
-          // 셀을 선택만 한 채(더블클릭 없이) 바로 한글 등 IME 문자를 치는 경우 — 조합 중인 글자는
-          // keydown의 event.key가 길이 1이 아니라("Process" 등) 아래 handleCellKeydown의 "글자 하나
-          // 치면 편집모드 진입" 분기를 못 타서, 셀이 그대로 선택 상태에 머물며 입력이 통째로
-          // 사라졌었다. compositionstart 시점에 직접 편집모드로 들어가면(내용은 비워서 시작 —
-          // 엑셀처럼 선택된 채 타이핑하면 기존 값을 덮어쓴다) 그 뒤 IME 조합이 이 칸에서 이어진다.
-          td.addEventListener('compositionstart', () => {
-            if (editingKey !== key) enterEditMode(td, key, '');
-          });
-        }
-        td.addEventListener('keydown', (event) => handleCellKeydown(event, td, r, c, key, canEditThisCell));
-        tr.appendChild(td);
-      }
-      return tr;
-    };
-
     // 틀 고정된 위쪽 행은 항상 정상 흐름으로(스크롤 위치와 무관하게 계속 보이도록) 그린다. 그
     // 아래, 화면 밖(위쪽)에 있는 안 그리는 구간은 스페이서 행 하나로 대신하고, 실제로 보이는
     // 범위(+여유분)만 진짜 행으로 그린 뒤, 화면 밖(아래쪽) 나머지 구간도 스페이서 행 하나로
-    // 마무리한다. firstVisible은 이미 freezeRows 이상으로 보정돼 있다.
-    for (let r = 0; r < freezeRows; r += 1) tbody.appendChild(buildRow(r));
+    // 마무리한다. firstVisible은 이미 freezeRows 이상으로 보정돼 있다. buildRow가 만든 각 <tr>은
+    // vwRowEls에도 기록해 둔다 — 이후 스크롤만으로 인한 재호출(updateScrollWindow)이 이 행들을
+    // 재사용할 수 있게 하기 위해서다.
+    const newRowEls = new Map<number, HTMLTableRowElement>();
+    for (let r = 0; r < freezeRows; r += 1) {
+      const tr = buildRow(r);
+      newRowEls.set(r, tr);
+      tbody.appendChild(tr);
+    }
     const topSpacer = buildSpacerRow(firstVisible - freezeRows);
     if (topSpacer) tbody.appendChild(topSpacer);
-    for (let r = firstVisible; r <= lastVisible; r += 1) tbody.appendChild(buildRow(r));
+    for (let r = firstVisible; r <= lastVisible; r += 1) {
+      const tr = buildRow(r);
+      newRowEls.set(r, tr);
+      tbody.appendChild(tr);
+    }
     const bottomSpacer = buildSpacerRow(renderRowCount - 1 - lastVisible);
     if (bottomSpacer) tbody.appendChild(bottomSpacer);
     tableEl.appendChild(tbody);
@@ -1387,6 +1507,15 @@ async function main(): Promise<void> {
     // 위치가 실제로 유효한 범위 안이라 clamp되지 않고 그대로 반영된다. 이미 같은 값이면 실제
     // 스크롤 이벤트가 다시 발생하지 않도록(불필요한 재렌더 방지) 값이 다를 때만 대입한다.
     if (scrollHostEl.scrollTop !== scrollTopSnapshot) scrollHostEl.scrollTop = scrollTopSnapshot;
+    // 이 전체 재빌드가 방금 그린 것을 스크롤 전용 증분 패치(updateScrollWindow)가 이어받을 수
+    // 있도록 캐시를 채운다 — vwValid는 여기서 성공적으로 다 그린 뒤에만 true가 된다.
+    vwTbody = tbody;
+    vwTopSpacer = topSpacer;
+    vwBottomSpacer = bottomSpacer;
+    vwRowEls = newRowEls;
+    vwFirstVisible = firstVisible;
+    vwLastVisible = lastVisible;
+    vwValid = true;
     applyFreezePanes(freezeRows, freezeCols);
     renderRemoteCellHighlights();
     if (activeCellKey) {
@@ -1404,6 +1533,97 @@ async function main(): Promise<void> {
     // 시트 전환·구조 변경·스크롤로 인한 재렌더 등 renderTableVirtualized가 불리는 모든 경로를
     // 여기 한 곳에서 커버한다(각 호출부에 일일이 추가하는 것보다 누락 위험이 적다).
     scheduleSubscriptionUpdate();
+  }
+
+  /**
+   * 스크롤"만"으로 인한 재렌더 전용 — renderTableVirtualized()의 가벼운 대체판. <colgroup>/
+   * <thead>는 스크롤로 바뀌지 않으므로 아예 건드리지 않고, tbody의 "행 창"도 직전에 그렸던 범위와
+   * 겹치는 부분은 기존 <tr>(과 거기 달린 이벤트 리스너)을 그대로 두고, 창 밖으로 나간 행만 지우고
+   * 새로 들어온 행만 만들어 끼워 넣는다. 이번 문맥이 직전 전체 재빌드 때와 정확히 같다는 확신이
+   * 없으면(시트가 바뀌었다거나, 열/행 수가 달라졌다거나, tbody가 더 이상 표 안에 없다거나) 안전하게
+   * renderTableVirtualized()의 전체 재빌드로 물러난다 — 그 판정 자체는 값 비교뿐이라 비용이 거의
+   * 없으므로 "혹시 몰라서" 지나치게 자주 물러나도 손해는 아니다.
+   */
+  function updateScrollWindow(): void {
+    if (!vwValid || !vwTbody || vwTbody.parentNode !== tableEl || vwSheetIdx !== activeSheet) {
+      renderTableVirtualized();
+      return;
+    }
+    const sheet = structure.get(String(activeSheet));
+    if (!sheet) {
+      renderTableVirtualized();
+      return;
+    }
+    const { rows: renderRowCount, cols: renderColCount } = renderCountsFor(sheet);
+    // 열/행 렌더 수가 달라졌다는 건 구조·확대율·창 크기 중 뭔가 바뀌었다는 뜻 — 그런 변경은 전부
+    // 자기 경로에서 이미 renderTableVirtualized()를 직접 부르므로(structure.observe,
+    // scheduleViewportRefit 등) 정상적으로는 여기서 다를 일이 없지만, 방어적으로 확인한다.
+    if (renderRowCount !== vwRenderRowCount || renderColCount !== vwRenderColCount) {
+      renderTableVirtualized();
+      return;
+    }
+
+    const freezeRows = vwFreezeRows;
+    const scrollTop = scrollHostEl.scrollTop;
+    const viewportHeight = scrollHostEl.clientHeight;
+    const firstVisible = Math.max(freezeRows, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN_ROWS);
+    const lastVisible = Math.min(
+      renderRowCount - 1,
+      Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT_PX) + OVERSCAN_ROWS,
+    );
+    if (firstVisible === vwFirstVisible && lastVisible === vwLastVisible) return; // 창이 그대로면 할 일 없음
+
+    const tbody = vwTbody;
+    // 스페이서는 리스너 없는 <tr>/<td> 한 쌍이라 재사용을 위한 위치 계산보다 새로 만드는 쪽이 싸다
+    // — 매번 지우고 끝에서 다시 만든다(실제로 비싼 건 아래에서 그대로 두는 데이터 행이다).
+    vwTopSpacer?.remove();
+    vwBottomSpacer?.remove();
+
+    // 창 밖으로 나간 행 제거(틀 고정 행은 스크롤과 무관하게 항상 남는다) — Map 이터레이션 도중
+    // 지금 방문 중이거나 이미 지나간 항목을 delete하는 것은 안전하다(사양대로 동작).
+    for (const [r, tr] of vwRowEls) {
+      if (r < freezeRows) continue;
+      if (r < firstVisible || r > lastVisible) {
+        tr.remove();
+        vwRowEls.delete(r);
+      }
+    }
+
+    // 남아있는 행은 건드리지 않고, 새로 창에 들어온 행만 만들어 순서를 지켜 끼워 넣는다 — 앵커를
+    // 오름차순으로 이어가며 "직전에 처리한(기존 또는 방금 만든) 행 바로 뒤"에 놓는다.
+    let anchor: ChildNode | null = freezeRows > 0 ? vwRowEls.get(freezeRows - 1) ?? null : null;
+    for (let r = firstVisible; r <= lastVisible; r += 1) {
+      const existing = vwRowEls.get(r);
+      if (existing) {
+        anchor = existing;
+        continue;
+      }
+      const tr = buildRow(r);
+      if (anchor) anchor.after(tr);
+      else tbody.insertBefore(tr, tbody.firstChild);
+      vwRowEls.set(r, tr);
+      anchor = tr;
+    }
+
+    const topSpacer = buildSpacerRow(firstVisible - freezeRows);
+    if (topSpacer) {
+      const firstWindowRow = vwRowEls.get(firstVisible) ?? null;
+      if (firstWindowRow) tbody.insertBefore(topSpacer, firstWindowRow);
+      else tbody.appendChild(topSpacer); // 방어적 처리 — 이론상 창이 비어 있을 때만 여기로 온다
+    }
+    const bottomSpacer = buildSpacerRow(renderRowCount - 1 - lastVisible);
+    if (bottomSpacer) tbody.appendChild(bottomSpacer); // 항상 마지막 자식이 맞다(그 뒤엔 아무것도 없다)
+    vwTopSpacer = topSpacer;
+    vwBottomSpacer = bottomSpacer;
+    vwFirstVisible = firstVisible;
+    vwLastVisible = lastVisible;
+
+    // 틀 고정 "열"은 스크롤 창 밖에 있던 새 행의 셀에도 sticky left를 걸어야 한다(틀 고정 행은
+    // 창 밖으로 나가지 않으니 다시 계산할 필요가 없다 — applyFreezePanes는 두 축을 한 번에
+    // 처리하지만 freezeRows>0 branch는 이미 있는 고정 행만 다시 훑어 idempotent하다). 틀 고정을
+    // 아예 안 쓰는 보통 시트에서는 이 함수가 즉시 리턴해 비용이 없다.
+    if (freezeRows > 0 || vwFreezeCols > 0) applyFreezePanes(freezeRows, vwFreezeCols);
+    renderRemoteCellHighlights();
   }
 
   // ---------- 셀 선택 vs 편집모드, 방향키 이동 (엑셀과 동일하게) ----------
@@ -2557,6 +2777,13 @@ async function main(): Promise<void> {
   // 떼어내며 강제로 blur를 발생시켜 방금 타이핑한 값을 잃을 수 있어(위 블러 핸들러의 세대 판정이
   // 그런 blur를 "커밋하지 않고 버림" 처리한다) 재렌더 자체를 건너뛴다 — 스크롤은 계속되고, 편집이
   // 끝나면(다음 스크롤이나 다른 재렌더 트리거에서) 화면이 다시 맞춰진다.
+  //
+  // renderTableVirtualized() 전체 재빌드 대신 updateScrollWindow()를 부른다 — 실측(Chrome
+  // longtask) 기준 전체 재빌드는 스크롤 프레임 하나에 54~108ms(16ms 프레임 예산의 3~6배)가 걸려
+  // 스크롤이 버벅이며 의도한 만큼 이동하지 않는 원인이었다. updateScrollWindow는 같은 문맥(시트/
+  // 열 폭/틀고정/병합)에서 스크롤만 일어난 경우 <colgroup>/<thead>/창 안에서 안 바뀐 행은 그대로
+  // 두고 창 가장자리에서 나가고 들어온 행만 patch한다 — 문맥이 조금이라도 의심되면 알아서
+  // renderTableVirtualized()로 물러나므로 안전하다.
   let scrollRenderScheduled = false;
   scrollHostEl.addEventListener('scroll', () => {
     scheduleSubscriptionUpdate();
@@ -2566,7 +2793,7 @@ async function main(): Promise<void> {
     requestAnimationFrame(() => {
       scrollRenderScheduled = false;
       if (editingKey !== null) return;
-      renderTableVirtualized();
+      updateScrollWindow();
     });
   });
   document.getElementById('hscroll-left')?.addEventListener('click', () => {
