@@ -231,6 +231,24 @@ async function makeStyledXlsx(): Promise<Buffer> {
   return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
 }
 
+/**
+ * 1000행(= 페이지 0과 1) 시트 — **A1에 원본 파일에서부터 서식이 여러 겹 걸려 있다**(굵게 +
+ * 기울임 + 노란 배경). 서식 편집이 도착했을 때 "원래 있던 나머지 서식"이 살아남는지를 보려면
+ * 편집으로 들어오는 속성(굵게) 말고도 잃을 것이 있어야 한다.
+ */
+async function makeRichlyStyledXlsx(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  for (let r = 1; r <= 1000; r += 1) sheet.getCell(r, 1).value = r === 1 ? 'title' : `row-${r}`;
+  sheet.getCell(1, 1).font = { bold: true, italic: true };
+  sheet.getCell(1, 1).fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFFF00' },
+  } as ExcelJS.FillPattern;
+  return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+}
+
 async function seedDoc(docId: string, original: Buffer): Promise<void> {
   const { store } = await import('../src/storage.js');
   await store.saveOriginal(docId, 'xlsx', original);
@@ -683,6 +701,104 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
       // 되돌아가지 않고 편집된 그대로 되살아난다(데이터 손실 없음).
       expect(styles.get(gridCellKey(0, 0, 0))?.b).toBe(1);
       expect(styles.get(gridCellKey(0, 1, 0))?.i).toBe(1);
+    },
+    60_000,
+  );
+
+  test(
+    'applying a style to a cell whose page has NOT been seeded yet preserves the cell\'s original formatting ' +
+      '(the client\'s read-modify-write starts from an empty view — the server must not take that as "no style")',
+    async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+      const { joinEditSession, getRoomLazyGridForTest, getCurrentBytes } = await import('../src/collab/room.js');
+      const { GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+      const { getCell } = await import('../src/xlsx/lazyGridStore.js');
+
+      const docId = randomUUID();
+      await seedDoc(docId, await makeRichlyStyledXlsx());
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      await flushEventLoop();
+
+      // **일부러 아무 페이지도 구독하지 않는다** — 서식이 콘텐츠와 함께 윈도잉된 뒤로 생긴
+      // 실제 경쟁 구간을 그대로 재현한다: 브라우저에는 그 칸이 이미 그려져 있는데 서버가 아직
+      // 그 페이지를 Yjs에 채우지 않은 순간. 그때 클라이언트의 읽고-고쳐-쓰기
+      // (`const current = styles.get(key) ?? {}` → 속성 하나 얹기 → `styles.set`)는 **빈 객체**를
+      // 바탕으로 굴러가므로, 서버에 도착하는 것은 "굵게" 하나뿐이다.
+      expect(socket.mirror.getMap(GRID_STYLES_MAP).size).toBe(0);
+      sendMapEdit(socket, GRID_STYLES_MAP, gridCellKey(0, 0, 0), { b: 1 });
+      await flushEventLoop();
+
+      // 서버는 그 편집을 **canonical에 이미 있는 서식 위에** 얹어야 한다 — 통째로 갈아치우면
+      // 원본의 배경색·기울임·표시 형식이 조용히 사라지고, 그 결과가 dirtyOverlay를 타고
+      // **저장되는 파일까지** 간다(이 프로젝트가 절대 용납하지 않는 원본 유실).
+      const lazyGrid = getRoomLazyGridForTest(docId)!;
+      const cell = await getCell(lazyGrid, 0, 0, 0);
+      expect(cell).not.toBe(0);
+      const styleIndex = (cell as { s?: number }).s;
+      expect(styleIndex).toBeDefined();
+      const style = lazyGrid.styles[styleIndex!];
+      expect(style.b).toBe(1); // 방금 적용한 굵게
+      expect(style.i).toBe(1); // 원본 기울임 — 예전 구현에서는 여기서 사라졌다
+      expect(style.bg?.toUpperCase()).toContain('FFFF00'); // 원본 배경색
+
+      // 저장 파일까지 확인한다 — 이 결함은 "화면은 멀쩡한데 파일에서 서식이 사라지는" 모양이다.
+      const bytes = await getCurrentBytes(docId);
+      expect(bytes).not.toBeNull();
+      const reopened = new ExcelJS.Workbook();
+      await reopened.xlsx.load(bytes! as unknown as ArrayBuffer);
+      const saved = reopened.getWorksheet('Sheet1')!.getCell('A1');
+      expect(saved.value).toBe('title');
+      expect(saved.font?.bold).toBe(true);
+      expect(saved.font?.italic).toBe(true);
+      expect((saved.fill as ExcelJS.FillPattern | undefined)?.fgColor?.argb?.toUpperCase()).toContain('FFFF00');
+    },
+    60_000,
+  );
+
+  test(
+    'removing one attribute (e.g. un-bolding) on an already-seeded cell still removes exactly that attribute ' +
+      '(the canonical merge must not resurrect what the user just took off)',
+    async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+      const { joinEditSession, getRoomLazyGridForTest, getCurrentBytes } = await import('../src/collab/room.js');
+      const { GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+      const { getCell } = await import('../src/xlsx/lazyGridStore.js');
+
+      const docId = randomUUID();
+      await seedDoc(docId, await makeRichlyStyledXlsx()); // A1 = 굵게 + 기울임 + 노란 배경
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      sendSubscribe(socket, 0, [0]); // 이번에는 페이지가 **이미 시딩된** 통상 경로
+      await flushEventLoop();
+      socket.requestSync();
+
+      const styles = socket.mirror.getMap<{ b?: 1; i?: 1; bg?: string }>(GRID_STYLES_MAP);
+      const seen = styles.get(gridCellKey(0, 0, 0))!;
+      expect(seen.b).toBe(1);
+
+      // 툴바의 굵게 버튼을 한 번 더 누른 것 = 클라이언트가 자기 시야에서 b만 뺀 객체를 쓴다.
+      const { b: _removed, ...withoutBold } = seen;
+      sendMapEdit(socket, GRID_STYLES_MAP, gridCellKey(0, 0, 0), withoutBold);
+      await flushEventLoop();
+
+      const lazyGrid = getRoomLazyGridForTest(docId)!;
+      const cell = await getCell(lazyGrid, 0, 0, 0);
+      const style = lazyGrid.styles[(cell as { s?: number }).s!];
+      expect(style.b).toBeFalsy(); // 정말로 해제됐다(병합이 되살리지 않았다)
+      expect(style.i).toBe(1); // 건드리지 않은 나머지는 그대로
+      expect(style.bg?.toUpperCase()).toContain('FFFF00');
+
+      const bytes = await getCurrentBytes(docId);
+      const reopened = new ExcelJS.Workbook();
+      await reopened.xlsx.load(bytes! as unknown as ArrayBuffer);
+      const saved = reopened.getWorksheet('Sheet1')!.getCell('A1');
+      expect(saved.font?.bold).toBeFalsy();
+      expect(saved.font?.italic).toBe(true);
     },
     60_000,
   );

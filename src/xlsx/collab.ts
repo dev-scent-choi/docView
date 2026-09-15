@@ -3,7 +3,6 @@ import * as Y from 'yjs';
 import {
   GRID_BASELINE_MAP,
   GRID_CELLS_MAP,
-  GRID_COMPUTED_MAP,
   GRID_MERGES_MAP,
   GRID_STRUCTURE_MAP,
   GRID_STYLES_BASELINE_MAP,
@@ -11,6 +10,7 @@ import {
   gridCellKey,
   parseGridCellKey,
   PAGE_SIZE_ROWS,
+  WINDOWED_GRID_CELL_MAPS,
   type CellStyleAttrs,
   type GridMergeShape,
   type GridStructureOpRecord,
@@ -406,13 +406,9 @@ export async function unseedGridPageFromXlsx(
   // (room.ts styles.observe → applyStylesChangeToCanonical → setDirtyCell)가 이미 있으므로,
   // 나중에 이 페이지가 다시 구독되면 seedGridPageFromXlsx가 resolveGridCell로 dirtyOverlay를
   // 먼저 확인해 편집된 서식을 그대로 복원한다 — 원본 서식으로 조용히 되돌아가는 일은 없다.
-  const maps = [
-    ydoc.getMap<string>(GRID_CELLS_MAP),
-    ydoc.getMap<string>(GRID_BASELINE_MAP),
-    ydoc.getMap<string>(GRID_COMPUTED_MAP),
-    ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP),
-    ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP),
-  ] as ReadonlyArray<Y.Map<unknown>>;
+  // 비우는 맵 목록과 "지금 채워져 있는 페이지"를 세는 목록(room.ts의 seededPagesInYdoc)은 반드시
+  // 같아야 하므로 공유 상수 하나를 함께 본다(WINDOWED_GRID_CELL_MAPS 주석 참고 — 리뷰 지적 I1).
+  const maps = WINDOWED_GRID_CELL_MAPS.map((name) => ydoc.getMap<unknown>(name));
   const pageStart = page * PAGE_SIZE_ROWS;
   const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, rowCount);
 

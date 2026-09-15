@@ -44,6 +44,7 @@ import {
   exportXlsxFromGrid,
   findOrAddGridStyleIndex,
   fromCellStyleAttrs,
+  toCellStyleAttrs,
   isAutosaveExemptOrigin,
   reparseGridForViewer,
   seedGridPageFromXlsx,
@@ -88,6 +89,7 @@ import {
   gridCellKey,
   parseGridCellKey,
   PAGE_SIZE_ROWS,
+  WINDOWED_GRID_CELL_MAPS,
   type CellStyleAttrs,
   type GridMergeShape,
   type GridStructureOpKind,
@@ -520,6 +522,46 @@ function trackBackgroundWork(room: Room, work: Promise<void>): void {
  * 인덱스를 셀에 심는다. applyCellsChangeToCanonical과 같은 이유로 async다 — "값은 그대로 두고
  * 서식만 지운다/붙인다"는 기존 의미를 지키려면 먼저 그 칸의 현재 값을 읽어야 한다.
  */
+/**
+ * 클라이언트가 보낸 서식 편집을 **canonical(디스크)에 이미 있는 그 칸의 서식 위에 얹는다** —
+ * 리뷰 지적 I3(데이터 손실).
+ *
+ * 문제의 모양: 클라이언트(grid-editor.ts)는 서식 버튼을 누를 때 읽고-고쳐-쓰기를 한다 —
+ * `const current = styles.get(key) ?? {}` → 속성 하나를 얹거나 빼고 → `styles.set(key, merged)`.
+ * 서버가 그 결과를 그대로 **통째로** canonical에 써 버리면, 클라이언트가 읽은 `current`가 실제
+ * 원본 서식이 아닐 때 나머지 서식이 조용히 사라진다. 서식이 전량 선점 시딩되던 시절에는 그런
+ * 상태가 존재할 수 없었지만(룸이 열릴 때 모든 서식이 이미 Yjs에 있었다), 서식이 콘텐츠처럼
+ * 페이지 단위로 창에 맞춰 채워지는 지금은 **아직 시딩되지 않은 페이지**에서 서식을 적용하면
+ * `current`가 `{}`가 된다 — 그 칸에 원래 있던 채우기 색·테두리·표시 형식이 굵게 하나로 덮이고,
+ * 이 결과는 `dirtyOverlay`를 타고 **저장되는 파일에 그대로 반영된다**(원본 유실).
+ *
+ * 그래서 기준선을 클라이언트의 시야가 아니라 **항상 완전한 canonical**로 바꾼다:
+ *  - 바탕 = 그 칸이 지금 canonical에 들고 있는 서식(없으면 빈 서식).
+ *  - 그 위에 들어온 속성을 얹는다.
+ *  - **"지웠다"는 의도는 그대로 지킨다**: 클라이언트가 읽은 값(`previousAttrs` = 이 편집 직전에
+ *    Yjs에 있던 값)에는 있었는데 이번 결과에는 없는 속성은 사용자가 일부러 뗀 것이므로
+ *    (굵게 해제 등) 바탕에서도 뗀다. 이 구분이 없으면 단순 병합이 "굵게 해제"를 통째로
+ *    무력화한다 — 클라이언트는 해제를 "b 키가 없는 객체"로 표현하기 때문이다.
+ * 따라서 페이지가 이미 시딩돼 있던 통상 경로(previousAttrs === canonical 서식)에서는 결과가
+ * 예전과 **글자 그대로 동일**하고, 시딩 전이라 `previousAttrs`가 없는 경쟁 구간에서만 원본 서식이
+ * 보존된다. 서식 전체 지우기(clear format)는 `styles.delete`(action='delete')로 오므로 여기까지
+ * 오지 않고 호출부의 "서식 참조만 뗀다" 분기가 처리한다 — 병합이 그 경로를 막지 않는다.
+ */
+function mergeClientStyleEdit(
+  canonicalAttrs: CellStyleAttrs | undefined,
+  previousAttrs: CellStyleAttrs | undefined,
+  incoming: CellStyleAttrs,
+): CellStyleAttrs {
+  if (!canonicalAttrs) return incoming;
+  const incomingRecord = incoming as Record<string, unknown>;
+  const hasAttr = (key: string): boolean => key in incomingRecord && incomingRecord[key] !== undefined;
+  const merged: Record<string, unknown> = { ...canonicalAttrs };
+  for (const key of Object.keys(previousAttrs ?? {})) {
+    if (!hasAttr(key)) delete merged[key];
+  }
+  return Object.assign(merged, incoming) as CellStyleAttrs;
+}
+
 async function applyStylesChangeToCanonical(
   store: LazyGridStore,
   styles: Y.Map<CellStyleAttrs>,
@@ -531,6 +573,11 @@ async function applyStylesChangeToCanonical(
     readonly row: number;
     readonly col: number;
     readonly attrs: CellStyleAttrs | undefined;
+    /**
+     * 이 편집 **직전에 Yjs 서식 맵에 들어 있던** 값(`add`면 undefined). 곧 클라이언트가 읽고
+     * 고쳐 쓴 그 원본이다 — mergeClientStyleEdit가 "무엇이 일부러 지워졌는지"를 가리는 데 쓴다.
+     */
+    readonly previousAttrs: CellStyleAttrs | undefined;
   }
   const isMeaningful = (attrs: CellStyleAttrs | undefined): attrs is CellStyleAttrs =>
     !!attrs && typeof attrs === 'object' && Object.keys(attrs).length > 0;
@@ -543,7 +590,8 @@ async function applyStylesChangeToCanonical(
     if (sheetIdx < 0 || sheetIdx >= store.sheetMeta.length) continue;
     if (!isWithinCanonicalBounds(row, col)) continue;
     const attrs = change.action === 'delete' ? undefined : styles.get(key);
-    changes.push({ key, sheetIdx, row, col, attrs });
+    const previousAttrs = (change.oldValue as CellStyleAttrs | undefined) ?? undefined;
+    changes.push({ key, sheetIdx, row, col, attrs, previousAttrs });
   }
   if (changes.length === 0) return;
 
@@ -569,7 +617,16 @@ async function applyStylesChangeToCanonical(
       setDirtyCell(store, c.sheetIdx, c.row, c.col, current.v === '' ? 0 : { v: current.v });
       continue;
     }
-    const styleIndex = findOrAddGridStyleIndex(store, fromCellStyleAttrs(c.attrs));
+    // 들어온 서식을 canonical의 현재 서식 **위에 얹는다**(통째로 갈아치우지 않는다) — 아래
+    // mergeClientStyleEdit 참고(리뷰 지적 I3).
+    const canonicalStyle =
+      current === 0 || current === undefined || current.s === undefined ? undefined : store.styles[current.s];
+    const merged = mergeClientStyleEdit(
+      canonicalStyle ? toCellStyleAttrs(canonicalStyle) : undefined,
+      c.previousAttrs,
+      c.attrs,
+    );
+    const styleIndex = findOrAddGridStyleIndex(store, fromCellStyleAttrs(merged));
     setDirtyCell(store, c.sheetIdx, c.row, c.col, {
       v: current === 0 || current === undefined ? '' : current.v,
       s: styleIndex,
@@ -928,12 +985,25 @@ function isValidGridStructureOp(parsed: unknown): parsed is GridStructureOp {
   return true;
 }
 
-/** 지금 실제로 Yjs에 셀이 올라와 있는 페이지 번호 집합(그 시트에 대해). */
+/**
+ * 지금 실제로 Yjs에 **무언가** 올라와 있는 페이지 번호 집합(그 시트에 대해).
+ *
+ * 값(cells)만 보면 안 된다 — 윈도잉되는 칸 단위 맵 **전부**(WINDOWED_GRID_CELL_MAPS)를 훑어
+ * 합집합을 낸다. 전부 같은 "시트:행:열" 키 형식이라 같은 파싱을 그대로 쓴다.
+ *
+ * 왜(리뷰 지적 I1): 서식만 있고 값은 빈 칸(테두리·배경만 있는 템플릿 행)으로만 이뤄진 페이지는
+ * `styles`에 키가 500개 있어도 `cells`에는 하나도 없다 — 값만 보면 그 페이지가 "안 채워짐"으로
+ * 판정돼 refreshSeededPagesAfterShift가 통째로 건너뛰고, 행/열이 밀린 뒤에도 옛 좌표의 서식 키가
+ * 그대로 남아 엉뚱한 행에 테두리·배경이 걸린 채로 보인다(저장 파일은 canonical만 보므로 멀쩡하다 —
+ * 화면만 어긋나는 표시 결함이지만, 삭제된 shiftGridStyleKeys가 정확히 막아 주던 그 부류다).
+ */
 function seededPagesInYdoc(room: Room, sheetIdx: number): Set<number> {
   const pages = new Set<number>();
-  for (const key of room.ydoc.getMap<string>(GRID_CELLS_MAP).keys()) {
-    const parsed = parseGridCellKey(key);
-    if (parsed && parsed.sheetIdx === sheetIdx) pages.add(Math.floor(parsed.row / PAGE_SIZE_ROWS));
+  for (const mapName of WINDOWED_GRID_CELL_MAPS) {
+    for (const key of room.ydoc.getMap<unknown>(mapName).keys()) {
+      const parsed = parseGridCellKey(key);
+      if (parsed && parsed.sheetIdx === sheetIdx) pages.add(Math.floor(parsed.row / PAGE_SIZE_ROWS));
+    }
   }
   return pages;
 }
@@ -2127,9 +2197,10 @@ export function getSubscribedPageUnionForTest(docId: string, sheet: number): Set
  * 읽을 수 있다) 클라이언트 mirror만으로는 "지워짐"을 관찰하기 어렵기 때문에 서버 내부 상태를
  * 직접 확인할 창구가 필요하다.
  *
- * GRID_CELLS_MAP의 키에서 행 번호를 뽑아 페이지 번호로 환산한다 — 값이 있는 셀이 하나도 없는
- * 페이지는(예: 전부 빈 칸인 500행) 채워져 있어도 여기 나타나지 않으므로, 테스트 픽스처는 페이지마다
- * 최소 한 칸은 값이 있도록 만들어야 한다.
+ * 윈도잉되는 칸 단위 맵 전부(WINDOWED_GRID_CELL_MAPS)의 키에서 행 번호를 뽑아 페이지 번호로
+ * 환산한다 — 값(cells)이 하나도 없어도 서식(styles)만 있으면 "채워진 페이지"로 잡힌다
+ * (seededPagesInYdoc 주석의 리뷰 지적 I1 참고). 반대로 값도 서식도 계산값도 전혀 없는 페이지는
+ * 애초에 Yjs에 아무 키도 만들지 않으므로 여기 나타나지 않는다.
  */
 export function getSeededPagesForTest(docId: string, sheet: number): Set<number> {
   const room = rooms.get(docId);

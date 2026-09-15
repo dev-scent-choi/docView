@@ -158,13 +158,54 @@ describe('xlsx/lazyGridStore.ts: getCell/getRow', () => {
     openSpy.mockRejectedValueOnce(enoent).mockRejectedValueOnce(enoent);
 
     try {
+      const startedAt = Date.now();
       expect(await getRow(store, 0, 0)).toEqual([{ v: 'Name', s: expect.any(Number) }, { v: 'Score' }]);
       expect(openSpy).toHaveBeenCalledTimes(3); // 실패 2번 + 성공한 3번째 시도
+      // 재시도 사이에 **실제로** 기다렸는지 — 대기를 타이머 독립적으로 바꾸면서(아래 가짜 타이머
+      // 테스트 참고) 실수로 간격 없는 스핀이 되지 않았는지 함께 못 박는다. 2회 재시도 × 100ms
+      // (lazyGridStore.ts의 ROW_STORE_OPEN_RETRY_DELAY_MS)이므로 넉넉히 잡아도 150ms는 넘어야 한다.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
     } finally {
       openSpy.mockRestore();
       await fs.rm(store.rowStorePath, { force: true });
     }
-  });
+  }, 20_000);
+
+  test('the ENOENT retry still finishes when the test has fake timers installed (the wait must not hang on a frozen setTimeout)', async () => {
+    // 리뷰 지적 I2. bd42217 이후 룸 테스트의 flushEventLoop는 서버가 흘려보낸 백그라운드 작업의
+    // **완료 자체**를 await한다(drainRoomBackgroundWorkForTest) — 그 작업 안에 페이지 시딩 →
+    // getRow → 이 open 재시도가 들어 있다. 그런데 그 테스트들 다수가 가짜 타이머를 깔아 두므로
+    // (roomWindowedSeeding/roomRowColShift/… 의 `vi.useFakeTimers({ toFake: ['setTimeout', ...] })`),
+    // 재시도 대기가 전역 setTimeout에 의존하면 그 타이머는 **아무도 advance해 주지 않아 영영
+    // 깨어나지 않고** 기다리던 테스트가 타임아웃까지 멈춘다. 이 환경은 실제로 간헐적 ENOENT가
+    // 관측되는 곳이라(openRowStoreWithRetry 주석) 도달 불가능한 가정이 아니다.
+    const bytes = await makeSampleXlsx();
+    const store = await ingestXlsxLazily(randomUUID(), bytes);
+
+    const enoent = Object.assign(new Error('ENOENT: no such file or directory, open'), { code: 'ENOENT' });
+    const openSpy = vi.spyOn(fs, 'open');
+    openSpy.mockRejectedValueOnce(enoent).mockRejectedValueOnce(enoent);
+    // 룸 테스트들과 정확히 같은 설치 방식 — setImmediate는 real로 남긴다(ExcelJS 제약).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+    try {
+      // 가짜 타이머가 얼려도 흔들리지 않는 진짜 시계로 잰다(Date는 여기서 가짜가 아니지만,
+      // 전량 가짜 타이머에서도 유효한 hrtime을 쓰는 편이 이 테스트의 의도에 맞다).
+      const startedAt = process.hrtime.bigint();
+      expect(await getRow(store, 0, 0)).toEqual([{ v: 'Name', s: expect.any(Number) }, { v: 'Score' }]);
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+      expect(openSpy).toHaveBeenCalledTimes(3);
+      // 핵심: 아무도 타이머를 advance하지 않았는데도 제때 끝났다(예전 구현은 여기서 영영 멈춘다).
+      expect(elapsedMs).toBeLessThan(3_000);
+      // 그러면서도 재시도 간격은 그대로 지켰다(스핀이 아니다).
+      expect(elapsedMs).toBeGreaterThanOrEqual(150);
+    } finally {
+      vi.useRealTimers();
+      openSpy.mockRestore();
+      await fs.rm(store.rowStorePath, { force: true });
+    }
+  }, 20_000);
 
   test('fs.open failing with ENOENT on every retry still throws (a genuinely missing file is not hidden)', async () => {
     const bytes = await makeSampleXlsx();

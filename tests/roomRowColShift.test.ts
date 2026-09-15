@@ -156,6 +156,30 @@ async function makeTallXlsx(rows = 1600): Promise<Buffer> {
   return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
 }
 
+/**
+ * 1500행 시트 — **페이지 1(0-based 500~999행)에는 값이 한 글자도 없고 서식(노란 배경)만 있다.**
+ *
+ *   페이지 0(0~499)  : A열에 값 → cells 키가 생긴다
+ *   페이지 1(500~999): B열에 배경색만, 값 없음 → **styles 키만 생기고 cells 키는 0개**
+ *   페이지 2(1000~)  : A열에 값 → rowCount가 1500이 되어 페이지 1이 꼬리로 잘리지 않게 한다
+ *                      (ingestXlsxLazily의 rowCount는 "값이 있는 마지막 행"이라, 서식만 있는
+ *                       꼬리 행은 rowCount에 잡히지 않는다)
+ */
+async function makeStyleOnlyPageXlsx(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  for (let excelRow = 1; excelRow <= 500; excelRow += 1) sheet.getCell(excelRow, 1).value = `row-${excelRow}`;
+  for (let excelRow = 501; excelRow <= 1000; excelRow += 1) {
+    sheet.getCell(excelRow, 2).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFFFF00' },
+    } as ExcelJS.FillPattern;
+  }
+  for (let excelRow = 1001; excelRow <= 1500; excelRow += 1) sheet.getCell(excelRow, 1).value = `row-${excelRow}`;
+  return Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+}
+
 async function seedDoc(docId: string, original: Buffer): Promise<void> {
   const { store } = await import('../src/storage.js');
   await store.saveOriginal(docId, 'xlsx', original);
@@ -387,6 +411,58 @@ describe('room.ts: server-side row/column insert and delete (canonical shift)', 
     expect(sheet.getCell('A3').value).toBe('bold-me');
     expect(sheet.getCell('A3').font?.bold).toBe(true);
     expect(sheet.getCell('A2').font?.bold).toBeFalsy();
+  }, 120_000);
+
+  /**
+   * 리뷰 지적 I1 — **값은 없고 서식만 있는 페이지**도 밀린 뒤 반드시 다시 맞춰져야 한다.
+   *
+   * seedGridPageFromXlsx는 값(cells)은 `v !== ''`일 때만 쓰지만 서식(styles)은 값이 비어 있어도
+   * 쓴다. 그래서 "테두리·배경만 깔린 빈 템플릿 행"으로만 이뤄진 페이지는 styles에 500개 키가 있어도
+   * cells에는 한 개도 없다. "지금 Yjs에 올라와 있는 페이지"를 cells만 보고 세면 그 페이지가
+   * 통째로 안 보이고, 행 삽입 뒤 refreshSeededPagesAfterShift가 그 페이지를 건너뛰어 **옛 좌표의
+   * 서식 키가 그대로 남는다**(엉뚱한 행에 배경색이 걸린 채 보인다 — 삭제된 shiftGridStyleKeys가
+   * 막아 주던 바로 그 부류).
+   *
+   * 구독 중인 페이지는 어차피 항상 갱신되므로, 차이가 드러나는 자리는 **구독에서는 빠졌지만 아직
+   * 유예 시간 안이라 Yjs에 남아 있는 페이지**다 — 실제 사용자 동선(스크롤로 지나친 직후 다른
+   * 참여자가 행을 삽입)이 정확히 이 모양이다.
+   */
+  test('a shift also refreshes a page that holds ONLY styles (styled-but-empty cells, zero cell values)', async () => {
+    const { GRID_CELLS_MAP, GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+    const { getSeededPagesForTest } = await import('../src/collab/room.js');
+
+    const { docId, socket } = await openRoom(await makeStyleOnlyPageXlsx(), [1]);
+    const mirrorStyles = socket.mirror.getMap<{ bg?: string }>(GRID_STYLES_MAP);
+    const mirrorCells = socket.mirror.getMap<string>(GRID_CELLS_MAP);
+
+    // 전제 확인 — 이 페이지에는 서식 키만 있고 값 키는 하나도 없다(이 시나리오의 핵심 조건).
+    expect(mirrorStyles.get(gridCellKey(0, 500, 1))?.bg).toBeTruthy();
+    expect(mirrorStyles.get(gridCellKey(0, 999, 1))?.bg).toBeTruthy();
+    expect([...mirrorCells.keys()].filter((k) => Number(k.split(':')[1]) >= 500).length).toBe(0);
+    // 서버도 이 페이지를 "채워져 있다"고 봐야 한다 — cells만 세면 여기서 이미 false가 된다.
+    expect(getSeededPagesForTest(docId, 0).has(1)).toBe(true);
+
+    // 스크롤로 페이지 1을 떠난다 — 유예 시간(가짜 타이머라 흐르지 않는다) 안이므로 Yjs에는 그대로 남는다.
+    sendSubscribe(socket, { sheet: 0, pages: [0] });
+    await flushEventLoop();
+    expect(getSeededPagesForTest(docId, 0).has(1)).toBe(true);
+
+    // 다른 참여자가 맨 위에 행을 하나 끼운다 → 서식이 걸린 행들이 전부 한 칸씩 내려간다.
+    sendStructureOp(socket, { sheet: 0, kind: 'insertRows', at: 0, count: 1 });
+    await settleStructureOp(docId);
+    syncMirrorWithRoom(socket);
+
+    // 옛 좌표의 서식 키는 남아 있으면 안 된다(그 페이지는 지금 아무도 안 보므로 비우기만 한다).
+    expect(getSeededPagesForTest(docId, 0).has(1)).toBe(false);
+    expect(mirrorStyles.get(gridCellKey(0, 500, 1))).toBeUndefined();
+    expect(mirrorStyles.get(gridCellKey(0, 999, 1))).toBeUndefined();
+
+    // 다시 그 페이지로 스크롤해 돌아오면 서식이 **새 좌표**에 채워진다(한 칸 아래로).
+    sendSubscribe(socket, { sheet: 0, pages: [1] });
+    await flushEventLoop();
+    syncMirrorWithRoom(socket);
+    expect(mirrorStyles.get(gridCellKey(0, 501, 1))?.bg).toBeTruthy();
+    expect(mirrorStyles.get(gridCellKey(0, 500, 1))).toBeUndefined(); // 삽입 전 값 행이 올라온 자리 — 서식 없음
   }, 120_000);
 
   // ------------------------------------------------------------------ 수식

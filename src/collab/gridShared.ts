@@ -72,6 +72,30 @@ export interface SheetStructure {
 export const GRID_STYLES_MAP = 'styles';
 export const GRID_STYLES_BASELINE_MAP = 'stylesBaseline';
 
+/**
+ * "시트:행:열" 키로 칸 단위 데이터를 담고, **페이지 창(window)에 맞춰 함께 채워지고 함께 비워지는**
+ * Y.Map들의 전체 목록.
+ *
+ * 두 곳이 반드시 같은 목록을 봐야 한다 — 한쪽만 늘어나면 조용한 불일치가 된다:
+ *  - `unseedGridPageFromXlsx`(xlsx/collab.ts): 페이지를 비울 때 이 맵들의 그 행 범위를 지운다.
+ *  - `seededPagesInYdoc`(collab/room.ts): "지금 Yjs에 올라와 있는 페이지"를 셀 때 이 맵들을 훑는다.
+ *
+ * 왜 `cells` 하나로는 부족한가(리뷰 지적 I1): `seedGridPageFromXlsx`는 값이 있는 칸만
+ * `cells`에 쓰지만 서식은 **값이 비어 있어도** 쓴다. 그래서 "테두리·배경만 있고 글자는 없는
+ * 서식 템플릿 행"으로만 이뤄진 페이지는 `styles`에 500개 키가 있어도 `cells`에는 한 개도 없다 —
+ * `cells`만 보면 그 페이지가 "안 채워진 것"으로 보여, 행/열 삽입·삭제 뒤 재시딩 대상에서 통째로
+ * 빠지고 옛 좌표의 서식 키가 그대로 남는다. 기준선(baseline/stylesBaseline)과 계산값(computed)도
+ * 같은 이유로 포함한다: 사용자가 값을 지우면(cells.delete) 기준선 키만 남는 페이지가 될 수 있다.
+ * (구조/병합 맵은 애초에 윈도잉하지 않으므로 여기 없다.)
+ */
+export const WINDOWED_GRID_CELL_MAPS = [
+  GRID_CELLS_MAP,
+  GRID_BASELINE_MAP,
+  GRID_COMPUTED_MAP,
+  GRID_STYLES_MAP,
+  GRID_STYLES_BASELINE_MAP,
+] as const;
+
 /** 테두리 굵기 — 1=가는 선, 2=굵은 선(엑셀 thin/medium을 단순화). 색은 항상 기본(검정 계열)만 지원. */
 export type BorderWeight = 1 | 2;
 

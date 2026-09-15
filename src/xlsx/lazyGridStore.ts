@@ -4,6 +4,7 @@ import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { setTimeout as timerSleep } from 'node:timers/promises';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import {
@@ -407,9 +408,31 @@ async function openRowStoreWithRetry(rowStorePath: string): Promise<FileHandle> 
     } catch (error) {
       const isEnoent = (error as NodeJS.ErrnoException).code === 'ENOENT';
       if (!isEnoent || attempt >= ROW_STORE_OPEN_MAX_RETRIES) throw error;
-      await new Promise((resolve) => setTimeout(resolve, ROW_STORE_OPEN_RETRY_DELAY_MS));
+      await sleepIgnoringFakeTimers(ROW_STORE_OPEN_RETRY_DELAY_MS);
     }
   }
+}
+
+/**
+ * 재시도 사이의 대기 — **전역 `setTimeout`을 쓰지 않는다**(리뷰 지적 I2).
+ *
+ * 왜: 이 재시도는 테스트가 기다리는 백그라운드 작업(페이지 시딩 → getRow → 이 open) 한가운데에
+ * 있고, 룸 테스트들의 `flushEventLoop`는 이제 그 작업의 **완료 자체**를 await한다
+ * (drainRoomBackgroundWorkForTest). 그 테스트 중 여럿이 가짜 타이머를 깔아 두는데
+ * (`vi.useFakeTimers({ toFake: ['setTimeout', ...] })`), 가짜 타이머는 저절로 흐르지 않으므로
+ * `setTimeout` 기반 대기가 이 경로에서 한 번이라도 걸리면 그 타이머는 **영원히 깨어나지 않고**
+ * 테스트는 타임아웃까지 멈춘다(그리고 나중에 진짜 타이머로 되돌려도 이미 잠든 대기는 살아나지
+ * 않는다). 이 환경은 실제로 간헐적 ENOENT가 관측되는 곳이라(위 docblock 참고) 도달 불가능한
+ * 가정이 아니다.
+ *
+ * `node:timers/promises`의 `setTimeout`은 전역이 아니라 Node 내부 타이머를 직접 쓰기 때문에
+ * 가짜 타이머 설치(@sinonjs/fake-timers는 `globalThis`만 교체한다)의 영향을 받지 않는다 —
+ * 이 저장소의 vitest(3.2.7)에서 `toFake: ['setTimeout', ...]`와 기본 전량 가짜 타이머 양쪽 모두에
+ * 대해 실제로 실측 확인했다. 그래서 진짜 타이머일 때의 동작(정확히 이 지연만큼 기다린다)은 그대로
+ * 유지하면서, 가짜 타이머 아래에서도 CPU를 태우는 스핀 없이 제때 깨어난다.
+ */
+function sleepIgnoringFakeTimers(ms: number): Promise<void> {
+  return timerSleep(ms);
 }
 
 function cacheKey(sheetIdx: number, originalRow: number): string {
