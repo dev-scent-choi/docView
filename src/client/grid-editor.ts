@@ -599,6 +599,7 @@ async function main(): Promise<void> {
         tab.addEventListener('click', () => {
           if (activeSheet === idx) return;
           activeSheet = idx;
+          resetSelectionForSheetSwitch();
           renderSheetTabs();
           renderTableVirtualized();
         });
@@ -635,6 +636,7 @@ async function main(): Promise<void> {
     const orderedKeys = [...indices];
     orderedKeys.splice(insertPos, 0, newKey);
     activeSheet = newKey;
+    resetSelectionForSheetSwitch();
     ydoc.transact(() => {
       structure.set(String(newKey), { name: `Sheet${n}`, rowCount: 1, colCount: 1, order: insertPos });
       orderedKeys.forEach((key, i) => {
@@ -657,7 +659,10 @@ async function main(): Promise<void> {
     if (!confirm(`"${sheet?.name ?? ''}" 시트를 삭제하시겠습니까? 이 시트의 모든 내용이 사라집니다.`)) return;
     const pos = indices.indexOf(idx);
     const remaining = indices.filter((i) => i !== idx);
-    if (activeSheet === idx) activeSheet = remaining[Math.min(pos, remaining.length - 1)];
+    if (activeSheet === idx) {
+      activeSheet = remaining[Math.min(pos, remaining.length - 1)];
+      resetSelectionForSheetSwitch();
+    }
     ydoc.transact(() => {
       structure.delete(String(idx));
       remaining.forEach((key, i) => {
@@ -1518,7 +1523,13 @@ async function main(): Promise<void> {
     vwValid = true;
     applyFreezePanes(freezeRows, freezeCols);
     renderRemoteCellHighlights();
-    if (activeCellKey) {
+    // document.hasFocus()가 false면 실제 포커스는 이 문서 밖에 있다 — 이 뷰어는 호스트 페이지에
+    // iframe으로 박혀 돌아가는 것을 정식으로 지원하므로(DOCVIEW_ALLOWED_ORIGINS), 사용자가 호스트
+    // 쪽 입력칸에 타이핑하는 동안에도 원격 변경·창 크기 변경·확대율 변경 같은 이유로 이 전체
+    // 재빌드가 돌 수 있다. 그때 focus()를 부르면 그리드가 호스트의 포커스를 소리 없이 빼앗아,
+    // 이어지는 타자가 엉뚱한 셀에 들어가 그대로 커밋된다(restoreScrollWindowFocus의 같은 가드와
+    // 짝이다 — 거기 주석에 이유를 더 자세히 적어 뒀다).
+    if (activeCellKey && document.hasFocus()) {
       const parsed = parseGridCellKey(activeCellKey);
       // 실제 DOM 포커스를 같은 칸의 새 <td>로 되돌린다 — focus 이벤트가 setActiveHeaders/채우기
       // 핸들 위치 재계산까지 같이 해 준다. 재렌더로 그 칸이 더 이상 없으면(시트 전환, 또는 가상
@@ -2134,6 +2145,33 @@ async function main(): Promise<void> {
   function clearRangeHighlight(): void {
     tableEl.querySelectorAll('.g-range-selected').forEach((el) => el.classList.remove('g-range-selected'));
   }
+  /**
+   * 시트를 바꿀 때 — 선택 상태(드래그 범위/머리글 선택/활성 칸)를 통째로 비운다.
+   *
+   * selAnchor~selFocus도 headerSelection도 "몇 번 시트의" 선택인지를 들고 있지 않다(activeCellKey만
+   * 시트 번호를 갖는다). 그래서 시트를 바꿔도 이 값들이 그대로 남아 있으면 그대로 새 시트에 적용된다:
+   *  (1) 스크롤 한 번이면 repaintScrollWindowSelection()이 이전 시트의 범위를 새 시트에 칠한다
+   *      — 실측: Sheet1에서 C열 전체를 선택하고 Sheet2로 간 뒤 휠을 한 번 굴리니, 선택한 적도
+   *      없는 Sheet2에 125칸이 선택된 것처럼 칠해졌다.
+   *  (2) 더 나쁘게는, 툴바 서식 버튼이 전부 rangeBounds() + gridCellKey(activeSheet, r, c)로 키를
+   *      만들기 때문에 — 칠하기 버그가 없더라도 이전 시트에서 잡아 둔 범위가 새 시트의 같은 좌표
+   *      칸들에 조용히 먹는다(같은 실측에서 굵게가 Sheet2의 125칸에 그대로 먹었다).
+   * 엑셀에서도 시트를 바꾸면 보고 있지 않은 시트의 선택이 따라오지 않으므로, 새 시트는 아무것도
+   * 선택되지 않은 상태로 시작한다 — 사용자가 칸을 클릭하는 순간 focusin이 전부 다시 채운다.
+   */
+  function resetSelectionForSheetSwitch(): void {
+    clearRangeHighlight();
+    clearActiveHeaders();
+    clearHeaderSelection();
+    activeCellKey = null;
+    selAnchorRow = 0;
+    selAnchorCol = 0;
+    selFocusRow = 0;
+    selFocusCol = 0;
+    // 활성 칸이 없어졌으니 그 칸 오른쪽 아래에 떠 있던 채우기 핸들도 같이 감춘다 — 안 그러면 새
+    // 시트 위에 그대로 남고, 그걸 끌면 (activeCellKey가 null이라) 아무 일도 안 하는 죽은 손잡이가 된다.
+    positionFillHandle(null);
+  }
   /** 앵커~포커스 사각형에 배경을 칠한다 — 1칸짜리(드래그 안 한 보통 클릭)면 기존 :focus 테두리로
    * 충분하니 별도 배경은 안 칠한다. */
   function renderRangeHighlight(): void {
@@ -2210,6 +2248,17 @@ async function main(): Promise<void> {
    */
   function restoreScrollWindowFocus(firstVisible: number, lastVisible: number, freezeRows: number): void {
     if (!activeCellKey) return;
+    // activeElement만으로는 "이 문서 안에서 아무 데도 포커스가 없다"와 "포커스가 아예 이 문서
+    // 밖(호스트 페이지·다른 탭·다른 창)에 있다"를 구분할 수 없다 — 둘 다 activeElement가 <body>다.
+    // 이 뷰어는 호스트 페이지에 iframe으로 박혀 돌아가는 것을 정식으로 지원하므로
+    // (DOCVIEW_ALLOWED_ORIGINS, buildRow의 window.parent.postMessage 참고), 사용자가 iframe을
+    // 클릭한 적조차 없이 호스트 쪽 입력칸에 타이핑하면서 그리드 위에 휠만 굴려도 이 함수가 돌 수
+    // 있다. 그때 포커스를 되돌리면 그리드가 호스트의 포커스를 소리 없이 빼앗아, 이어지는 타자가
+    // 호스트 입력칸이 아니라 스프레드시트 칸에 들어가 그대로 커밋된다 — "키가 사라지는" 원래
+    // 버그보다 훨씬 나쁘다. document.hasFocus()는 정확히 이 경우에만 false고, 정작 고치려던
+    // 경우(이 문서는 포커스를 갖고 있는데 활성 칸의 <tr>이 스크롤 패치로 잠깐 사라져 <body>로
+    // 떨어진 상태)에는 true다.
+    if (!document.hasFocus()) return;
     const active = document.activeElement;
     if (active !== null && active !== document.body) return;
     const parsed = parseGridCellKey(activeCellKey);
@@ -3004,6 +3053,9 @@ async function main(): Promise<void> {
     if (!match) return;
     if (match.sheetIdx !== activeSheet) {
       activeSheet = match.sheetIdx;
+      // 검색 결과로 다른 시트로 건너뛰는 것도 시트 전환이다 — 이전 시트에서 잡아 둔 선택 범위를
+      // 그대로 들고 가면 안 된다(탭 클릭 전환과 같은 이유, resetSelectionForSheetSwitch 주석 참고).
+      resetSelectionForSheetSwitch();
       renderSheetTabs();
       renderTableVirtualized();
     }
