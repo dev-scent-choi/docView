@@ -2582,8 +2582,13 @@ async function main(): Promise<void> {
           const key = gridCellKey(activeSheet, r, c);
           const current = styles.get(key) ?? {};
           const next = mutate(current);
-          if (Object.keys(next).length === 0) styles.delete(key);
-          else styles.set(key, next);
+          // 결과가 빈 서식이어도 **삭제가 아니라 빈 객체를 쓴다** — Y.Map.delete는 그 키가 지금 이
+          // 클라이언트의 Yjs 맵에 들어 있을 때만 연산을 만든다. 서식이 페이지 단위로 윈도잉된 뒤로는
+          // "화면에는 그려져 있지만 아직 시딩되지 않은 칸"이 흔하고, 거기서의 delete는 아무 이벤트도
+          // 만들지 못해 서버가 영영 모르는 조용한 무동작이 된다(서식 지우기가 파일에 반영되지 않음).
+          // 빈 객체 쓰기는 키의 로컬 존재 여부와 무관하게 항상 실제 연산이 되고, 서버의
+          // applyStylesChangeToCanonical은 빈 서식을 삭제와 똑같이 "서식만 뗀다"로 처리한다.
+          styles.set(key, next);
           const td = tdFor(r, c);
           if (td) {
             applyStyleToTd(td, styles.get(key));
@@ -2616,7 +2621,9 @@ async function main(): Promise<void> {
       for (let r = r0; r <= r1; r += 1) {
         for (let c = c0; c <= c1; c += 1) {
           const key = gridCellKey(activeSheet, r, c);
-          styles.delete(key);
+          // delete가 아니라 "빈 서식" 표식을 쓴다 — updateStyle의 주석 참고. 열 전체/전체 선택처럼
+          // 시딩되지 않은 페이지까지 걸치는 지우기에서 delete는 대부분의 칸에서 조용한 무동작이었다.
+          styles.set(key, {});
           const td = tdFor(r, c);
           if (td) {
             applyStyleToTd(td, undefined);
@@ -2769,8 +2776,8 @@ async function main(): Promise<void> {
               if (isRight) next.br = 1;
               break;
           }
-          if (Object.keys(next).length === 0) styles.delete(key);
-          else styles.set(key, next as CellStyleAttrs);
+          // 테두리 'none'으로 서식이 통째로 비어도 delete가 아니라 빈 객체를 쓴다 — updateStyle의 주석 참고.
+          styles.set(key, next as CellStyleAttrs);
           const td = tdFor(r, c);
           if (td) applyStyleToTd(td, styles.get(key));
         }

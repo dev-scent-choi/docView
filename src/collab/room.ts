@@ -538,14 +538,28 @@ function trackBackgroundWork(room: Room, work: Promise<void>): void {
  * 그래서 기준선을 클라이언트의 시야가 아니라 **항상 완전한 canonical**로 바꾼다:
  *  - 바탕 = 그 칸이 지금 canonical에 들고 있는 서식(없으면 빈 서식).
  *  - 그 위에 들어온 속성을 얹는다.
- *  - **"지웠다"는 의도는 그대로 지킨다**: 클라이언트가 읽은 값(`previousAttrs` = 이 편집 직전에
- *    Yjs에 있던 값)에는 있었는데 이번 결과에는 없는 속성은 사용자가 일부러 뗀 것이므로
- *    (굵게 해제 등) 바탕에서도 뗀다. 이 구분이 없으면 단순 병합이 "굵게 해제"를 통째로
- *    무력화한다 — 클라이언트는 해제를 "b 키가 없는 객체"로 표현하기 때문이다.
- * 따라서 페이지가 이미 시딩돼 있던 통상 경로(previousAttrs === canonical 서식)에서는 결과가
- * 예전과 **글자 그대로 동일**하고, 시딩 전이라 `previousAttrs`가 없는 경쟁 구간에서만 원본 서식이
- * 보존된다. 서식 전체 지우기(clear format)는 `styles.delete`(action='delete')로 오므로 여기까지
- * 오지 않고 호출부의 "서식 참조만 뗀다" 분기가 처리한다 — 병합이 그 경로를 막지 않는다.
+ *  - **"지웠다"는 의도는 그대로 지킨다**: `previousAttrs`(= 이 편집 직전에 **서버의** Yjs 맵에
+ *    들어 있던 값)에는 있었는데 이번 결과에는 없는 속성은 사용자가 일부러 뗀 것으로 보고 바탕에서도
+ *    뗀다(굵게 해제 등). 이 구분이 없으면 단순 병합이 "굵게 해제"를 통째로 무력화한다 —
+ *    클라이언트는 해제를 "b 키가 없는 객체"로 표현하기 때문이다.
+ *
+ * **남아 있는 구멍(알려진 후속 과제 — 이 함수가 보장하지 *못*하는 것)**: `previousAttrs`는
+ * "클라이언트가 읽고 고쳐 쓴 바로 그 원본"이 **아니다**. 실제로는 `event.changes.keys`의
+ * `oldValue`, 즉 **서버 자신의 트랜잭션 직전 값**이다. 보통은 둘이 같지만, 클라이언트가 조금
+ * 뒤처진 자기 시야를 바탕으로 쓰는 동안 서버가 이미 앞서 나가 있으면 어긋난다. 그러면 "클라이언트가
+ * 애초에 본 적도 없는 속성"이 previousAttrs에 들어 있어 의도적 제거로 오인되고 canonical에서 떨어져
+ * 나간다 — 실측 예: 서버의 A1이 `{b:1,i:1,bg:'#FFFF00'}`로 시딩돼 있는데 아직 동기화되지 않은
+ * 클라이언트가 `{b:1}`을 쓰면 canonical이 정확히 `{b:1}`로 수축해 기울임과 채우기 색을 잃고, 그
+ * 결과는 `dirtyOverlay`를 타고 저장 파일까지 간다.
+ * 다만 이 구간은 **좁다**: `broadcast()`가 모든 ydoc 업데이트를 구독 상태와 무관하게 접속한 모든
+ * 클라이언트에 보내므로 "서버엔 있는데 클라이언트엔 영영 오지 않는" 지속적 어긋남은 없고, 페이지가
+ * 처음 시딩된 직후의 왕복 한 번 정도로 한정된다. 완전한 해소는 클라이언트가 객체를 통째로 보내는
+ * 대신 **제거된 키 목록(delta)** 을 보내야 가능하므로, 구조를 바꾸는 별도 과제로 남겨 둔다.
+ *
+ * 서식 전체 지우기(clear format)는 클라이언트가 **빈 객체**(`styles.set(key, {})`)로 보낸다 —
+ * 아직 시딩되지 않은 페이지에서는 `styles.delete`가 Yjs 연산 자체를 만들지 못해 조용히 묻히기
+ * 때문이다(grid-editor.ts 주석 참고). 빈 서식은 호출부의 `!isMeaningful` 분기("값은 두고 서식
+ * 참조만 뗀다")가 처리하므로 여기까지 오지 않는다 — 병합이 그 경로를 막지 않는다.
  */
 function mergeClientStyleEdit(
   canonicalAttrs: CellStyleAttrs | undefined,
@@ -574,8 +588,11 @@ async function applyStylesChangeToCanonical(
     readonly col: number;
     readonly attrs: CellStyleAttrs | undefined;
     /**
-     * 이 편집 **직전에 Yjs 서식 맵에 들어 있던** 값(`add`면 undefined). 곧 클라이언트가 읽고
-     * 고쳐 쓴 그 원본이다 — mergeClientStyleEdit가 "무엇이 일부러 지워졌는지"를 가리는 데 쓴다.
+     * 이 편집 **직전에 서버의 Yjs 서식 맵에 들어 있던** 값(`add`면 undefined) —
+     * mergeClientStyleEdit가 "무엇이 일부러 지워졌는지"를 가리는 데 쓴다.
+     *
+     * 주의: **서버의 트랜잭션 직전 값**이지 "클라이언트가 읽고 고쳐 쓴 그 원본"이 아니다. 전파
+     * 지연 중에는 둘이 어긋날 수 있다 — mergeClientStyleEdit의 "남아 있는 구멍" 참고.
      */
     readonly previousAttrs: CellStyleAttrs | undefined;
   }
@@ -590,7 +607,7 @@ async function applyStylesChangeToCanonical(
     if (sheetIdx < 0 || sheetIdx >= store.sheetMeta.length) continue;
     if (!isWithinCanonicalBounds(row, col)) continue;
     const attrs = change.action === 'delete' ? undefined : styles.get(key);
-    const previousAttrs = (change.oldValue as CellStyleAttrs | undefined) ?? undefined;
+    const previousAttrs = change.oldValue as CellStyleAttrs | undefined;
     changes.push({ key, sheetIdx, row, col, attrs, previousAttrs });
   }
   if (changes.length === 0) return;

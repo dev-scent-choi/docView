@@ -139,6 +139,21 @@ function sendMapEdit(
 }
 
 /**
+ * 클라이언트의 **자기 로컬 시야 위에서** 맵 키를 지운 뒤 그 결과 업데이트를 서버로 보낸다 —
+ * `socket.mirror`가 곧 그 클라이언트의 Yjs 문서이므로, "지금 로컬에 그 키가 있는지"가
+ * 프로덕션과 똑같이 반영된다(sendMapEdit의 scratch 문서로는 이 조건을 재현할 수 없다).
+ */
+function sendMapDeleteFromLocalView(socket: FakeSocket, mapName: string, key: string): void {
+  const before = Y.encodeStateVector(socket.mirror);
+  socket.mirror.getMap(mapName).delete(key);
+  const update = Y.encodeStateAsUpdate(socket.mirror, before);
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_SYNC);
+  writeUpdate(encoder, update);
+  socket.emit('message', encoding.toUint8Array(encoder));
+}
+
+/**
  * 이벤트 루프에 실제로 제어권이 돌아오는 횟수를 센다(tests/xlsxYielding.test.ts와 같은 패턴).
  * 측정 대상이 한 번도 안 쉬는 동기 블록이라면 이 재귀 티커는 그 블록이 끝날 때까지 단 한 번도
  * 돌지 못한다 — 그래서 "양보가 실제로 일어났는지"를 값의 정확성과 무관하게 직접 관찰할 수 있다.
@@ -799,6 +814,108 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
       const saved = reopened.getWorksheet('Sheet1')!.getCell('A1');
       expect(saved.font?.bold).toBeFalsy();
       expect(saved.font?.italic).toBe(true);
+    },
+    60_000,
+  );
+
+  test(
+    'clearing formatting on a cell whose page has NOT been seeded yet actually clears it in canonical '
+      + '(Y.Map.delete on a locally-absent key emits no op at all — the clear must be an explicit empty-style write)',
+    async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+      const { joinEditSession, getRoomLazyGridForTest, getCurrentBytes } = await import('../src/collab/room.js');
+      const { GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+      const { getCell } = await import('../src/xlsx/lazyGridStore.js');
+
+      const docId = randomUUID();
+      await seedDoc(docId, await makeRichlyStyledXlsx()); // A1 = 굵게 + 기울임 + 노란 배경
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      await flushEventLoop();
+
+      // **일부러 아무 페이지도 구독하지 않는다** — 브라우저에는 그려져 있지만 서버가 아직 그 페이지를
+      // Yjs에 채우지 않은 순간(열 전체/전체 선택 서식 지우기라면 대부분의 칸이 늘 이 상태다).
+      expect(socket.mirror.getMap(GRID_STYLES_MAP).size).toBe(0);
+
+      const lazyGrid = getRoomLazyGridForTest(docId)!;
+      const styleOf = async (): Promise<Record<string, unknown> | undefined> => {
+        const c = await getCell(lazyGrid, 0, 0, 0);
+        const idx = c === 0 || c === undefined ? undefined : (c as { s?: number }).s;
+        return idx === undefined ? undefined : (lazyGrid.styles[idx] as unknown as Record<string, unknown>);
+      };
+
+      // **음성 대조군 — 예전 구현(`styles.delete(key)`)이 왜 조용히 아무 일도 안 했는지**:
+      // Y.Map.delete는 그 키가 지금 이 클라이언트의 맵에 들어 있을 때만 연산을 만든다. 시딩 전
+      // 페이지에서는 키가 없으므로 Yjs 연산도, 브로드캐스트도, 서버 관찰자 호출도 전혀 없다 —
+      // 오류도 화면 차이도 없이 원본 서식이 저장 파일에 그대로 남는 조용한 유실이었다.
+      sendMapDeleteFromLocalView(socket, GRID_STYLES_MAP, gridCellKey(0, 0, 0));
+      await flushEventLoop();
+      expect(await styleOf()).toMatchObject({ b: 1, i: 1 }); // canonical이 전혀 손대지지 않았다
+
+      // 지금 클라이언트가 실제로 보내는 것 = **빈 서식 객체**. 키의 로컬 존재 여부와 무관하게
+      // 언제나 진짜 Yjs 연산이 되고, 서버의 `!isMeaningful` 분기가 삭제와 똑같이 처리한다.
+      sendMapEdit(socket, GRID_STYLES_MAP, gridCellKey(0, 0, 0), {});
+      await flushEventLoop();
+
+      const cell = await getCell(lazyGrid, 0, 0, 0);
+      // 값은 그대로 두고 서식 참조만 떨어져야 한다 — 서식 지우기는 내용 지우기가 아니다.
+      expect(cell).not.toBe(0);
+      expect((cell as { v?: string }).v).toBe('title');
+      expect((cell as { s?: number }).s).toBeUndefined();
+
+      // 저장 파일까지 확인한다 — 이 결함은 "지운 서식이 파일에는 그대로 남아 있는" 모양이었다.
+      const bytes = await getCurrentBytes(docId);
+      expect(bytes).not.toBeNull();
+      const reopened = new ExcelJS.Workbook();
+      await reopened.xlsx.load(bytes! as unknown as ArrayBuffer);
+      const saved = reopened.getWorksheet('Sheet1')!.getCell('A1');
+      expect(saved.value).toBe('title');
+      expect(saved.font?.bold).toBeFalsy();
+      expect(saved.font?.italic).toBeFalsy();
+      // 채우기 자체가 통째로 사라져야 한다(노란색이 "다른 색으로 바뀐" 게 아니라 아예 없어야 한다).
+      expect((saved.fill as ExcelJS.FillPattern | undefined)?.fgColor?.argb).toBeUndefined();
+    },
+    60_000,
+  );
+
+  test(
+    'clearing formatting on an ALREADY-SEEDED page still clears it exactly as before (no regression to the common case)',
+    async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+
+      const { joinEditSession, getRoomLazyGridForTest, getCurrentBytes } = await import('../src/collab/room.js');
+      const { GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
+      const { getCell } = await import('../src/xlsx/lazyGridStore.js');
+
+      const docId = randomUUID();
+      await seedDoc(docId, await makeRichlyStyledXlsx());
+
+      const socket = new FakeSocket();
+      await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+      sendSubscribe(socket, 0, [0]); // 이번에는 페이지가 **이미 시딩된** 통상 경로
+      await flushEventLoop();
+      socket.requestSync();
+
+      const styles = socket.mirror.getMap<{ b?: 1; i?: 1; bg?: string }>(GRID_STYLES_MAP);
+      expect(styles.get(gridCellKey(0, 0, 0))?.b).toBe(1);
+
+      sendMapEdit(socket, GRID_STYLES_MAP, gridCellKey(0, 0, 0), {});
+      await flushEventLoop();
+
+      const lazyGrid = getRoomLazyGridForTest(docId)!;
+      const cell = await getCell(lazyGrid, 0, 0, 0);
+      expect((cell as { v?: string }).v).toBe('title');
+      expect((cell as { s?: number }).s).toBeUndefined();
+
+      const bytes = await getCurrentBytes(docId);
+      const reopened = new ExcelJS.Workbook();
+      await reopened.xlsx.load(bytes! as unknown as ArrayBuffer);
+      const saved = reopened.getWorksheet('Sheet1')!.getCell('A1');
+      expect(saved.value).toBe('title');
+      expect(saved.font?.bold).toBeFalsy();
+      expect(saved.font?.italic).toBeFalsy();
     },
     60_000,
   );
