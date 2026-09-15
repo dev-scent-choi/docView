@@ -1624,6 +1624,13 @@ async function main(): Promise<void> {
     // 아예 안 쓰는 보통 시트에서는 이 함수가 즉시 리턴해 비용이 없다.
     if (freezeRows > 0 || vwFreezeCols > 0) applyFreezePanes(freezeRows, vwFreezeCols);
     renderRemoteCellHighlights();
+    // 전체 재빌드(renderTableVirtualized)가 맨 끝에서 하던 "활성 칸 포커스 되돌리기"와, 그 포커스
+    // 복원이 focusin을 통해 곁들여 해 주던 "선택 표시 다시 칠하기"를 이 경로에도 똑같이 붙인다 —
+    // 이게 없어서 (1) 스크롤 왕복 뒤 키 입력이 <body>로 새어 조용히 사라지고, (2) 화면에는 아무
+    // 선택도 안 보이는데 툴바 서식은 예전 범위 전체에 먹는 문제가 있었다. 순서가 중요하다:
+    // 포커스 복원이 먼저고(그 안에서 focusin이 하이라이트를 한 번 지운다), 칠하기가 나중이다.
+    restoreScrollWindowFocus(firstVisible, lastVisible, freezeRows);
+    repaintScrollWindowSelection();
   }
 
   // ---------- 셀 선택 vs 편집모드, 방향키 이동 (엑셀과 동일하게) ----------
@@ -2059,10 +2066,25 @@ async function main(): Promise<void> {
   }
 
   // 열/행 머리글(A, 1 등)을 직접 클릭했을 때 — 엑셀처럼 그 열/행 전체를 선택 표시한다.
+  /** 지금 머리글 클릭으로 통째로 선택돼 있는 열/행 — 클래스(.g-col-selected/.g-row-selected)는
+   * 해당 <tr>이 가상 스크롤 창 밖으로 나가면 그 행과 함께 사라져 버려서, 화면만으로는 "원래
+   * 무엇이 선택돼 있었는지"를 복구할 수 없다. 스크롤로 행이 다시 들어왔을 때 표시를 되살리려면
+   * 클래스와 별개로 이 상태를 들고 있어야 한다. */
+  let headerSelection: { kind: 'col' | 'row'; index: number } | null = null;
   function clearHeaderSelection(): void {
+    headerSelection = null;
     tableEl.querySelectorAll('.g-col-selected, .g-row-selected').forEach((el) => {
       el.classList.remove('g-col-selected', 'g-row-selected');
     });
+  }
+  /** headerSelection이 가리키는 열/행에 선택 표시 클래스를 입힌다 — 머리글 클릭 직후와, 스크롤로
+   * 그 행이 다시 그려진 뒤 양쪽에서 같은 코드를 쓴다. */
+  function paintHeaderSelection(): void {
+    if (!headerSelection) return;
+    const { kind, index } = headerSelection;
+    const attr = kind === 'col' ? 'data-col' : 'data-row';
+    const cls = kind === 'col' ? 'g-col-selected' : 'g-row-selected';
+    tableEl.querySelectorAll(`[${attr}="${index}"]`).forEach((el) => el.classList.add(cls));
   }
   // 열/행 머리글을 클릭하면 시각적 표시만 하는 게 아니라, 서식 툴바가 실제로 적용할 범위
   // (selAnchor~selFocus)도 그 열/행 전체로 잡아야 한다 — 안 그러면 rangeBounds()가 여전히
@@ -2078,7 +2100,8 @@ async function main(): Promise<void> {
     selFocusCol = col;
     activeCellKey = gridCellKey(activeSheet, selAnchorRow, col);
     renderRangeHighlight();
-    tableEl.querySelectorAll(`[data-col="${col}"]`).forEach((el) => el.classList.add('g-col-selected'));
+    headerSelection = { kind: 'col', index: col };
+    paintHeaderSelection();
   }
   function selectRow(row: number): void {
     clearActiveHeaders();
@@ -2090,7 +2113,8 @@ async function main(): Promise<void> {
     selFocusCol = Math.max(0, colCount - 1);
     activeCellKey = gridCellKey(activeSheet, row, selAnchorCol);
     renderRangeHighlight();
-    tableEl.querySelectorAll(`[data-row="${row}"]`).forEach((el) => el.classList.add('g-row-selected'));
+    headerSelection = { kind: 'row', index: row };
+    paintHeaderSelection();
   }
   // 잠긴 칸은 focus 리스너 자체가 안 붙으므로(편집 불가) setActiveHeaders를 못 거친다 — 어떤 칸을
   // 클릭하든(잠금 여부와 무관하게) 열/행 전체 선택 표시는 항상 풀리도록 여기서 한 번 더 잡는다.
@@ -2122,6 +2146,97 @@ async function main(): Promise<void> {
       }
     }
   }
+  /**
+   * updateScrollWindow() 전용 — 스크롤로 새로 들어온 행에 선택 관련 "칠하기"를 다시 입힌다.
+   *
+   * 왜 필요한가: buildRow()는 늘 아무 장식도 없는 <td>를 만든다. 전체 재빌드 경로에서는 마지막에
+   * 활성 칸을 다시 focus시켜 focusin 핸들러가 renderRangeHighlight/setActiveHeaders를 도로
+   * 불러줬지만, 스크롤 전용 증분 패치에는 그 마무리가 통째로 빠져 있었다. 그 결과 선택 범위를
+   * 잡아 둔 채 스크롤로 한 바퀴 돌고 오면 **화면에는 아무것도 선택돼 있지 않은데 내부 선택 상태
+   * (selAnchor~selFocus)는 그대로 살아 있는** 상태가 됐다 — 이때 굵게/서식 지우기/채우기색 같은
+   * 툴바 버튼(전부 rangeBounds()를 읽는다)을 누르면 "보이지 않는" 범위 수십~수백 칸에 서식이
+   * 조용히 적용된다(실측: 화면상 0칸 선택 상태에서 굵게가 44칸에 먹었다).
+   *
+   * 성능: renderRangeHighlight()는 범위의 칸마다 tableEl.querySelector를 한 번씩 돌아서,
+   * selectColumn()이 잡는 "열 전체"(selFocusRow = rowCount-1, 수천 행)를 선택해 둔 채 스크롤하면
+   * 스크롤 프레임마다 수천 번의 DOM 질의가 된다 — 이 함수 전체가 매 스크롤 프레임 도는 자리라
+   * 그건 81be4d8이 없앤 바로 그 종류의 비용을 되살리는 셈이다. 어차피 창 밖 행에는 칠할 <td>가
+   * 존재하지 않으므로, 지금 DOM에 있는 행(vwRowEls)과 범위의 교집합만 훑는다.
+   */
+  function repaintScrollWindowSelection(): void {
+    const { r0, r1, c0, c1 } = rangeBounds();
+    // 한 칸짜리 선택이면 칠할 것이 없다(renderRangeHighlight와 같은 규칙 — :focus 테두리로 충분).
+    // 이때는 지울 것도 없다: 선택이 한 칸으로 줄어드는 모든 경로가 renderRangeHighlight를 거쳐
+    // 이미 전부 지웠고, 새로 만들어진 행에는 애초에 클래스가 없다. 그래서 선택 범위를 안 쓰는
+    // 보통의 스크롤에서는 이 함수가 DOM을 단 한 번도 건드리지 않는다.
+    if (r0 !== r1 || c0 !== c1) {
+      clearRangeHighlight();
+      for (const [r, tr] of vwRowEls) {
+        if (r < r0 || r > r1) continue;
+        // 행 하나당 자식 훑기 한 번 — 칸마다 querySelector를 도는 것보다 훨씬 싸다.
+        for (let i = 0; i < tr.children.length; i += 1) {
+          const cell = tr.children[i] as HTMLElement;
+          const col = cell.dataset.col;
+          if (col === undefined) continue; // 행번호 <th>
+          const c = Number(col);
+          if (c >= c0 && c <= c1) cell.classList.add('g-range-selected');
+        }
+      }
+    }
+
+    // 머리글 클릭으로 열/행을 통째로 선택해 둔 상태(g-col-selected/g-row-selected)도 새로 들어온
+    // 행에 다시 입힌다 — 선택을 안 쓰는 보통의 스크롤에서는 headerSelection이 null이라 비용이 없다.
+    paintHeaderSelection();
+
+    // 활성 칸이 있는 행의 행번호 머리글 표시(g-row-active)도 그 <tr>과 함께 사라졌다가 돌아온다.
+    if (activeCellKey) {
+      const parsed = parseGridCellKey(activeCellKey);
+      if (parsed && parsed.sheetIdx === activeSheet) {
+        tableEl.querySelector(`tbody th[data-row="${parsed.row}"]`)?.classList.add('g-row-active');
+      }
+    }
+  }
+
+  /**
+   * updateScrollWindow() 전용 — 창 밖으로 나갔다 돌아온 활성 칸에 실제 DOM 포커스를 되돌린다.
+   * 전체 재빌드 경로(renderTableVirtualized)는 맨 끝에서 이미 같은 일을 하지만 스크롤 전용 증분
+   * 패치에는 그게 없었다: 활성 칸의 <tr>이 창 밖으로 제거되는 순간 포커스가 <body>로 떨어지는데,
+   * 키보드 핸들러는 tableEl에 위임돼 있어 <body>에 포커스가 있는 상태로 친 키는 그리드에 **아예
+   * 도달하지 못한다** — 다시 스크롤해 그 칸이 돌아와도 포커스는 <body>에 남아, 사용자가 친 글자가
+   * 아무런 피드백 없이 통째로 사라졌다.
+   *
+   * 포커스가 정말로 "아무 데도 없을 때"(<body>)만 되돌린다 — 수식 입력줄이나 툴바 버튼, 열린
+   * 대화상자에 사용자가 옮겨 둔 포커스를 스크롤이 가로채면 안 된다.
+   */
+  function restoreScrollWindowFocus(firstVisible: number, lastVisible: number, freezeRows: number): void {
+    if (!activeCellKey) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    const parsed = parseGridCellKey(activeCellKey);
+    if (!parsed || parsed.sheetIdx !== activeSheet) return;
+    const { row, col } = parsed;
+    // 틀 고정 행은 창과 무관하게 항상 그려져 있다. 그 밖의 행은 지금 창 안에 들어왔을 때만.
+    if (row >= freezeRows && (row < firstVisible || row > lastVisible)) return;
+    const td = tdFor(row, col);
+    if (!td) return;
+    // focus()는 위임된 focusin 핸들러를 그 자리에서(동기적으로) 실행하는데, 그 핸들러는 "칸을 새로
+    // 클릭했다"는 뜻으로 선택 범위를 그 한 칸으로 접고(selAnchor/selFocus) 머리글 선택도 풀어버린다
+    // (setActiveHeaders → clearHeaderSelection). 하지만 스크롤은 선택을 바꾸는 동작이 아니므로
+    // (엑셀에서도 스크롤로 선택이 풀리지 않는다) 원래 선택 상태를 스냅숏해 뒀다가 그대로 되돌린다
+    // — 실제 칠하기는 호출부가 이어서 repaintScrollWindowSelection()으로 한다.
+    const anchorRow = selAnchorRow;
+    const anchorCol = selAnchorCol;
+    const focusRow = selFocusRow;
+    const focusCol = selFocusCol;
+    const header = headerSelection;
+    td.focus({ preventScroll: true });
+    selAnchorRow = anchorRow;
+    selAnchorCol = anchorCol;
+    selFocusRow = focusRow;
+    selFocusCol = focusCol;
+    headerSelection = header;
+  }
+
   function onRangeDragMove(event: MouseEvent): void {
     const el = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
     const td = el?.closest('td[data-row][data-col]') as HTMLTableCellElement | null;
