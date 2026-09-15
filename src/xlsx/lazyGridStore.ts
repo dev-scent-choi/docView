@@ -385,8 +385,9 @@ const ROW_STORE_OPEN_RETRY_DELAY_MS = 100;
 /**
  * `fs.open(rowStorePath, 'r')`가 `ENOENT`로 실패하면 최대 5번, 100ms 간격으로 재시도한다.
  *
- * **왜 필요한가**: 실제 29만 행급 파일로 room.ts의 실제 시딩 경로(seedGridStylesFromXlsx가 청크당
- * 최대 2000개 행을 `Promise.all`로 동시에 읽는 실 사용 패턴)를 검증하는 중, 파일이 방금 정상적으로
+ * **왜 필요한가**: 실제 29만 행급 파일로 room.ts의 실제 시딩 경로(당시의 seedGridStylesFromXlsx가
+ * 청크당 최대 2000개 행을 `Promise.all`로 동시에 읽던 실 사용 패턴 — 그 함수는 이후 삭제됐고 지금은
+ * flushRowReads가 그 배치를 핸들 하나로 처리한다)를 검증하는 중, 파일이 방금 정상적으로
  * 쓰이고 닫혔는데도 이후의 `fs.open`이 간헐적으로 `ENOENT`를 던지는 현상을 실측했다 — 실패 시점이
  * 실행마다 달라(같은 재현 스크립트를 반복해도 일관된 행 번호가 아니었다) 이 코드의 결정적 경쟁이라기
  * 보다는 이 개발 환경(짧은 경로 표기 `OPENMI~1`이 나타나는 Windows 프로필)의 OS/파일시스템 계층
@@ -411,25 +412,153 @@ async function openRowStoreWithRetry(rowStorePath: string): Promise<FileHandle> 
   }
 }
 
-async function readRowFromDisk(
-  store: LazyGridStore,
-  sheetIdx: number,
-  originalRow: number,
-): Promise<ReadonlyArray<GridCell | 0>> {
-  const entry = store.rowIndex[sheetIdx]?.[originalRow];
-  if (!entry) return [];
-  const handle = await openRowStoreWithRetry(store.rowStorePath);
+function cacheKey(sheetIdx: number, originalRow: number): string {
+  return `${sheetIdx}:${originalRow}`;
+}
+
+interface PendingRowRead {
+  /** cacheKey(sheetIdx, originalRow) — inFlight 표에서 자신을 지우기 위해 들고 다닌다. */
+  readonly key: string;
+  readonly entry: LazyRowIndexEntry;
+  readonly resolve: (row: ReadonlyArray<GridCell | 0>) => void;
+  readonly reject: (error: unknown) => void;
+}
+
+interface RowReadBatch {
+  /** 아직 핸들이 열리지 않은, 이번 배치로 묶일 행 읽기 요청들. */
+  queue: PendingRowRead[];
+  /** 플러시가 이미 예약돼 있는지 — 예약된 동안 들어온 요청은 그 플러시에 그대로 합류한다. */
+  flushScheduled: boolean;
+  /** cacheKey -> 지금 큐에 있거나 디스크에서 읽히는 중인 행의 결과(같은 행 중복 읽기 방지). */
+  readonly inFlight: Map<string, Promise<ReadonlyArray<GridCell | 0>>>;
+}
+
+/**
+ * 스토어별 행 읽기 배치 상태 — `LazyGridStore`의 **공개 데이터 모양은 건드리지 않는다**(그쪽은
+ * ingestion 결과와 캐시만 담는 순수 데이터다). 스토어가 GC되면 이 항목도 같이 사라지도록 WeakMap에
+ * 둔다. 배치 상태는 이벤트 루프 한 턴 안에서만 살아 있는 과도 상태라 스토어의 수명과 무관하다.
+ */
+const rowReadBatches = new WeakMap<LazyGridStore, RowReadBatch>();
+
+function rowReadBatchFor(store: LazyGridStore): RowReadBatch {
+  let batch = rowReadBatches.get(store);
+  if (!batch) {
+    batch = { queue: [], flushScheduled: false, inFlight: new Map() };
+    rowReadBatches.set(store, batch);
+  }
+  return batch;
+}
+
+/**
+ * 한 배치로 묶인 행 읽기를 **파일 핸들 하나로** 처리한다 — `fs.open` 1회 + `handle.read()` N회 +
+ * `close` 1회.
+ *
+ * **왜 배치인가**: 예전에는 행 하나를 읽을 때마다 open→read→close를 새로 했다. 낮은 볼륨에서는
+ * 괜찮지만, 페이지 시딩(`seedGridPageFromXlsx`가 500행을 `Promise.all`로 한꺼번에 읽는다)과 수식
+ * 재계산(`recomputeFormulasForPage`가 청크당 125행 × 열 수만큼 `getCell`을 한꺼번에 흘린다)처럼
+ * 한 번에 수백~수천 건이 몰리는 실제 경로에서는 이 파일 핸들 생명주기 syscall이 읽기 자체보다
+ * 훨씬 비쌌다. 이 개발 환경에서 실측: 500회 open+read+close ≈ 145~200ms vs 같은 500회 읽기를
+ * 핸들 하나로 ≈ 4ms(약 36배). Node 기본 libuv 스레드풀이 4개뿐이라 수백 개의 동시 open/close가
+ * 작은 배치로 직렬화되면서 syscall 오버헤드를 매번 다 무는 것이 원인으로 보인다.
+ *
+ * **핸들 수명은 여전히 짧게 유지한다**: 스토어 전체 수명 동안 핸들을 들고 있지 않고 **배치 하나**
+ * (= 대개 마이크로태스크 한 턴에 몰린 요청들)가 끝나면 바로 닫는다 — 예전 패턴과 같은 자릿수의
+ * 아주 짧은 수명이다. 그래서 룸이 닫힐 때 `closeLazyGridStore`의 `fs.rm`이 Windows에서 "사용 중인
+ * 파일"에 걸릴 위험은 예전과 같은 수준으로 유지되고(게다가 그 `fs.rm`은 원래부터 재시도한다),
+ * `sweepOrphanedLazyGridFiles`의 나이 기반 안전망도 그대로 유효하다.
+ *
+ * 열기는 반드시 `openRowStoreWithRetry`를 거친다 — 이 환경의 간헐적 `ENOENT`에 대한 방어를
+ * 배치화로 잃지 않기 위해서다(그 함수의 주석 참고). 배치당 한 번만 여니 재시도도 배치당 한 번이다.
+ *
+ * 같은 스토어에 배치가 동시에 여럿 뜨는 것(예: 두 페이지를 동시에 시딩)은 정상이고 안전하다 —
+ * 각 배치가 자기 핸들을 따로 열고, 읽기는 모두 명시적 `position`을 넘기므로(파일 오프셋을 공유·
+ * 변경하지 않는 pread 방식) 서로 간섭하지 않는다. 행 단위 중복은 `inFlight`가 막는다.
+ */
+async function flushRowReads(store: LazyGridStore, batch: RowReadBatch): Promise<void> {
+  let handle: FileHandle;
   try {
-    const buf = Buffer.alloc(entry.byteLength);
-    await handle.read(buf, 0, entry.byteLength, entry.byteOffset);
-    return JSON.parse(buf.toString('utf8')) as Array<GridCell | 0>;
+    handle = await openRowStoreWithRetry(store.rowStorePath);
+  } catch (error) {
+    // 열기가 (재시도까지 소진하고) 실패하면 이 배치로 묶인 요청을 전부 같은 오류로 실패시킨다 —
+    // 예전에 행마다 따로 열던 때와 같은 오류가 같은 호출부로 그대로 전달된다.
+    const pending = batch.queue;
+    batch.queue = [];
+    batch.flushScheduled = false;
+    for (const p of pending) {
+      batch.inFlight.delete(p.key);
+      p.reject(error);
+    }
+    return;
+  }
+  // 핸들이 열리기를 기다리는 동안 들어온 요청까지 같은 핸들로 함께 처리한다(그 요청들은
+  // flushScheduled가 아직 true라 새 플러시를 예약하지 않았다). 여기서 비우고 나서야 플래그를
+  // 내리므로, 이 시점 이후의 요청은 자기 배치를 새로 연다.
+  const pending = batch.queue;
+  batch.queue = [];
+  batch.flushScheduled = false;
+  try {
+    await Promise.all(
+      pending.map(async (p) => {
+        try {
+          const buf = Buffer.alloc(p.entry.byteLength);
+          await handle.read(buf, 0, p.entry.byteLength, p.entry.byteOffset);
+          p.resolve(JSON.parse(buf.toString('utf8')) as Array<GridCell | 0>);
+        } catch (error) {
+          p.reject(error);
+        } finally {
+          batch.inFlight.delete(p.key);
+        }
+      }),
+    );
   } finally {
     await handle.close();
   }
 }
 
-function cacheKey(sheetIdx: number, originalRow: number): string {
-  return `${sheetIdx}:${originalRow}`;
+/**
+ * 행 하나를 디스크에서 읽는다 — 실제 읽기는 `flushRowReads`가 배치로 묶어 처리한다.
+ *
+ * **동기적으로** 큐에 넣고 마이크로태스크로 플러시를 예약하는 것이 핵심이다: 호출부들은 이미
+ * `Promise.all(rows.map(...))` 모양으로 한 턴에 수백 건을 몰아 보내므로(seedGridPageFromXlsx,
+ * recomputeFormulasForPage, applyCellsChangeToCanonical …), 그 요청들이 자연스럽게 한 배치 =
+ * 핸들 하나로 묶인다. 호출부 시그니처를 바꾸지 않으므로 시딩 쪽 로직은 한 글자도 건드리지 않는다.
+ */
+function readRowFromDisk(
+  store: LazyGridStore,
+  sheetIdx: number,
+  originalRow: number,
+): Promise<ReadonlyArray<GridCell | 0>> {
+  const entry = store.rowIndex[sheetIdx]?.[originalRow];
+  if (!entry) return Promise.resolve([]);
+
+  const batch = rowReadBatchFor(store);
+  const key = cacheKey(sheetIdx, originalRow);
+  // 같은 행을 동시에 여러 번 요청하면(예: 한 행의 여러 칸을 getCell로 동시에 훑는 재계산 패스)
+  // 디스크 읽기는 한 번만 나가고 나머지는 같은 Promise를 공유한다. 행 데이터는 ingestion 이후
+  // 불변이므로 공유해도 안전하다.
+  const already = batch.inFlight.get(key);
+  if (already) return already;
+
+  let resolve!: (row: ReadonlyArray<GridCell | 0>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<ReadonlyArray<GridCell | 0>>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  batch.inFlight.set(key, promise);
+  batch.queue.push({ key, entry, resolve, reject });
+
+  if (!batch.flushScheduled) {
+    batch.flushScheduled = true;
+    queueMicrotask(() => {
+      void flushRowReads(store, batch).catch((error: unknown) => {
+        // 개별 행 읽기 실패는 이미 각 요청으로 전달됐다 — 여기까지 오는 건 핸들 닫기 실패 정도라
+        // 관찰할 요청이 남아 있지 않으므로 로그만 남긴다.
+        console.error('행 저장소 배치 읽기 정리 실패:', error);
+      });
+    });
+  }
+  return promise;
 }
 
 function touchCache(store: LazyGridStore, key: string, row: ReadonlyArray<GridCell | 0>): void {
@@ -580,9 +709,10 @@ export async function closeLazyGridStore(store: LazyGridStore): Promise<void> {
  * 건드리지 않는다. 서버 비정상 종료로 남은 파일은 이 서버 프로세스가 시작하기 전부터 있었던
  * 것이라 항상 이 값보다 훨씬 오래됐다(재시작까지 걸린 시간만큼) — 그러니 안전망 성격은 그대로
  * 유지된다. 반면 같은 프로세스(또는 같은 테스트 스위트의 다른 워커)가 방금 막 만든, 지금 실제로
- * 쓰이고 있는 파일은 이 값보다 훨씬 최근이라 스윕 대상에서 제외된다 — 파일마다 매 읽기 호출 사이에
- * 핸들을 열고 닫으므로(readRowFromDisk) Windows에서도 파일이 항상 잠겨 있지는 않아, 나이 확인 없이
- * 무조건 지우면 다른 워커가 마침 그 순간 사이에 읽고 있던 파일이 사라지는 경쟁이 실제로 있었다.
+ * 쓰이고 있는 파일은 이 값보다 훨씬 최근이라 스윕 대상에서 제외된다 — 읽기 배치 사이사이에 핸들을
+ * 열고 닫으므로(flushRowReads) Windows에서도 파일이 항상 잠겨 있지는 않아, 나이 확인 없이 무조건
+ * 지우면 다른 워커가 마침 그 순간 사이에 읽고 있던 파일이 사라지는 경쟁이 실제로 있었다. 이 스윕은
+ * 열린 핸들이 아니라 `fs.stat`의 mtime만 보므로 배치 읽기 여부와 무관하게 그대로 동작한다.
  */
 const ORPHAN_SWEEP_MIN_AGE_MS = 60_000;
 

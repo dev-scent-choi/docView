@@ -68,8 +68,50 @@ function sendStructureOp(socket: FakeSocket, payload: unknown): void {
 }
 
 async function flushEventLoop(turns = 80): Promise<void> {
-  for (let i = 0; i < turns; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < turns; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await drainPendingDiskIo();
+    await drainRoomBackgroundWork();
+  }
 }
+
+/**
+ * 서버가 흘려보낸(fire-and-forget) 백그라운드 작업 — 페이지 창 반영, 수식 재계산, 셀/서식 편집의
+ * canonical 되반영 — 이 실제로 끝날 때까지 기다린다. 턴 수 같은 **대리 지표가 아니라 그 작업의
+ * 완료 자체**를 기다리는 것이 핵심이다(room.ts의 Room.backgroundWork 주석 참고).
+ *
+ * 룸 모듈을 아직(또는 전혀) 불러오지 않은 테스트에서도 안전하도록 조용히 넘어간다.
+ */
+async function drainRoomBackgroundWork(): Promise<void> {
+  try {
+    const { drainRoomBackgroundWorkForTest } = await import('../src/collab/room.js');
+    await drainRoomBackgroundWorkForTest();
+  } catch {
+    /* 이 테스트는 룸을 쓰지 않는다 */
+  }
+}
+
+
+/**
+ * setImmediate 턴만 흘려보내는 것으로는 **진짜 디스크 I/O를 기다릴 수 없다**.
+ *
+ * 예전에는 룸을 열 때 `seedGridStylesFromXlsx`가 워크북 전체를 훑으며 `LazyGridStore.readCache`를
+ * 통째로 데워 놨고 `joinEditSession`이 그 완료를 기다렸다 — 그래서 페이지를 구독하는 시점에는 그
+ * 페이지의 모든 행이 이미 메모리에 있었고 시딩이 디스크를 건드리지 않았다. 그 조건에서만
+ * "setImmediate 턴 N번"이 충분한 대기였다. 서식이 콘텐츠와 함께 페이지 단위로 윈도잉되면서 그
+ * 선점적 전량 데우기가 사라졌고, 이제 페이지를 처음 구독하면 실제로 디스크를 읽는다.
+ *
+ * setImmediate 턴은 **벽시계 시간을 사주지 않는다**(실측: 500턴이 약 3ms — 턴마다 poll 타임아웃 0으로
+ * 그냥 스핀한다). 그래서 턴 수를 늘리는 것은 해결책이 아니라 더 조용한 플래키의 원인이다 — 턴 수는
+ * 예전 그대로 두고, 대신 턴마다 실제 디스크 작업을 한 번 흘려보낸다. `fs.stat`은 행 읽기와 같은
+ * libuv 스레드풀의 FIFO 작업 큐를 쓰므로, 이 stat이 끝났다는 것은 그 앞에 쌓여 있던 읽기들이 이미
+ * 큐에서 빠져나갔다는 뜻이다(임의의 sleep이 아니라 의미가 분명한 대기다). 타이머를 쓰지 않으므로
+ * 가짜 타이머를 켠 테스트에서도 안전하다. 자세한 배경은 roomWindowedSeeding.test.ts의 같은 헬퍼 참고.
+ */
+async function drainPendingDiskIo(): Promise<void> {
+  await fs.stat(os.tmpdir()).catch(() => undefined);
+}
+
 
 function syncMirrorWithRoom(socket: FakeSocket): void {
   const encoder = encoding.createEncoder();

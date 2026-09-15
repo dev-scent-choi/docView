@@ -63,7 +63,55 @@ function sendSubscribe(socket: FakeSocket, sheet: number, pages: readonly number
  * 헬퍼는 두 경우 모두에서 동작한다.
  */
 async function flushEventLoop(turns = 50): Promise<void> {
-  for (let i = 0; i < turns; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < turns; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await drainPendingDiskIo();
+    await drainRoomBackgroundWork();
+  }
+}
+
+/**
+ * 서버가 흘려보낸(fire-and-forget) 백그라운드 작업 — 페이지 창 반영, 수식 재계산, 셀/서식 편집의
+ * canonical 되반영 — 이 실제로 끝날 때까지 기다린다. 턴 수 같은 **대리 지표가 아니라 그 작업의
+ * 완료 자체**를 기다리는 것이 핵심이다(room.ts의 Room.backgroundWork 주석 참고).
+ *
+ * 룸 모듈을 아직(또는 전혀) 불러오지 않은 테스트에서도 안전하도록 조용히 넘어간다.
+ */
+async function drainRoomBackgroundWork(): Promise<void> {
+  try {
+    const { drainRoomBackgroundWorkForTest } = await import('../src/collab/room.js');
+    await drainRoomBackgroundWorkForTest();
+  } catch {
+    /* 이 테스트는 룸을 쓰지 않는다 */
+  }
+}
+
+
+/**
+ * setImmediate 턴만 흘려보내는 것으로는 **진짜 디스크 I/O를 기다릴 수 없다** — 이 한 줄이 이
+ * 파일(과 같은 헬퍼를 쓰는 다른 룸 테스트들)의 타이밍 모델에서 유일하게 바뀐 부분이다.
+ *
+ * 왜 필요해졌나: 예전에는 룸을 열 때 `seedGridStylesFromXlsx`가 워크북 전체를 훑으면서
+ * `LazyGridStore.readCache`를 통째로 데워 놓았고, `joinEditSession`이 그 완료를 기다렸다. 그래서
+ * 테스트가 페이지를 구독하는 시점에는 그 페이지의 모든 행이 **이미 메모리에** 있었고,
+ * `seedGridPageFromXlsx`는 디스크를 단 한 번도 건드리지 않았다(마이크로태스크만으로 끝났다) —
+ * 그 조건에서만 "setImmediate 턴 N번"이 충분한 대기였다. 서식 시딩이 콘텐츠와 함께 페이지 단위로
+ * 윈도잉되면서 그 선점적 전량 데우기가 사라졌고, 이제 페이지를 처음 구독하면 실제로 디스크를
+ * 읽는다.
+ *
+ * 그런데 setImmediate 턴은 **벽시계 시간을 전혀 사주지 않는다**: 실측하면 이 루프는 500턴을 돌아도
+ * 약 3ms밖에 걸리지 않는 반면(턴마다 poll 타임아웃 0으로 그냥 스핀한다), 한 페이지(500행)를 읽는 데는
+ * 실제로 약 10~25ms가 걸린다. 즉 턴 수를 아무리 늘려도 I/O를 기다리는 대기가 되지 못한다 —
+ * 턴 수를 부풀리는 것은 해결책이 아니라 더 조용한 플래키의 원인이다(그래서 턴 수는 예전 그대로 둔다).
+ *
+ * `fs.stat`은 행 읽기와 **같은 libuv 스레드풀**(기본 4스레드)의 FIFO 작업 큐를 쓴다. 그래서 지금
+ * 큐에 쌓여 있는 읽기들보다 뒤에 들어가고, 이 stat이 끝났다는 것은 그 앞의 읽기들이 이미 큐에서
+ * 빠져나갔다는 뜻이다 — 임의의 sleep이 아니라 "지금까지 제출된 디스크 작업을 흘려보낸다"는
+ * 의미가 분명한 대기다. 타이머(setTimeout)를 쓰지 않으므로 가짜 타이머를 켠 테스트에서도 안전하고,
+ * setImmediate를 real로 남겨 둬야 하는 ExcelJS 제약과도 무관하다.
+ */
+async function drainPendingDiskIo(): Promise<void> {
+  await fs.stat(os.tmpdir()).catch(() => undefined);
 }
 
 /**
@@ -241,6 +289,7 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
       sendSubscribe(socket, 0, [0]); // 첫 페이지(0~499행)만 구독
       await flushEventLoop();
       socket.requestSync();
+      await flushEventLoop();
 
       const cells = socket.mirror.getMap<string>(GRID_CELLS_MAP);
       expect(cells.get(gridCellKey(0, 0, 0))).toBe('row-1'); // 구독한 페이지 안 — 있어야 함
@@ -576,7 +625,8 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
   );
 
   test(
-    'a style stays applied across a full unseed → reseed cycle (styles are never windowed)',
+    'styles are now windowed with content: not seeded before subscribe, unseeded with the page, ' +
+      'and correctly restored (both original and user-edited styles) on reseed',
     async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 
@@ -588,18 +638,25 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
 
       const socket = new FakeSocket();
       await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+
+      // 아직 아무 페이지도 구독하지 않은 시점 — 서식도 콘텐츠처럼 아직 전혀 채워지지 않아야 한다
+      // (룸을 열 때 워크북 전체를 훑어 서식을 미리 채우던 옛 seedGridStylesFromXlsx가 사라졌다는
+      // 직접적인 증거 — 이게 이 세션이 고친 룸 열기 지연의 핵심이다).
+      socket.requestSync();
+      await flushEventLoop();
+      const styles = socket.mirror.getMap<{ b?: 1; i?: 1 }>(GRID_STYLES_MAP);
+      expect(styles.size).toBe(0);
+
       sendSubscribe(socket, 0, [0]); // 서식이 있는 셀이 속한 페이지를 구독
       await flushEventLoop();
       socket.requestSync();
 
-      const styles = socket.mirror.getMap<{ b?: 1; i?: 1 }>(GRID_STYLES_MAP);
-      // 서식은 구독과 무관하게 룸을 열 때 전량 채워지므로 이미 있어야 한다.
+      // 구독한 페이지의 서식은 콘텐츠와 같은 시점에 함께 도착한다.
       expect(styles.get(gridCellKey(0, 0, 0))?.b).toBe(1);
 
       // 사용자가 A2에 기울임을 적용한다 — 클라이언트가 GRID_STYLES_MAP에 직접 쓰는 실제 경로.
-      // 서버에는 이 서식 편집을 canonicalGrid로 되반영하는 관찰자가 없으므로, 서식이 셀 값처럼
-      // 윈도잉된다면 이 편집은 unseed(키 삭제) → reseed(canonical의 원본 서식으로 다시 채움)에서
-      // 조용히 사라진다 — 이 테스트가 붙잡는 회귀가 바로 그것이다.
+      // room.ts의 styles.observe → applyStylesChangeToCanonical이 이 편집을 lazyGrid.dirtyOverlay에
+      // 반영해 두므로, 아래에서 이 페이지가 비워졌다 다시 채워져도 이 편집이 사라지면 안 된다.
       sendMapEdit(socket, GRID_STYLES_MAP, gridCellKey(0, 1, 0), { i: 1 });
       await flushEventLoop();
       expect(styles.get(gridCellKey(0, 1, 0))?.i).toBe(1);
@@ -610,6 +667,10 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
       await vi.advanceTimersByTimeAsync(10_100);
       await flushEventLoop();
       expect(getSeededPagesForTest(docId, 0).has(0)).toBe(false); // 셀 데이터는 정말 비워졌다
+      // 서식도 콘텐츠와 함께 정말로 비워졌다 — 예전처럼 "서식은 절대 안 지운다"가 아니라는 것을
+      // 직접 확인한다(윈도잉이 실제로 일어났다는 증거, 회귀하면 이 값이 여전히 남아 있을 것이다).
+      expect(styles.get(gridCellKey(0, 0, 0))).toBeUndefined();
+      expect(styles.get(gridCellKey(0, 1, 0))).toBeUndefined();
 
       // 다시 스크롤해 돌아온다 → 페이지 0이 다시 채워진다.
       sendSubscribe(socket, 0, [0, 1]);
@@ -617,8 +678,9 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
       socket.requestSync();
       expect(getSeededPagesForTest(docId, 0).has(0)).toBe(true);
 
-      // 원본 파일의 서식도, 사용자가 적용한 서식도 그대로 남아 있어야 한다 — 애초에 지워진 적이
-      // 없기 때문이다(서식은 윈도잉 대상이 아니다).
+      // 원본 파일의 서식도, 사용자가 적용한 서식도 정확히 복원돼야 한다 — 콘텐츠와 똑같이
+      // dirtyOverlay를 거쳐 가는 resolveGridCell 덕분에, 일시적으로 지워졌던 서식이 원본으로
+      // 되돌아가지 않고 편집된 그대로 되살아난다(데이터 손실 없음).
       expect(styles.get(gridCellKey(0, 0, 0))?.b).toBe(1);
       expect(styles.get(gridCellKey(0, 1, 0))?.i).toBe(1);
     },
@@ -663,14 +725,14 @@ describe('room.ts: xlsx seeding is windowed by subscribed page', () => {
 });
 
 /**
- * Task 8 — seedGridPageFromXlsx/seedGridStylesFromXlsx가 GridDocument 대신 LazyGridStore를
- * 읽는 새 시그니처로 동작하는지 직접(room.ts를 거치지 않고) 검증한다. room.ts는 아직
- * canonicalGrid(GridDocument)를 임시 어댑터로 감싸 이 함수들을 호출하므로(Task 14 이전), 위
- * describe 블록의 room 통합 테스트들은 이 태스크 이후에도 정확히 같은 결과를 내야 한다(회귀
- * 없음) — 이 블록은 그 어댑터를 거치지 않고 실제 LazyGridStore(ingestXlsxLazily)를 바로 물려
- * "디스크에서 처음 읽는 캐시 미스 경로"까지 실제로 타는지 확인한다.
+ * Task 8 — seedGridPageFromXlsx가 GridDocument 대신 LazyGridStore를 읽는 새 시그니처로 동작하는지
+ * 직접(room.ts를 거치지 않고) 검증한다. room.ts는 아직 canonicalGrid(GridDocument)를 임시
+ * 어댑터로 감싸 이 함수를 호출하므로(Task 14 이전), 위 describe 블록의 room 통합 테스트들은 이
+ * 태스크 이후에도 정확히 같은 결과를 내야 한다(회귀 없음) — 이 블록은 그 어댑터를 거치지 않고
+ * 실제 LazyGridStore(ingestXlsxLazily)를 바로 물려 "디스크에서 처음 읽는 캐시 미스 경로"까지
+ * 실제로 타는지 확인한다.
  */
-describe('xlsx/collab.ts: seedGridPageFromXlsx/seedGridStylesFromXlsx read through LazyGridStore', () => {
+describe('xlsx/collab.ts: seedGridPageFromXlsx reads through LazyGridStore', () => {
   test('subscribing a page fills exactly that page\'s cells, including a row not yet warmed in the read cache (forces a disk read)', async () => {
     const { ingestXlsxLazily, closeLazyGridStore } = await import('../src/xlsx/lazyGridStore.js');
     const { seedGridPageFromXlsx } = await import('../src/xlsx/collab.js');
@@ -702,16 +764,17 @@ describe('xlsx/collab.ts: seedGridPageFromXlsx/seedGridStylesFromXlsx read throu
     }
   }, 30_000);
 
-  test('seedGridStylesFromXlsx fills the whole sheet\'s styles regardless of any page window, sourced from LazyGridStore', async () => {
+  test('seedGridPageFromXlsx fills that page\'s styles together with its content, and none outside the page', async () => {
     const { ingestXlsxLazily, closeLazyGridStore } = await import('../src/xlsx/lazyGridStore.js');
-    const { seedGridStylesFromXlsx } = await import('../src/xlsx/collab.js');
+    const { seedGridPageFromXlsx } = await import('../src/xlsx/collab.js');
     const { GRID_STYLES_MAP, gridCellKey } = await import('../src/collab/gridShared.js');
 
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Sheet1');
     for (let r = 1; r <= 600; r += 1) sheet.getCell(r, 1).value = `row-${r}`;
-    // 굵게 서식을 페이지 0 밖(600행, 0-based 599 = 페이지 1)에 둔다 — 서식은 페이지 구독과
-    // 무관하게 항상 전량 채워져야 한다는 것을 증명하기 위함.
+    sheet.getCell(1, 1).font = { bold: true }; // 페이지 0 안(0-based 행 0)
+    // 굵게 서식을 페이지 0 밖(600행, 0-based 599 = 페이지 1)에도 둔다 — 구독하지 않은 페이지의
+    // 서식은 채워지지 않아야(예전의 전량 선점 시딩이 사라졌어야) 한다는 것을 증명하기 위함.
     sheet.getCell(600, 1).font = { bold: true };
     const bytes = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
 
@@ -719,12 +782,22 @@ describe('xlsx/collab.ts: seedGridPageFromXlsx/seedGridStylesFromXlsx read throu
 
     try {
       const ydoc = new Y.Doc();
-      await seedGridStylesFromXlsx(ydoc, store);
+      await seedGridPageFromXlsx(ydoc, store, 0, 0); // 페이지 0(0~499행)만 구독
 
       const styles = ydoc.getMap<{ b?: 1 }>(GRID_STYLES_MAP);
+      // 구독한 페이지 안의 서식은 콘텐츠와 정확히 같은 호출로, 추가 디스크 스캔 없이 채워진다
+      // (이게 이번 성능 수정의 핵심 — 예전에는 이 서식이 별도의 seedGridStylesFromXlsx가 워크북
+      // 전체를 다시 훑어야만 나왔다).
+      expect(styles.get(gridCellKey(0, 0, 0))?.b).toBe(1);
+      // 구독하지 않은 페이지(1번)의 서식은 아직 없어야 한다 — 전량 선점 시딩이 사라졌다는 직접
+      // 증거.
+      expect(styles.get(gridCellKey(0, 599, 0))).toBeUndefined();
+      // 서식 없는 칸은 여전히 안 심긴다(희소 유지) — 예전 동작과 동일.
+      expect(styles.get(gridCellKey(0, 1, 0))).toBeUndefined();
+
+      // 페이지 1을 나중에 구독하면 그 페이지의 서식도 같은 경로로, 그제서야 채워진다.
+      await seedGridPageFromXlsx(ydoc, store, 0, 1);
       expect(styles.get(gridCellKey(0, 599, 0))?.b).toBe(1);
-      // 서식 없는 칸은 여전히 안 심긴다(희소 유지).
-      expect(styles.get(gridCellKey(0, 0, 0))).toBeUndefined();
     } finally {
       await closeLazyGridStore(store);
     }

@@ -286,21 +286,35 @@ export async function computeGridCellDisplayAsync(
 ): Promise<unknown> {
   const MAX_RETRIES = 10_000; // 한 수식이 참조할 수 있는 서로 다른 행 수의 넉넉한 상한(안전망)
   for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
-    let missed: { sheetIdx: number; row: number } | null = null;
+    // 이번 시도에서 만난 캐시 미스를 **전부** 모은다(중복 행은 한 번만).
+    //
+    // 예전에는 첫 미스 하나만 기억하고 곧장 그 행만 읽은 뒤 재시도했다. 그러면 `SUM(A1:A100)`처럼
+    // 아직 캐시에 없는 행 100개를 참조하는 수식 하나가 **100번의 순차 디스크 왕복**(그리고 100번의
+    // 전체 재평가)을 유발한다 — 한 번에 하나씩이라 lazyGridStore의 읽기 배치(flushRowReads)가
+    // 묶어 줄 것이 없어 배치화의 이득이 이 경로에서만 통째로 사라진다. 미스를 전부 모아 한 번에
+    // 읽으면 그 100행이 **핸들 하나로 한 배치**에 들어오고, 재평가도 보통 한 번이면 끝난다.
+    //
+    // 재시도 루프의 종료 근거는 그대로(오히려 강해진다): 매 시도마다 최소 한 행이 새로 캐시에
+    // 채워지므로 언젠가 반드시 미스가 사라진다. 다만 한 시도에서 모으는 행 수는 읽기 캐시 상한을
+    // 넘기지 않는다 — 그보다 많이 읽으면 방금 채운 앞쪽 행이 LRU로 밀려나(같은 시도 안에서 서로를
+    // 밀어내) 진행이 되지 않는다.
+    const missedRows = new Map<string, { sheetIdx: number; row: number }>();
     // 공유 memo를 읽기 전용으로 감싸는 쓰기 로그 레이어에서 시작한다 — 이미 다른(깨끗했던)
     // 시도/셀에서 검증된 값은 그대로 재사용하고, 이번 시도에서 새로 계산되는 값은 writeLog에만 쌓인다.
     const attemptMemo = new LayeredMemo(memo);
     const result = computeGridCellDisplaySync(store, sheetIdx, row, col, new Set(evalGuard), attemptMemo, tainted, (missSheet, missRow) => {
-      if (!missed) missed = { sheetIdx: missSheet, row: missRow }; // 이번 시도의 첫 미스만 채우고 재시도
+      const missKey = `${missSheet}:${missRow}`;
+      if (missedRows.size >= store.readCacheLimit || missedRows.has(missKey)) return;
+      missedRows.set(missKey, { sheetIdx: missSheet, row: missRow });
     });
-    if (!missed) {
+    if (missedRows.size === 0) {
       // 깨끗이 끝났으니 이번 시도에서 새로 계산된 값들(writeLog)만 공유 memo에 합친다 — 공유
       // memo에 이미 있던 항목은 건드리지 않는다(O(새 항목 수)이지 O(공유 memo 크기)가 아니다).
       for (const [k, v] of attemptMemo.writeLog) memo.set(k, v);
       return result;
     }
-    const toFill: { sheetIdx: number; row: number } = missed;
-    await getRow(store, toFill.sheetIdx, toFill.row); // 캐시를 채운다
+    // 한 턴에 몰아서 흘려보낸다 — lazyGridStore가 이 요청들을 핸들 하나의 배치로 묶는다.
+    await Promise.all([...missedRows.values()].map((m) => getRow(store, m.sheetIdx, m.row)));
   }
   throw new Error(`수식 계산이 ${MAX_RETRIES}번 재시도 후에도 끝나지 않음 (문서 손상 의심)`);
 }

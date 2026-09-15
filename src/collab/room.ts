@@ -48,8 +48,6 @@ import {
   reparseGridForViewer,
   seedGridPageFromXlsx,
   seedGridStructureOnly,
-  seedGridStylesFromXlsx,
-  shiftGridStyleKeys,
   unseedGridPageFromXlsx,
   GRID_COMPUTED_WRITE_ORIGIN,
   GRID_STRUCTURE_SHIFT_ORIGIN,
@@ -263,6 +261,27 @@ interface Room {
    * 각 호출이 자기 첫 await까지 동기로 실행돼 양보 없는 블록이 연달아 붙는다.
    */
   canonicalGrowth: Promise<void>;
+  /**
+   * 지금 진행 중인 "흘려보낸(fire-and-forget) 백그라운드 작업"들 — 페이지 창 반영
+   * (reconcilePageSubscriptions), 수식 재계산 체인(recomputeSubscribedPagesInBackground), 셀/서식
+   * 편집의 canonical 되반영(applyCellsChangeToCanonical/applyStylesChangeToCanonical)이 여기 담긴다.
+   *
+   * 이 작업들은 일부러 await하지 않는다(호출부가 동기 소켓 핸들러라 기다릴 수 없고, 기다리면 그
+   * 사이 다른 클라이언트의 메시지가 막힌다 — reconcileInBackground 주석 참고). 그래서 "지금 이 룸이
+   * 아직 처리 중인 일이 있는가"를 밖에서 알 방법이 없었는데, **테스트는 바로 그걸 알아야 한다**:
+   * 예전에는 룸을 열 때 워크북 전체를 미리 읽어 `readCache`를 데워 뒀기 때문에 이 작업들이 디스크를
+   * 전혀 건드리지 않고 몇 틱 만에 끝났고, 테스트는 "setImmediate 턴 N번"으로 충분히 기다릴 수
+   * 있었다. 서식이 콘텐츠와 함께 페이지 단위로 윈도잉되면서 그 선점적 데우기가 사라졌고, 이제 이
+   * 작업들은 진짜 디스크 I/O를 포함한다 — 걸리는 시간이 부하에 따라 달라지므로 고정된 턴 수로는
+   * 원리적으로 기다릴 수 없다(턴은 벽시계 시간을 사주지 않는다: 500턴이 약 3ms다).
+   *
+   * 그래서 `canonicalGrowth`(+`drainCanonicalGrowth`/`awaitCanonicalGrowthForTest`)가 구조 연산에
+   * 대해 이미 하고 있는 것과 **같은 관용구**를 이 작업들에도 적용한다 — 다만 체인으로 직렬화하지는
+   * 않는다(서로 다른 시트/페이지의 반영은 지금처럼 겹쳐 돌아도 안전하고, 직렬화하면 프로덕션
+   * 동작이 달라진다). 단순히 "진행 중인 것들"을 담아 두고 끝나면 빼는 장부일 뿐이라 프로덕션
+   * 동작에는 영향이 없다.
+   */
+  backgroundWork: Set<Promise<void>>;
 }
 
 const rooms = new Map<string, Room>();
@@ -473,6 +492,20 @@ async function drainCanonicalGrowth(room: Room): Promise<void> {
     seen = room.canonicalGrowth;
     await seen;
   }
+}
+
+/**
+ * 흘려보낸 백그라운드 작업 하나를 룸의 장부(Room.backgroundWork)에 올리고, 끝나면 뺀다.
+ *
+ * 넘겨받는 Promise는 **이미 `.catch`가 붙어 절대 reject하지 않는 것**이어야 한다(모든 호출부가
+ * 그렇게 넘긴다) — 그래야 여기서 `finally`로 파생시킨 Promise도 reject하지 않아 unhandledRejection이
+ * 생기지 않는다.
+ */
+function trackBackgroundWork(room: Room, work: Promise<void>): void {
+  room.backgroundWork.add(work);
+  void work.finally(() => {
+    room.backgroundWork.delete(work);
+  });
 }
 
 /**
@@ -827,12 +860,13 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
  *
  * 하나의 체인으로 묶어 `await`하면 앞 페이지의 Promise가 (그 페이지 자신의
  * `await yieldToEventLoop()`을 거쳐) 실제로 해소된 뒤에 다음 페이지가 시작하므로, 페이지의 동기
- * 블록 사이마다 이벤트 루프가 확실히 한 턴 돈다. 바깥의 `void`는 여전히 하나뿐이라 호출부
- * (cells.observe 콜백)는 예전과 똑같이 즉시 반환한다 — 여러 페이지를 시딩할 때
+ * 블록 사이마다 이벤트 루프가 확실히 한 턴 돈다. 이 체인은 여전히 **기다리지 않고 흘려보낸다**
+ * (`trackBackgroundWork`는 룸의 장부에 올려 둘 뿐 await하지 않는다 — Room.backgroundWork 주석
+ * 참고)라서 호출부(cells.observe 콜백)는 예전과 똑같이 즉시 반환한다 — 여러 페이지를 시딩할 때
  * reconcilePageSubscriptions가 이미 쓰고 있는 것과 같은 패턴이다.
  */
 function recomputeSubscribedPagesInBackground(room: Room, sheetIndices: Iterable<number>): void {
-  void (async () => {
+  trackBackgroundWork(room, (async () => {
     for (const sheetIdx of sheetIndices) {
       for (const page of getSubscribedPageUnion(room, sheetIdx)) {
         // 페이지 하나가 실패해도 나머지 페이지는 계속 재계산한다 — 그리고 버려진 Promise의
@@ -847,7 +881,7 @@ function recomputeSubscribedPagesInBackground(room: Room, sheetIndices: Iterable
     }
   })().catch((error: unknown) => {
     console.error(`수식 재계산 체인 실패 (문서 ${room.docId}):`, error);
-  });
+  }));
 }
 
 /** MESSAGE_GRID_STRUCTURE_OP의 페이로드 — "이 시트의 at 자리에 행/열 count개를 넣거나 뺀다".
@@ -911,7 +945,9 @@ function seededPagesInYdoc(room: Room, sheetIdx: number): Set<number> {
  * 열이 끼워지면 모든 페이지의 모든 행이 달라진다 — 어떤 키가 어떻게 바뀌었는지 따로 계산하는 것보다
  * "이 페이지를 비우고 새 진실에서 다시 채운다"가 훨씬 단순하고 어긋날 여지가 없다. 비우기·채우기·
  * 재계산 세 원시 연산은 모두 Task 7이 이미 쓰고 있는 것 그대로이고, 각자 내부에서 이벤트 루프에
- * 양보한다.
+ * 양보한다. 서식(GRID_STYLES_MAP)도 이제 콘텐츠와 함께 이 비우기·채우기를 그대로 탄다 —
+ * unseedGridPageFromXlsx/seedGridPageFromXlsx가 값과 서식을 같은 트랜잭션 범위에서 함께 다루므로,
+ * 예전처럼 서식 키만 따로 shiftGridStyleKeys로 옮길 필요가 없다(그 함수는 삭제됐다).
  *
  * 대상은 "구독 중인 페이지"만이 아니라 **지금 Yjs에 올라와 있는 모든 페이지**다: 구독에서 빠졌지만
  * 아직 유예 시간(PAGE_UNSEED_GRACE_MS) 안이라 남아 있는 페이지도 옛 데이터를 들고 있으므로,
@@ -1031,24 +1067,14 @@ async function applyGridStructureOp(room: Room, op: GridStructureOp): Promise<vo
     else if (mergesMap.has(mergesKey)) mergesMap.delete(mergesKey);
   }, GRID_STRUCTURE_SHIFT_ORIGIN);
 
-  // 2) 서식 키 재매핑 — 서식 맵은 윈도잉하지 않으므로 페이지 재시딩으로는 옮겨지지 않는다.
-  await shiftGridStyleKeys(
-    room.ydoc,
-    op.sheet,
-    onRows ? 'row' : 'col',
-    op.at,
-    op.count,
-    insert,
-    MAX_CANONICAL_ROWS,
-    MAX_CANONICAL_COLS,
-  );
-  if (rooms.get(room.docId) !== room) return;
-
-  // 3) 셀 값·계산값 — Yjs에 올라와 있는 페이지를 새 canonical 기준으로 다시 채운다.
+  // 2) 셀 값·서식·계산값 — Yjs에 올라와 있는 페이지를 새 canonical 기준으로 다시 채운다. 서식은
+  //    이제 콘텐츠와 함께 윈도잉되므로(GRID_STYLES_MAP), 예전에 여기 있던 별도의 "서식 키
+  //    재매핑"(shiftGridStyleKeys) 단계는 더 이상 필요 없다 — 이 비우기·채우기 한 번으로 서식도
+  //    같이 새 좌표에 자리 잡는다(refreshSeededPagesAfterShift 주석 참고).
   await refreshSeededPagesAfterShift(room, op.sheet, rowExtentBefore);
   if (rooms.get(room.docId) !== room) return;
 
-  // 4) 구조 메타데이터(맨 마지막 — 위 주석 참고). 기존 항목을 펼쳐 이름·틀고정·탭 순서를 보존하고
+  // 3) 구조 메타데이터(맨 마지막 — 위 주석 참고). 기존 항목을 펼쳐 이름·틀고정·탭 순서를 보존하고
   //    이 연산이 실제로 바꾼 것(행/열 수, 열 너비)만 덮어쓴다.
   const structure = room.ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
   const previous = structure.get(mergesKey);
@@ -1080,20 +1106,20 @@ async function seedRoom(room: Room): Promise<void> {
       room.originalXlsxBytes = new Uint8Array(original);
       // 전체 그리드가 아니라 시트별 크기만 남긴다 — Room.baselineSheetExtents 주석 참고.
       room.baselineSheetExtents = lazyStore.sheetMeta.map((s) => ({ rowCount: s.rowCount, colCount: s.colCount }));
-      // 셀 데이터는 여기서 채우지 않는다(윈도잉 컷오버) — 구조/병합 메타데이터만 전량 채우고,
-      // 실제 셀은 클라이언트가 "이 페이지들을 보고 있다"고 알려올 때 그 페이지만 채운다
-      // (reconcilePageSubscriptions). 룸이 막 생긴 이 시점에는 구독자가 하나도 없으므로 채울
-      // 페이지도 없다. 큰 xlsx를 열 때 전체 셀을 Yjs에 심으며 서버가 멈추던 문제와, 그 전체를
-      // 모든 클라이언트에 전파하던 비용이 여기서 사라진다.
+      // 셀 데이터·서식은 여기서 채우지 않는다(윈도잉 컷오버) — 구조/병합 메타데이터만 전량 채우고,
+      // 실제 셀 값과 서식은 클라이언트가 "이 페이지들을 보고 있다"고 알려올 때 그 페이지만 함께
+      // 채운다(reconcilePageSubscriptions → seedGridPageFromXlsx, xlsx/collab.ts docblock 참고).
+      // 룸이 막 생긴 이 시점에는 구독자가 하나도 없으므로 채울 페이지도 없다.
       await seedGridStructureOnly(ydoc, lazyStore.sheetMeta);
-      // 서식도 구조 메타데이터와 같은 부류다 — **절대 윈도잉하지 않고** 여기서 전량 한 번만 채운
-      // 뒤 어떤 unseed 경로에서도 지우지 않는다. 서식을 셀 값처럼 윈도잉하면, 서버에 서식 편집을
-      // canonical로 되반영하는 경로가 없기 때문에 페이지가 비워졌다 다시 채워지는 순간 사용자가
-      // 적용해 둔 굵게·색·표시 형식이 조용히 원본 서식으로 되돌아간다
-      // (seedGridStylesFromXlsx 주석 참고). LazyGridStore 기준으로는 이 한 번의 전량 시딩이
-      // 시트 전체를 디스크에서 훑는 유일한 지점이다(스펙 문서의 알려진 특성 — 서식은 어차피
-      // 한 번은 전량 읽어야 한다, 다 읽고 나면 Yjs로 흘려보내고 버린다).
-      await seedGridStylesFromXlsx(ydoc, lazyStore);
+      // 서식은 한때(이 룸 열기 경로가 있던 시절부터 최근까지) `seedGridStylesFromXlsx`가 여기서
+      // 워크북 전체를 별도로 한 번 더 훑어(모든 시트 × 모든 행에 getRow) 룸이 열리자마자 전량
+      // 채웠다 — 구조 메타데이터처럼 "절대 윈도잉하지 않는 데이터"로 다뤘기 때문이다. 그런데
+      // 실측 결과 이 전량 스캔이 룸을 여는 시간의 대부분(2만 행 파일 기준 약 80%, 5.9초)을
+      // 차지했고, `joinEditSession`은 그 완료를 `room.ready`로 기다리므로 클라이언트의 첫
+      // 페이지-구독 요청까지 통째로 그만큼 밀렸다(콘텐츠는 이미 윈도잉돼 있어 정작 병목은
+      // 서식이었다). 이제는 서식도 콘텐츠와 정확히 같은 시점·같은 창(페이지)에 seedGridPageFromXlsx가
+      // 함께 채운다 — 안전성 근거(dirtyOverlay 기반 재시딩이 편집을 보존한다, export는 애초에
+      // Yjs 서식 맵을 읽지 않는다)는 seedGridPageFromXlsx의 docblock 참고.
       const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
       cells.observe((event) => {
         // 서버 자신이 창을 채우거나(seed) 비운(unseed) 변경은 사용자 편집이 아니므로 canonical에
@@ -1106,7 +1132,7 @@ async function seedRoom(room: Room): Promise<void> {
         // applyCellsChangeToCanonical은 이제 async다(LazyGridStore.getCell이 디스크를 읽어야 할
         // 수도 있어서) — Yjs observe 콜백 자체는 동기여야 하므로 흘려보내고, 재계산은 그 완료를
         // 기다린 뒤 잇는다(재계산이 더티 오버레이가 아직 안 채워진 값을 볼 수 없도록).
-        void applyCellsChangeToCanonical(lazyStore, cells, event)
+        trackBackgroundWork(room, applyCellsChangeToCanonical(lazyStore, cells, event)
           .then(() => {
             // 이번 배치에서 실제로 바뀐 셀이 속한 시트만 재계산한다 — event.changes.keys가
             // "시트:행:열" 키별로 add/update/delete를 알려주므로 거기서 시트 인덱스를 뽑아낸다.
@@ -1125,23 +1151,24 @@ async function seedRoom(room: Room): Promise<void> {
           })
           .catch((error: unknown) => {
             console.error(`셀 변경 반영 실패 (문서 ${room.docId}):`, error);
-          });
+          }));
       });
       // 서식(C1)과 구조(C2)도 셀 값과 똑같이 canonical에 되반영한다 — 셀 값만 관찰하던 것이
       // "서식만 바꾼 편집"과 "원본 범위 밖 편집·모든 구조 변경"이 저장된 파일에서 조용히 사라지던
-      // 원인이었다. 최초 전량 시딩(seedGridStructureOnly/seedGridStylesFromXlsx)은 이미 위에서
-      // 끝났고 그 트랜잭션에는 GRID_WINDOW_SEED_ORIGIN이 붙어 있으므로, 등록 시점과 origin 양쪽
-      // 으로 "서버 자신의 시딩"을 사용자 편집으로 오해할 일이 없다(cells.observe와 동일한 방어).
+      // 원인이었다. 최초 전량 시딩(seedGridStructureOnly)은 이미 위에서 끝났고 그 트랜잭션에는
+      // GRID_WINDOW_SEED_ORIGIN이 붙어 있으므로, 등록 시점과 origin 양쪽으로 "서버 자신의 시딩"을
+      // 사용자 편집으로 오해할 일이 없다(cells.observe와 동일한 방어). 서식은 이제 콘텐츠처럼
+      // 페이지 단위로 윈도잉되므로(seedGridPageFromXlsx/unseedGridPageFromXlsx), 그 채우기·비우기
+      // 트랜잭션도 전부 GRID_WINDOW_SEED_ORIGIN으로 표시돼 아래에서 걸러진다.
       const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
       styles.observe((event) => {
         if (event.transaction.origin === GRID_WINDOW_SEED_ORIGIN) return;
-        // 행/열 삽입이 서식 키를 다시 매긴 것도 되반영하지 않는다 — canonical의 서식은 셀 객체
-        // 안의 인덱스(GridCell.s)라 행/열을 옮기면 이미 함께 따라온 상태다. 여기서 또 반영하면
-        // 같은 이동이 두 번 적용된다(shiftGridStyleKeys / GRID_STRUCTURE_SHIFT_ORIGIN 주석 참고).
-        if (event.transaction.origin === GRID_STRUCTURE_SHIFT_ORIGIN) return;
-        void applyStylesChangeToCanonical(lazyStore, styles, event).catch((error: unknown) => {
-          console.error(`서식 변경 반영 실패 (문서 ${room.docId}):`, error);
-        });
+        trackBackgroundWork(
+          room,
+          applyStylesChangeToCanonical(lazyStore, styles, event).catch((error: unknown) => {
+            console.error(`서식 변경 반영 실패 (문서 ${room.docId}):`, error);
+          }),
+        );
       });
       const structure = ydoc.getMap<SheetStructure>(GRID_STRUCTURE_MAP);
       structure.observe((event) => {
@@ -1462,6 +1489,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     sheetDisplayOrder: new Map<number, number>(),
     pageSubscriptions: new Map(),
     canonicalGrowth: Promise.resolve(),
+    backgroundWork: new Set<Promise<void>>(),
     pendingSlideSeeds: new Map(),
     connSlideSeedsInFlight: new Map(),
   };
@@ -2061,9 +2089,12 @@ async function reconcilePageSubscriptions(
  * 끊긴다(scheduleAutosave의 같은 주석 참고).
  */
 function reconcileInBackground(room: Room, sheet: number, before: Set<number>, after: Set<number>): void {
-  void reconcilePageSubscriptions(room, sheet, before, after).catch((error: unknown) => {
-    console.error(`페이지 구독 반영 실패 (문서 ${room.docId}, 시트 ${sheet}):`, error);
-  });
+  trackBackgroundWork(
+    room,
+    reconcilePageSubscriptions(room, sheet, before, after).catch((error: unknown) => {
+      console.error(`페이지 구독 반영 실패 (문서 ${room.docId}, 시트 ${sheet}):`, error);
+    }),
+  );
 }
 
 /**
@@ -2121,6 +2152,25 @@ export function getRoomYdocForTest(docId: string): Y.Doc | null {
  * 성장은 이벤트 루프에 양보하며 청크 단위로 도는 백그라운드 체인이라(canonicalGrowth 주석 참고)
  * 고정된 틱 수를 흘려보내는 것으로는 완료를 보장할 수 없다.
  */
+/**
+ * 테스트 전용 — 지금 열려 있는 **모든** 룸의 진행 중인 백그라운드 작업(페이지 창 반영, 수식 재계산,
+ * 셀/서식 편집의 canonical 되반영)이 끝날 때까지 기다린다(Room.backgroundWork 주석 참고).
+ *
+ * 왜 docId를 받지 않는가: 테스트 헬퍼(`flushEventLoop`)는 매 턴 이걸 부르는데 그 자리에서 docId를
+ * 알 수 없는 경우가 많다. 테스트 프로세스에는 그 테스트가 연 룸만 존재하므로 전체를 훑어도 같은
+ * 뜻이고, 훨씬 부르기 쉽다.
+ *
+ * 한 작업이 끝나면서 다음 작업을 예약할 수 있으므로(구독 반영 → 재계산 → canonical 되반영) 한 번
+ * 기다리는 것으로는 부족하다 — 호출부가 턴을 흘려보내며 반복해서 부르는 것을 전제로, 여기서는
+ * "지금 장부에 올라 있는 것들"만 기다린다.
+ */
+export async function drainRoomBackgroundWorkForTest(): Promise<void> {
+  for (const room of rooms.values()) {
+    if (room.backgroundWork.size === 0) continue;
+    await Promise.all([...room.backgroundWork]);
+  }
+}
+
 export async function awaitCanonicalGrowthForTest(docId: string): Promise<void> {
   const room = rooms.get(docId);
   if (!room) return;

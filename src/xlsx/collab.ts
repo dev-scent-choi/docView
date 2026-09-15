@@ -250,7 +250,7 @@ export function isAutosaveExemptOrigin(origin: unknown): boolean {
  * getRow를 호출하지 않는다(호출부가 청크 단위로 Promise.all 배치 읽기를 한 뒤 이 함수로 각 셀을
  * 뽑아 쓰는 구조 — Task 8 "구현 순서 메모" 참고).
  *
- * 이 조회가 dirtyOverlay를 확인하는 이유: seedGridPageFromXlsx/seedGridStylesFromXlsx는 나중에
+ * 이 조회가 dirtyOverlay를 확인하는 이유: seedGridPageFromXlsx는 나중에
  * (Task 11+) 실제 편집 중인 LazyGridStore에도 그대로 쓰이게 된다 — 편집된 칸은 디스크의 원본이
  * 아니라 dirtyOverlay에만 최신 값이 있으므로, 이걸 빼먹으면 창을 벗어났다 되돌아온 페이지에서
  * 사용자의 편집이 조용히 원본 값으로 되돌아간다(GRID_WINDOW_SEED_ORIGIN 주석이 경고하는 것과
@@ -279,9 +279,33 @@ function resolveGridCell(
  * 돌아온 페이지도 편집된 값 그대로 되살아나야 한다(원본에서 다시 읽으면 그 편집이 조용히
  * 되돌려진다) — resolveGridCell의 dirtyOverlay 확인이 그걸 보장한다.
  *
- * **서식(GRID_STYLES_MAP/GRID_STYLES_BASELINE_MAP)은 여기서 채우지 않는다** — 서식은 구조
- * 메타데이터와 마찬가지로 절대 윈도잉하지 않고 룸을 열 때 전량 한 번만 채운다
- * (seedGridStylesFromXlsx 주석 참고).
+ * **서식(GRID_STYLES_MAP/GRID_STYLES_BASELINE_MAP)도 이제 여기서 콘텐츠와 함께 채운다.**
+ * 예전에는 룸을 열 때 `seedGridStylesFromXlsx`가 워크북 전체(모든 시트 × 모든 행)를 한 번에 훑어
+ * `getRow`를 호출해 서식을 전량 미리 채웠고, `joinEditSession`은 그 완료를 `room.ready`로
+ * 기다렸다 — 실측 결과 이 전량 스캔이 룸을 여는 시간의 대부분을 차지했다(2만 행 파일에서 약 80%,
+ * 5.9초 / 6만 행에서 약 81%, 18.4초 — 콘텐츠 인제스트나 수식 재계산보다 훨씬 큰 비용). 콘텐츠
+ * (cells/baseline)는 이미 Task 11부터 "지금 구독된 페이지만" 채우는데, 서식만 룸이 열리자마자
+ * 시트 전체를 선점적으로 읽는 게 비대칭이었고 그게 바로 이 비용의 정체였다.
+ *
+ * 고치는 방법은 콘텐츠가 이미 쓰는 패턴을 그대로 따르는 것이다: 이 함수는 어차피 페이지의 각 셀을
+ * `resolveGridCell`로 읽으면서 `seedableCellValue`(쉼표 서식 판정) 때문에 그 셀의 style을 이미
+ * 구해 두고 있었다 — 그 style을 그대로 GRID_STYLES_MAP에도 같이 쓰기만 하면, 서식도 콘텐츠와
+ * **정확히 같은 시점에, 정확히 같은 창(구독된 페이지)만** 채워진다. 추가 디스크 읽기도, 추가
+ * 청크 루프도 없다.
+ *
+ * 서식을 윈도잉해도 안전한 이유(예전엔 "서식은 절대 윈도잉하지 않는다"가 규칙이었다 — 아래 두
+ * 가지가 그 규칙을 무너뜨리지 않고 대체한다):
+ * 1) **화면 표시**: 페이지가 비워졌다(unseed) 다시 채워질 때, `resolveGridCell`은 항상
+ *    `dirtyOverlay`를 먼저 확인한다. 사용자가 그 페이지에서 적용한 서식 편집은 room.ts의
+ *    `styles.observe` → `applyStylesChangeToCanonical`이 이미 `setDirtyCell`로 `dirtyOverlay`에
+ *    반영해 두므로, 재시딩은 편집된 서식을 그대로 복원한다 — "스크롤만 했는데 서식이 원본으로
+ *    되돌아가는" 회귀는 콘텐츠와 마찬가지로 일어나지 않는다.
+ * 2) **저장(export)**: `exportXlsxFromGrid`는 애초에 Yjs의 GRID_STYLES_MAP을 단 한 번도 읽지
+ *    않는다 — `store.dirtyOverlay`(편집된 칸)와 원본 xlsx 바이트(편집 안 된 칸)만 본다. 즉 서식이
+ *    Yjs에 아직 없거나(구독 전) 창 밖이라 비워져 있어도(unseed) 저장 결과에는 원래부터 아무
+ *    영향이 없다 — 이 사실이 서식을 안전하게 윈도잉할 수 있는 진짜 근거다. GRID_STYLES_MAP은
+ *    (GRID_BASELINE_MAP처럼) 저장 기준선이 아니라 순전히 "지금 그 페이지를 보는 클라이언트의
+ *    화면 표시용" 캐시일 뿐이다.
  */
 export async function seedGridPageFromXlsx(
   ydoc: Y.Doc,
@@ -293,6 +317,8 @@ export async function seedGridPageFromXlsx(
   if (!meta) return;
   const cells = ydoc.getMap<string>(GRID_CELLS_MAP);
   const baseline = ydoc.getMap<string>(GRID_BASELINE_MAP);
+  const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
+  const stylesBaseline = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP);
   const covered = mergeCoveredCells(meta.merges);
   const pageStart = page * PAGE_SIZE_ROWS;
   const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, meta.rowCount);
@@ -326,68 +352,20 @@ export async function seedGridPageFromXlsx(
             // 채우는 것뿐.
             baseline.set(key, value);
           }
-          // 서식은 여기서 쓰지 않는다 — 룸을 열 때 seedGridStylesFromXlsx가 전량 채워 두고 그
-          // 뒤로는 절대 지우지 않으므로, 페이지가 (재)구독될 때 다시 쓸 것이 없다. 여기서 다시
-          // 쓰면 사용자가 그 페이지를 보는 동안 적용한 서식이 원본 파일의 서식으로 되돌아간다.
+          // 서식도 콘텐츠와 같은 창(이 페이지)만, 같은 시점에 채운다 — 함수 docblock의
+          // "서식을 윈도잉해도 안전한 이유" 참고. GRID_STYLES_BASELINE_MAP도 GRID_BASELINE_MAP과
+          // 똑같이 저장 기준선이 아니라 클라이언트 참고용일 뿐이다.
+          if (style) {
+            const attrs = toCellStyleAttrs(style);
+            if (Object.keys(attrs).length > 0) {
+              styles.set(key, attrs);
+              stylesBaseline.set(key, attrs);
+            }
+          }
         }
       }
     }, GRID_WINDOW_SEED_ORIGIN);
     await yieldToEventLoop();
-  }
-}
-
-/**
- * 워크북 전체의 셀 서식을 한 번에 Yjs에 채운다 — 룸을 열자마자(seedGridStructureOnly 바로 뒤)
- * 한 번만 호출하고, 그 뒤로는 어떤 unseed 경로에서도 **절대 지우지 않는다**.
- *
- * **왜 서식은 윈도잉하지 않는가**: 클라이언트는 자기 UI 동작(굵게·색·표시 형식)으로
- * GRID_STYLES_MAP에 직접 쓰는데, 서버에는 그 서식 편집을 canonicalGrid로 되반영하는 관찰자가
- * 없다(값 편집만 cells.observe가 처리한다). 그래서 서식을 셀 값처럼 윈도잉하면 —
- * 페이지가 유예 시간 뒤 비워지고(서식 키 삭제) 나중에 다시 구독되어 canonical 기준으로 다시
- * 채워지는 순간 — 사용자가 그 페이지에서 적용해 둔 서식이 조용히 원본 서식으로 되돌아간다
- * (스크롤만 했는데 굵게가 풀리는 회귀). 구조 메타데이터(GRID_STRUCTURE_MAP/GRID_MERGES_MAP)와
- * 똑같이 "절대 윈도잉하지 않는 데이터"로 취급하면 애초에 지워지지 않으므로 되돌아갈 일이 없다.
- *
- * 전량을 한 번에 채워도 괜찮은 이유: 서식이 걸린 셀은 보통 전체 셀 수보다 훨씬 희소하다(대개
- * 머리글 행·합계 열 정도). 그래도 만약을 위해 다른 대형 루프와 같은 YIELD_EVERY_N_ROWS 청크 +
- * yieldToEventLoop() 구조를 그대로 쓴다 — 이 코드베이스에서 시트 행을 도는 모든 루프의 관례다.
- */
-export async function seedGridStylesFromXlsx(ydoc: Y.Doc, store: LazyGridStore): Promise<void> {
-  const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
-  const stylesBaseline = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP);
-
-  for (let sheetIdx = 0; sheetIdx < store.sheetMeta.length; sheetIdx += 1) {
-    const meta = store.sheetMeta[sheetIdx];
-    const covered = mergeCoveredCells(meta.merges);
-
-    for (let start = 0; start < meta.rowCount; start += YIELD_EVERY_N_ROWS) {
-      const end = Math.min(start + YIELD_EVERY_N_ROWS, meta.rowCount);
-      const rowNumbers: number[] = [];
-      for (let r = start; r < end; r += 1) rowNumbers.push(r);
-      // seedGridPageFromXlsx와 같은 이유로 청크 안의 행들을 Promise.all로 한 번에 기다린다 —
-      // 이 함수는 페이지가 아니라 시트 전체를 도므로(윈도잉 대상이 아님, 아래 함수 주석 참고)
-      // 이 병렬화가 특히 중요하다.
-      const rows = await Promise.all(rowNumbers.map((r) => getRow(store, sheetIdx, r)));
-      ydoc.transact(() => {
-        for (let i = 0; i < rowNumbers.length; i += 1) {
-          const r = rowNumbers[i];
-          const originalRow = rows[i];
-          for (let c = 0; c < meta.colCount; c += 1) {
-            if (covered.has(`${r}:${c}`)) continue; // 병합에 덮인 칸 — 앵커의 중복이라 시딩하지 않는다
-            const cell = resolveGridCell(store, sheetIdx, r, c, originalRow);
-            if (cell === 0) continue;
-            const style = cell.s !== undefined ? store.styles[cell.s] : undefined;
-            if (!style) continue;
-            const attrs = toCellStyleAttrs(style);
-            if (Object.keys(attrs).length === 0) continue;
-            const key = gridCellKey(sheetIdx, r, c);
-            styles.set(key, attrs);
-            stylesBaseline.set(key, attrs);
-          }
-        }
-      }, GRID_WINDOW_SEED_ORIGIN);
-      await yieldToEventLoop();
-    }
   }
 }
 
@@ -399,80 +377,14 @@ export async function seedGridStylesFromXlsx(ydoc: Y.Doc, store: LazyGridStore):
  * canonicalGrid를 실제로 바꾸므로 반드시 저장돼야 한다. 그래서 isAutosaveExemptOrigin에는 넣지
  * 않고, room.ts의 관찰자들만 이 표식을 보고 canonical 되반영을 건너뛴다(canonical은 이미
  * gridShift.ts가 직접 옮겨 놓은 상태라, 관찰자가 또 반영하면 같은 이동이 두 번 적용된다).
+ *
+ * (서식 맵(GRID_STYLES_MAP)의 키 재배치는 예전엔 이 origin으로 표시된 별도 함수
+ * `shiftGridStyleKeys`가 직접 옮겼다 — 서식이 절대 윈도잉되지 않던 시절, unseed/reseed로는 서식
+ * 키가 옮겨지지 않았기 때문이다. 서식이 콘텐츠와 함께 윈도잉되는 지금은
+ * `unseedGridPageFromXlsx`/`seedGridPageFromXlsx`의 통상적인 비우기·재시딩만으로 서식도 새 좌표에
+ * 다시 채워지므로 그 함수는 삭제됐다 — room.ts의 `refreshSeededPagesAfterShift` 참고.)
  */
 export const GRID_STRUCTURE_SHIFT_ORIGIN = 'structure-shift';
-
-/**
- * 행/열 삽입·삭제에 맞춰 **Yjs 서식 맵(GRID_STYLES_MAP)의 키를 다시 매긴다.**
- *
- * 왜 이것만 따로 필요한가: 셀 값(cells/baseline/computed)은 구독 페이지를 통째로 비우고
- * canonical에서 다시 채우면 되지만(room.ts의 페이지 재시딩), **서식 맵은 윈도잉 대상이 아니라**
- * 룸을 열 때 워크북 전량이 한 번 채워지고 그 뒤 어떤 unseed 경로에서도 지워지지 않는다
- * (seedGridStylesFromXlsx 주석). 그래서 페이지 재시딩만으로는 서식 키가 옛 좌표에 그대로 남아
- * 값과 서식이 한 칸씩 어긋난다("굵게가 엉뚱한 행에 남는" 증상).
- *
- * canonical에서 다시 만드는 대신 **기존 키를 옮기는** 이유는 비용이다: 서식 맵은 값이 있는
- * 칸보다도 희소해서(대개 머리글·합계 줄) 옮길 항목 수가 곧 이 연산의 크기다 — 시트 전체
- * (최대 30만 행)를 훑는 것보다 훨씬 싸다. 그래도 항목 수 자체가 클 수 있으므로 청크마다 실제로
- * 이벤트 루프에 양보한다.
- *
- * 좌표가 상한(rowLimit/colLimit) 밖으로 밀려나는 항목은 그냥 버린다 — 그 자리는 canonical도,
- * 저장될 파일도 표현할 수 없는 영역이다.
- *
- * GRID_STYLES_BASELINE_MAP은 **일부러 건드리지 않는다**: 저장 기준선은 Task 3 이후
- * room.dirtyCells/structuralOps이고 이 맵을 읽는 코드는 서버·클라이언트 어디에도 남아 있지 않다
- * (계획의 "죽은 baseline/stylesBaseline 맵" 정리 항목).
- */
-export async function shiftGridStyleKeys(
-  ydoc: Y.Doc,
-  sheetIdx: number,
-  axis: 'row' | 'col',
-  at: number,
-  count: number,
-  insert: boolean,
-  rowLimit: number,
-  colLimit: number,
-): Promise<void> {
-  const styles = ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP);
-  const limit = axis === 'row' ? rowLimit : colLimit;
-
-  // 1) 먼저 **전체 스냅샷**을 뜬다 — 옮기는 도중에 맵을 읽으면 이미 옮겨 놓은 항목을 다시 원본으로
-  //    보게 되어(목적지가 다른 항목의 원본이 되는 연쇄) 값이 복제되거나 사라진다.
-  const staleKeys: string[] = [];
-  const writes: Array<{ key: string; attrs: CellStyleAttrs }> = [];
-  for (const [key, attrs] of styles.entries()) {
-    const parsed = parseGridCellKey(key);
-    if (!parsed || parsed.sheetIdx !== sheetIdx) continue;
-    const index = axis === 'row' ? parsed.row : parsed.col;
-    if (index < at) continue; // 삽입/삭제 지점 앞은 움직이지 않는다 — 키를 그대로 둔다
-    staleKeys.push(key);
-    if (!insert && index < at + count) continue; // 삭제된 행/열의 서식 — 목적지가 없다
-    const moved = insert ? index + count : index - count;
-    if (moved >= limit) continue; // 상한 밖으로 밀려난 서식은 버린다
-    const nextKey =
-      axis === 'row' ? gridCellKey(sheetIdx, moved, parsed.col) : gridCellKey(sheetIdx, parsed.row, moved);
-    writes.push({ key: nextKey, attrs });
-  }
-  if (staleKeys.length === 0 && writes.length === 0) return;
-
-  // 2) 옛 자리를 먼저 전부 비우고 나서 새 자리를 쓴다 — 순서를 섞으면 아직 안 옮긴 항목의 원본을
-  //    새로 쓴 값이 덮어쓸 수 있다. 옮기지 않는 항목(index < at)은 애초에 목적지 범위와 겹치지
-  //    않으므로 이 통째 재작성에 영향을 받지 않는다.
-  for (let start = 0; start < staleKeys.length; start += YIELD_EVERY_N_ROWS) {
-    const end = Math.min(start + YIELD_EVERY_N_ROWS, staleKeys.length);
-    ydoc.transact(() => {
-      for (let i = start; i < end; i += 1) styles.delete(staleKeys[i]);
-    }, GRID_STRUCTURE_SHIFT_ORIGIN);
-    await yieldToEventLoop();
-  }
-  for (let start = 0; start < writes.length; start += YIELD_EVERY_N_ROWS) {
-    const end = Math.min(start + YIELD_EVERY_N_ROWS, writes.length);
-    ydoc.transact(() => {
-      for (let i = start; i < end; i += 1) styles.set(writes[i].key, writes[i].attrs);
-    }, GRID_STRUCTURE_SHIFT_ORIGIN);
-    await yieldToEventLoop();
-  }
-}
 
 /**
  * 페이지 하나를 Yjs에서 지운다 — canonical 그리드에는 아무 영향도 없다(그쪽이 항상 진실이고,
@@ -488,14 +400,18 @@ export async function unseedGridPageFromXlsx(
   page: number,
   rowCount: number,
 ): Promise<void> {
-  // 서식 맵(GRID_STYLES_MAP/GRID_STYLES_BASELINE_MAP)은 **일부러 빠져 있다** — 서식은 윈도잉
-  // 대상이 아니고(seedGridStylesFromXlsx가 룸을 열 때 전량 채운다) 서버에는 클라이언트의 서식
-  // 편집을 canonical로 되반영하는 경로가 없다. 여기서 지우면 나중에 그 페이지를 다시 구독할 때
-  // 원본 서식으로 다시 채워져, 사용자가 적용해 둔 서식이 스크롤만으로 조용히 되돌아간다.
+  // 서식 맵(GRID_STYLES_MAP/GRID_STYLES_BASELINE_MAP)도 이제 콘텐츠와 함께 비운다 — 서식이 더
+  // 이상 "절대 윈도잉하지 않는" 예외가 아니다(seedGridPageFromXlsx의 docblock "서식을 윈도잉해도
+  // 안전한 이유" 참고). 서버에는 클라이언트의 서식 편집을 canonical로 되반영하는 경로
+  // (room.ts styles.observe → applyStylesChangeToCanonical → setDirtyCell)가 이미 있으므로,
+  // 나중에 이 페이지가 다시 구독되면 seedGridPageFromXlsx가 resolveGridCell로 dirtyOverlay를
+  // 먼저 확인해 편집된 서식을 그대로 복원한다 — 원본 서식으로 조용히 되돌아가는 일은 없다.
   const maps = [
     ydoc.getMap<string>(GRID_CELLS_MAP),
     ydoc.getMap<string>(GRID_BASELINE_MAP),
     ydoc.getMap<string>(GRID_COMPUTED_MAP),
+    ydoc.getMap<CellStyleAttrs>(GRID_STYLES_MAP),
+    ydoc.getMap<CellStyleAttrs>(GRID_STYLES_BASELINE_MAP),
   ] as ReadonlyArray<Y.Map<unknown>>;
   const pageStart = page * PAGE_SIZE_ROWS;
   const pageEnd = Math.min(pageStart + PAGE_SIZE_ROWS, rowCount);
