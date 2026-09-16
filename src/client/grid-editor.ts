@@ -492,9 +492,40 @@ async function main(): Promise<void> {
     applySpillDisplay(td, key, text);
   }
 
+  /** 실제 엑셀처럼, 스필(오른쪽 빈 칸 위로 값이 넘쳐 보이는 동작)은 기본이 왼쪽 정렬인 칸에서만
+   * 일어난다 — 가운데/오른쪽 정렬이 걸린 칸(예: SUM 등 계산 결과에 가운데 정렬을 걸어 둔 칸)은
+   * 실제 엑셀에서도 절대 옆 칸으로 넘치지 않고 자기 칸 폭 안에서 잘린다. 예전엔 이 구분 없이 값
+   * 있는 칸이면 무조건 폭을 넓혔는데, 그러면 넓어진 span의 text-align이 가운데/오른쪽으로
+   * 상속되면서 글자가 원래 칸에서 몇 칸이나 떨어진 위치에 그려져 "엉뚱한 칸에 값이 보인다"는
+   * 사용자 신고로 이어졌다(칸 자체의 위치·데이터는 항상 맞았다 — 순수 표시 버그).
+   *
+   * "이 칸의 유효 정렬"을 판단할 때 명시적 정렬(style.a)이 있으면 그대로 따르고, 없으면 엑셀의
+   * 기본 규칙(숫자/날짜/수식 결과는 기본 오른쪽 정렬, 일반 텍스트는 기본 왼쪽 정렬)을 흉내낸다.
+   * 이 시점엔 원본 값의 타입 정보가 없고 화면에 그려질 텍스트(text)만 있으므로, 우선 스타일에
+   * 적힌 숫자 서식(style.nf)을 보고, 없으면 표시 텍스트 자체가(쉼표·통화 기호·퍼센트·공백·
+   * 회계식 음수 괄호를 걷어내고 보면) 유한한 숫자로 읽히는지를 폴백으로 쓴다. */
+  function isSpillEligible(style: CellStyleAttrs | undefined, text: string): boolean {
+    if (style) {
+      if (style.a === 'c' || style.a === 'r') return false; // 명시적 가운데/오른쪽 정렬 — 절대 안 넘친다
+      if (style.a === 'l') return true; // 명시적 왼쪽 정렬 — 항상 넘친다
+      if (style.nf) return false; // 숫자 서식이 걸려 있으면 기본 오른쪽 정렬
+    }
+    if (text === 'TRUE' || text === 'FALSE') return false; // 논리값도 엑셀 기본은 가운데 정렬
+    const trimmed = text.trim();
+    // 회계 서식의 음수 괄호 표기 "(1,234)"도 숫자로 인식되게 부호로 풀어준다
+    const unwrapped =
+      trimmed.length > 1 && trimmed.startsWith('(') && trimmed.endsWith(')') ? `-${trimmed.slice(1, -1)}` : trimmed;
+    const stripped = unwrapped.replace(/[₩$€£¥,%\s]/g, '');
+    const looksNumeric = stripped !== '' && Number.isFinite(Number(stripped));
+    return !looksNumeric;
+  }
+
   /** 실제 엑셀처럼 — 오른쪽 이웃 칸이 비어 있으면 이 칸의 표시 내용이 그 위로 넘쳐 보이게 한다
    * (값 있는 칸이나 병합 칸을 만나면 거기서 멈춘다). td.textContent를 직접 쓰지 않고 안쪽
-   * span(.g-cell-spill)의 너비만 늘려야 td 경계 밖으로 시각적으로 넘칠 수 있다(CSS 쪽 참고). */
+   * span(.g-cell-spill)의 너비만 늘려야 td 경계 밖으로 시각적으로 넘칠 수 있다(CSS 쪽 참고).
+   * 단, 기본이 왼쪽 정렬인 칸만 넓힌다(isSpillEligible 참고) — getComputedStyle 같은 강제
+   * 레이아웃 계산은 쓰지 않는다(아래 캐시 관련 주석과 같은 이유로, 칸마다 그런 호출이 들어가면
+   * 레이아웃 스래싱으로 직결된다). 판정은 이미 들고 있는 style 객체와 문자열만으로 끝난다. */
   function applySpillDisplay(td: HTMLTableCellElement, key: string, text: string): void {
     let span = td.querySelector<HTMLSpanElement>(':scope > .g-cell-spill');
     if (!span) {
@@ -505,6 +536,7 @@ async function main(): Promise<void> {
     span.textContent = text;
     span.style.width = '';
     if (!text.trim() || td.colSpan > 1) return; // 병합 칸은 이미 colspan으로 넓어져 있어 스필이 필요 없다
+    if (!isSpillEligible(styles.get(key), text)) return;
     const parsed = parseGridCellKey(key);
     if (!parsed) return;
     const { sheetIdx, row, col } = parsed;

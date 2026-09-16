@@ -1055,6 +1055,41 @@ function markMatches(rawText, query) {
   return parts.join('');
 }
 
+/** 실제 엑셀처럼, 오른쪽 빈 칸 위로 값이 "넘쳐 보이는"(스필) 동작은 기본이 왼쪽 정렬인 칸에서만
+ * 일어난다 — 가운데/오른쪽 정렬이 걸린 칸(대표적으로 SUM 등 계산 결과에 가운데 정렬을 걸어 둔
+ * 칸)은 실제 엑셀에서도 절대 옆 칸으로 넘치지 않고 자기 칸 폭 안에서 잘린다. 예전엔 이 구분 없이
+ * 값 있는 칸이면 무조건 폭을 넓혔는데, 그러면 넓어진 span의 text-align이 가운데/오른쪽으로
+ * 상속되면서 글자가 원래 칸에서 몇 칸이나 떨어진 위치에 그려져 "엉뚱한 칸에 값이 보인다"는
+ * 사용자 신고로 이어졌다(칸 자체의 data-r/data-c와 실제 데이터는 항상 맞았다 — 순수 표시 버그).
+ *
+ * "이 칸의 유효 정렬"을 판단할 때 명시적 정렬(style.a)이 있으면 그대로 따르고, 없으면 엑셀의
+ * 기본 규칙(숫자/날짜/수식 결과는 기본 오른쪽 정렬, 일반 텍스트는 기본 왼쪽 정렬)을 흉내낸다.
+ * 이 시점엔 원본 셀 값의 타입 정보가 없고 화면에 그려질 텍스트(rawText, cell.v)만 있으므로,
+ * 우선 스타일에 적힌 숫자 서식(style.nf — src/spreadsheet.ts의 classifyNumFmt가 매긴다)을 보고,
+ * 그것도 없으면 표시 텍스트 자체가(쉼표·통화 기호·퍼센트·공백·회계식 음수 괄호를 걷어내고 보면)
+ * 유한한 숫자로 읽히는지를 폴백으로 쓴다 — src/spreadsheet.ts의 unformattedCellValue와 같은
+ * 발상이지만 그 함수는 "값을 서식 없는 텍스트로 복원"하는 게 목적이라 계약이 달라(여긴 값을
+ * 바꿀 필요가 없고 "숫자처럼 보이는가"만 알면 된다) 그대로 재사용하지 않고 판정 전용으로
+ * 다시 작성했다. getComputedStyle 같은 강제 레이아웃 계산은 절대 쓰지 않는다 — 그리드는 스크롤
+ * 프레임마다 수십~수백 칸을 다시 그리므로 칸마다 그런 호출이 들어가면 레이아웃 스래싱으로
+ * 직결된다(grid-editor.ts의 applySpillDisplay 문서 주석에 있는 것과 같은 교훈). 여기 판정은
+ * 전부 이미 들고 있는 데이터(style 객체, 문자열)만으로 끝난다. */
+function isSpillEligible(style, rawText) {
+  if (style) {
+    if (style.a === 'c' || style.a === 'r') return false; // 명시적 가운데/오른쪽 정렬 — 절대 안 넘친다
+    if (style.a === 'l') return true; // 명시적 왼쪽 정렬 — 항상 넘친다
+    if (style.nf) return false; // 숫자 서식이 걸려 있으면 기본 오른쪽 정렬
+  }
+  if (rawText === 'TRUE' || rawText === 'FALSE') return false; // 논리값도 엑셀 기본은 가운데 정렬
+  const trimmed = rawText.trim();
+  // 회계 서식의 음수 괄호 표기 "(1,234)"도 숫자로 인식되게 부호로 풀어준다
+  const unwrapped =
+    trimmed.length > 1 && trimmed.startsWith('(') && trimmed.endsWith(')') ? `-${trimmed.slice(1, -1)}` : trimmed;
+  const stripped = unwrapped.replace(/[₩$€£¥,%\s]/g, '');
+  const looksNumeric = stripped !== '' && Number.isFinite(Number(stripped));
+  return !looksNumeric;
+}
+
 function renderGridViewport() {
   const sheet = gridState.sheets[gridState.active];
   if (!sheet) return;
@@ -1152,9 +1187,10 @@ function renderGridViewport() {
       const cls = classes.length > 0 ? ` class="${classes.join(' ')}"` : '';
       const span = merge ? ` colspan="${merge.cs}"${merge.rs > 1 ? ` rowspan="${merge.rs}"` : ''}` : '';
       // 실제 엑셀처럼 — 오른쪽으로 빈 칸이 이어지는 만큼 이 칸의 내용이 넘쳐 보이게 허용한다
-      // (병합 칸이나 값 있는 칸을 만나면 거기서 멈춘다).
+      // (병합 칸이나 값 있는 칸을 만나면 거기서 멈춘다). 단, 기본이 왼쪽 정렬인 칸만 — 가운데/
+      // 오른쪽 정렬 칸은 실제 엑셀에서도 넘치지 않는다(isSpillEligible 문서 주석 참고).
       let spillStyle = '';
-      if (!isEmpty && !merge) {
+      if (!isEmpty && !merge && isSpillEligible(cell.s === undefined ? undefined : gridState.styles[cell.s], cell.v)) {
         let spillWidth = colWidthAt(sheet, c);
         for (let cc = c + 1; cc <= colCount; cc += 1) {
           if (gridState.mergeCovered.has(`${r}:${cc}`) || gridState.mergeStarts.has(`${r}:${cc}`)) break;
@@ -1450,6 +1486,7 @@ async function initGridView() {
 
   const meta = await fetchJsonView(`/api/view/grid/meta?${tokenQuery}`);
   gridState.sheets = meta.sheets;
+  gridState.styles = meta.styles;
   injectGridStyles(meta.styles);
 
   const tabs = document.getElementById('sheet-tabs');
