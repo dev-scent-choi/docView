@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import type { DocumentStore } from './storage.js';
+import type { DocumentMeta } from './types.js';
 import { computeGridCellDisplay } from './xlsx/formulas.js';
 
 /** 대형 시트를 훑는 동기 반복문 중간에 이벤트 루프에 제어권을 돌려준다 — 이게 없으면 큰 xlsx를
@@ -87,8 +88,23 @@ export interface GridDocument {
   readonly styles: readonly GridStyle[];
 }
 
+/**
+ * 캐시(derived kind 'grid') 포맷 버전 — 그리드 "구조"(JSONL 줄 모양)가 아니라, 그 안의 셀 값을
+ * "어떻게 계산했는지"가 바뀔 때마다 올린다. 지금 값(2)은 xlsx/formulas.ts의 시트 간 참조(cross-sheet
+ * reference) 버그 수정에 대응한다 — 그 수정 전에 만들어진 캐시는(버전 필드가 아예 없다, 옛
+ * serializeGrid가 안 써 넣었으므로) 시트를 넘나드는 수식이 조용히 틀린 값(또는 계산 전이라면
+ * 원문 그대로)으로 저장돼 있을 수 있다. runGridExtraction(routes/documents.ts)이 이 값을 읽어
+ * "다음 조회 시점에" 낡은 캐시를 감지해 원본에서 다시 계산하도록 하는 lazy self-heal의 기준선이다
+ * (routes/viewer.ts의 loadGridUncached 참고) — 기존 문서를 한꺼번에 마이그레이션하지 않는다(그 자체가
+ * 새로운 리스크이므로). 앞으로 계산 로직이 바뀔 때마다(예: 새로운 함수 지원, 다른 계산 버그 수정)
+ * 이 값을 올리면 같은 메커니즘이 그대로 재사용된다. */
+export const GRID_CACHE_FORMAT_VERSION = 2;
+
 /** JSONL 헤더(1행): 셀 데이터를 제외한 시트 메타 정보 */
 export interface GridHeader {
+  /** GRID_CACHE_FORMAT_VERSION 문서 주석 참고. 이 필드가 없거나(구버전 캐시) 현재 버전과 다르면
+   * "낡은 캐시"로 취급한다. */
+  readonly formatVersion?: number;
   readonly styles: readonly GridStyle[];
   readonly sheets: ReadonlyArray<Omit<GridSheet, 'rows'>>;
 }
@@ -99,6 +115,7 @@ export interface GridHeader {
  */
 export function serializeGrid(grid: GridDocument): Buffer {
   const header: GridHeader = {
+    formatVersion: GRID_CACHE_FORMAT_VERSION,
     styles: grid.styles,
     sheets: grid.sheets.map(({ rows: _rows, ...meta }) => meta),
   };
@@ -144,6 +161,22 @@ export async function saveGridDerived(
     'gridindex',
     Buffer.from(JSON.stringify({ lineOffsets: computeLineOffsets(serialized) })),
   );
+}
+
+/**
+ * 문서 원본(xlsx/csv)을 읽어 GridDocument로 만든다 — routes/documents.ts의 최초 업로드 추출
+ * (runGridExtraction)과 routes/viewer.ts의 낡은 캐시 self-heal(loadGridUncached) 양쪽이 공유하는
+ * "확장자별로 어떤 파서를 쓸지"의 단일 소스. store를 인자로 받는 이유는 saveGridDerived와 같다 —
+ * 이 모듈이 storage.ts를 값으로(순환 없이) 참조하지 않게 하기 위함. */
+export async function buildGridFromOriginal(
+  store: Pick<DocumentStore, 'readOriginal'>,
+  meta: Pick<DocumentMeta, 'id' | 'ext'>,
+): Promise<GridDocument> {
+  const original = await store.readOriginal(meta.id, meta.ext);
+  if (meta.ext === 'csv') {
+    return parseCsvToGrid(original.toString('utf8'));
+  }
+  return parseXlsxToGrid(original);
 }
 
 /**

@@ -207,6 +207,129 @@ describe('xlsx/formulas.ts: computeGridCellDisplay', () => {
   });
 });
 
+/** makeGrid의 다중 시트 버전 — 시트 이름과 그 시트의 행들을 순서대로 받는다. */
+function makeMultiSheetGrid(sheets: ReadonlyArray<{ name: string; rows: Array<Array<{ v: string } | 0>> }>): GridDocument {
+  return {
+    styles: [],
+    sheets: sheets.map(({ name, rows }) => ({
+      name,
+      rowCount: rows.length,
+      colCount: Math.max(1, ...rows.map((r) => r.length)),
+      colWidths: [],
+      merges: [],
+      freezeRows: 0,
+      freezeCols: 0,
+      rows,
+    })),
+  };
+}
+
+// 리뷰가 확인한 버그의 근본 원인 재현: computeGridCellDisplay/computeGridCellDisplaySync 둘 다
+// parser.parse()에 하드코딩된 sheet:'Sheet1'을 넘기고, onCell/onRange가 ref.sheet(fast-formula-parser가
+// 참조된 셀의 실제 시트로 채워 주는 필드)를 무시한 채 항상 호출자의 sheetIdx로 재귀했다 — 그래서
+// 시트를 넘나드는 참조가 조용히 "참조하는 셀 자신"을 가리켜 순환 가드에 걸리고, #REF!가 산술을
+// 거치며 그럴듯하지만 틀린 값으로 둔갑했다(브리프의 실측: Sheet1!A1=2287, Sheet2!A1=SUM(Sheet1!A1:A1)이
+// "0"으로, Sheet2!A1="Sheet1!A1*1"이 "#VALUE!"로 계산됨).
+describe('xlsx/formulas.ts: computeGridCellDisplay — cross-sheet references', () => {
+  test('a range reference to a different sheet (SUM(Sheet1!A1:A1) on Sheet2) computes the ' +
+    'referenced sheet\'s value, not 0 (the exact bug-report scenario)', () => {
+    const grid = makeMultiSheetGrid([
+      { name: 'Sheet1', rows: [[{ v: '2287' }]] },
+      { name: 'Sheet2', rows: [[{ v: '=SUM(Sheet1!A1:A1)' }]] },
+    ]);
+    expect(computeGridCellDisplay(grid, 1, 0, 0)).toBe(2287);
+  });
+
+  test('a direct cell reference to a different sheet (Sheet1!A1*1 on Sheet2) computes correctly, ' +
+    'not #VALUE! (the bug report\'s second reproduction)', () => {
+    const grid = makeMultiSheetGrid([
+      { name: 'Sheet1', rows: [[{ v: '2287' }]] },
+      { name: 'Sheet2', rows: [[{ v: '=Sheet1!A1*1' }]] },
+    ]);
+    expect(computeGridCellDisplay(grid, 1, 0, 0)).toBe(2287);
+  });
+
+  test('an unqualified reference (A1, no sheet prefix) still resolves to the FORMULA\'S OWN sheet ' +
+    '— cross-sheet resolution must not change same-sheet behaviour', () => {
+    const grid = makeMultiSheetGrid([
+      { name: 'Sheet1', rows: [[{ v: '10' }, { v: '=A1+1' }]] },
+      { name: 'Sheet2', rows: [[{ v: '999' }]] }, // 같은 좌표(0,0)에 다른 값 — 잘못 해석되면 999가 섞여든다.
+    ]);
+    expect(computeGridCellDisplay(grid, 0, 0, 1)).toBe(11);
+  });
+
+  test('a reference to a sheet name that does not exist degrades to #REF! for a plain cell ' +
+    'reference, never a crash or a silently wrong value', () => {
+    const grid = makeMultiSheetGrid([{ name: 'Sheet1', rows: [[{ v: '=Ghost!A1' }]] }]);
+    expect(computeGridCellDisplay(grid, 0, 0, 0)).toBe('#REF!');
+  });
+
+  test('a RANGE reference to a sheet name that does not exist degrades the whole formula to #REF!, ' +
+    'not to "sum of an empty range" (0) — a plausible-looking wrong answer is worse than an error', () => {
+    const grid = makeMultiSheetGrid([{ name: 'Sheet1', rows: [[{ v: '=SUM(Ghost!A1:A10)' }]] }]);
+    expect(computeGridCellDisplay(grid, 0, 0, 0)).toBe('#REF!');
+  });
+
+  test('a chained formula spanning multiple sheets (Sheet3 references Sheet2 which references ' +
+    'Sheet1) computes the mathematically correct end-to-end value', () => {
+    const grid = makeMultiSheetGrid([
+      { name: 'Sheet1', rows: [[{ v: '5' }]] },
+      { name: 'Sheet2', rows: [[{ v: '=Sheet1!A1*2' }]] }, // 10
+      { name: 'Sheet3', rows: [[{ v: '=Sheet2!A1+1' }]] }, // 11
+    ]);
+    expect(computeGridCellDisplay(grid, 2, 0, 0)).toBe(11);
+  });
+
+  test('a circular reference THROUGH a cross-sheet reference (Sheet1!A1=Sheet2!A1, Sheet2!A1=Sheet1!A1) ' +
+    'is still detected as a cycle and returns #REF!, not treated as two independent non-cyclic cells', () => {
+    const memo = new Map<string, unknown>();
+    const grid = makeMultiSheetGrid([
+      { name: 'Sheet1', rows: [[{ v: '=Sheet2!A1' }]] },
+      { name: 'Sheet2', rows: [[{ v: '=Sheet1!A1' }]] },
+    ]);
+    expect(computeGridCellDisplay(grid, 0, 0, 0, new Set(), memo)).toBe('#REF!');
+    expect(computeGridCellDisplay(grid, 1, 0, 0, new Set(), memo)).toBe('#REF!');
+    // tainted 규칙(같은 파일의 순환 참조 memo 테스트와 동일): 사이클에 걸린 칸은 영구 캐시되지 않는다.
+    expect(memo.has('0:0:0')).toBe(false);
+    expect(memo.has('1:0:0')).toBe(false);
+  });
+
+  test('a shared memo correctly disambiguates two DIFFERENT sheets\' cells at the SAME row/col ' +
+    '(Sheet1!A1 and Sheet2!A1 must never be conflated by the memo cache)', () => {
+    const memo = new Map<string, unknown>();
+    const grid = makeMultiSheetGrid([
+      { name: 'Sheet1', rows: [[{ v: '1' }, { v: '=A1+100' }]] }, // B1 = 101
+      { name: 'Sheet2', rows: [[{ v: '2' }, { v: '=A1+100' }]] }, // B1 = 102 — same coords, different sheet/value
+    ]);
+    expect(computeGridCellDisplay(grid, 0, 0, 1, new Set(), memo)).toBe(101);
+    expect(computeGridCellDisplay(grid, 1, 0, 1, new Set(), memo)).toBe(102);
+    // 순서를 바꿔 다시 물어도(memo가 이미 채워진 상태) 여전히 시트별로 정확해야 한다.
+    expect(computeGridCellDisplay(grid, 0, 0, 1, new Set(), memo)).toBe(101);
+    expect(computeGridCellDisplay(grid, 1, 0, 1, new Set(), memo)).toBe(102);
+  });
+
+  test('a non-cyclic cross-sheet chain is NOT wrongly flagged as circular just because it crosses ' +
+    'sheet boundaries (regression guard for the resolved-sheetIdx recursion)', () => {
+    // A1(Sheet1) -> A1(Sheet2) -> A1(Sheet3), 순환 없음.
+    const grid = makeMultiSheetGrid([
+      { name: 'Sheet1', rows: [[{ v: '=Sheet2!A1' }]] },
+      { name: 'Sheet2', rows: [[{ v: '=Sheet3!A1' }]] },
+      { name: 'Sheet3', rows: [[{ v: '42' }]] },
+    ]);
+    expect(computeGridCellDisplay(grid, 0, 0, 0)).toBe(42);
+  });
+
+  test('duplicate sheet names resolve deterministically to the first-matching sheet (defensive ' +
+    'handling for a corrupted/hand-edited file — Excel itself enforces unique names)', () => {
+    const grid = makeMultiSheetGrid([
+      { name: 'Dup', rows: [[{ v: '1' }]] },
+      { name: 'Dup', rows: [[{ v: '2' }]] },
+      { name: 'Other', rows: [[{ v: '=Dup!A1' }]] },
+    ]);
+    expect(computeGridCellDisplay(grid, 2, 0, 0)).toBe(1); // 항상 먼저 나오는(인덱스 0) 시트로.
+  });
+});
+
 describe('xlsx/formulas.ts: FormulaParser instance pool (performance fix)', () => {
   // 풀이 없던 시절(d2bff59)에는 수식 셀 하나마다 `new FormulaParser({...})`를 새로 만들었다 — 그
   // 생성자 하나의 비용(~1.9ms, 리뷰 실측)이 계산 전체 비용의 99%였다. memo는 체인형(cascading)

@@ -27,7 +27,14 @@ import {
 import { MarkupValidationError, addMarkup, deleteMarkup, listMarkup, updateMarkup } from '../markup.js';
 import { touchPresence } from '../presence.js';
 import { flushNow, getCurrentBytes } from '../collab/room.js';
-import { computeLineOffsets, type GridCell, type GridHeader } from '../spreadsheet.js';
+import {
+  buildGridFromOriginal,
+  computeLineOffsets,
+  GRID_CACHE_FORMAT_VERSION,
+  saveGridDerived,
+  type GridCell,
+  type GridHeader,
+} from '../spreadsheet.js';
 import { store } from '../storage.js';
 import type { DocumentMeta, ViewClaims } from '../types.js';
 
@@ -135,8 +142,61 @@ function offsetsLookValid(buffer: Buffer, lineOffsets: readonly number[]): boole
   return lineOffsets[lineOffsets.length - 1] <= buffer.length;
 }
 
-async function loadGridUncached(docId: string): Promise<LoadedGrid> {
+/** grid.json 헤더 한 줄만 값싸게 들여다본다(버퍼 전체를 다시 스캔하지 않는다) — formatVersion
+ * 확인 전용. 파싱이 실패하면(손상 등) undefined를 돌려줘 "버전을 알 수 없음"으로 취급한다 —
+ * 어차피 아래 loadGridUncached의 자가치유(gridindex 재스캔) 경로가 이런 손상을 이미 다룬다. */
+function peekGridHeaderVersion(buffer: Buffer): number | undefined {
+  try {
+    const newline = buffer.indexOf(10);
+    const headerEnd = newline === -1 ? buffer.length : newline;
+    const header = JSON.parse(buffer.toString('utf8', 0, headerEnd)) as GridHeader;
+    return header.formatVersion;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 업로드 시점(routes/documents.ts의 runGridExtraction)에 딱 한 번 만들어진 뒤로, 문서를 열어보는
+ * 것만으로는 절대 재생성되지 않던 파생 그리드 캐시(derived kind 'grid')가 있다 — xlsx/formulas.ts의
+ * 시트 간 참조(cross-sheet reference) 계산 버그가 고쳐지기 전에 만들어진 캐시는, 계산에 실패해
+ * 수식 원문을 그대로 담고 있거나(옛날 동작) 그 버그로 인해 조용히 틀린 값을 담고 있을 수 있다 —
+ * 어느 쪽이든 파일이 다시 저장(동시편집기를 통한 저장)되기 전까지는 디스크에 무기한 남는다.
+ *
+ * 이 함수는 grid.json 헤더의 formatVersion(GRID_CACHE_FORMAT_VERSION, spreadsheet.ts 문서 주석
+ * 참고)이 낡았거나 아예 없으면(그 필드 자체가 이 수정으로 새로 생겼으므로, 이전에 저장된 캐시는
+ * 전부 없음) 원본 파일에서 그리드를 다시 만들어 저장한다 — "다음 조회 시점에 감지해 lazy하게
+ * 재생성"하는 전략으로, 저장된 모든 문서를 한꺼번에 마이그레이션하지 않는다(그 자체가 디스크에
+ * 저장된 문서 수를 알 수 없는 상태에서 새로운 리스크가 된다). pagesizes/gridindex가 이미 쓰는
+ * "없거나 낡으면 그 자리에서 다시 계산해 자가치유" 패턴과 같은 성질이다.
+ *
+ * 실패(원본이 없거나 — 예: 메모리 저장소에서 만료됨 — 재파싱이 실패함)하면 조용히 포기하고 false를
+ * 돌려준다 — 그러면 호출부는 기존의(낡았을 수 있는) 캐시를 그대로 서빙한다. 문서 열람 경로가 이
+ * 자가치유 때문에 깨지는 일은 없어야 한다: 재생성은 "되면 좋은 것"이지 열람의 전제조건이 아니다.
+ */
+async function regenerateStaleGridCache(docId: string): Promise<boolean> {
+  const meta = await store.readMeta(docId);
+  if (!meta) return false;
+  try {
+    const grid = await buildGridFromOriginal(store, meta);
+    await saveGridDerived(store, docId, grid);
+    return true;
+  } catch (error) {
+    console.error(`낡은 grid 캐시 재생성 실패(기존 캐시를 그대로 서빙): 문서 ${docId}:`, error);
+    return false;
+  }
+}
+
+async function loadGridUncached(docId: string, allowRegenerate = true): Promise<LoadedGrid> {
   const buffer = await store.readDerived(docId, 'grid');
+  if (allowRegenerate && peekGridHeaderVersion(buffer) !== GRID_CACHE_FORMAT_VERSION) {
+    // 재생성이 성공하면 방금 막 저장한 최신 버퍼를 처음부터 다시 읽어 이어간다(아래 재귀 호출,
+    // allowRegenerate=false로 무한 재귀를 막는다) — 실패하면(위 문서 주석) 그냥 아래로 흘러가
+    // 지금 손에 있는(낡았을 수 있는) buffer를 기존 경로 그대로 서빙한다.
+    if (await regenerateStaleGridCache(docId)) {
+      return loadGridUncached(docId, false);
+    }
+  }
   try {
     const raw = await store.readDerived(docId, 'gridindex');
     const { lineOffsets } = JSON.parse(raw.toString('utf8')) as { lineOffsets: number[] };

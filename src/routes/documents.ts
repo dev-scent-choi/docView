@@ -10,7 +10,7 @@ import { findConverter, supportedExtensions } from '../converters/index.js';
 import { ConversionError, type Converter } from '../converters/types.js';
 import { getPdfPageInfo, invalidateRenderCache } from '../rendering.js';
 import { issueViewToken } from '../security.js';
-import { parseCsvToGrid, parseXlsxToGrid, saveGridDerived, type GridDocument } from '../spreadsheet.js';
+import { buildGridFromOriginal, saveGridDerived, type GridDocument } from '../spreadsheet.js';
 import { newDocumentId, store } from '../storage.js';
 import type { DocumentMeta } from '../types.js';
 import { invalidateViewCaches } from './viewer.js';
@@ -53,11 +53,7 @@ export function editorPathFor(ext: string): string {
 }
 
 async function buildGrid(meta: DocumentMeta): Promise<GridDocument> {
-  const original = await store.readOriginal(meta.id, meta.ext);
-  if (meta.ext === 'csv') {
-    return parseCsvToGrid(original.toString('utf8'));
-  }
-  return parseXlsxToGrid(original);
+  return buildGridFromOriginal(store, meta);
 }
 
 /**

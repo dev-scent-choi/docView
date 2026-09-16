@@ -214,6 +214,66 @@ describe('parseXlsxToGrid: formulas are computed server-side for the read-only v
     expect(shown === '=TOTALLYUNKNOWNFN(1,2)' || shown.startsWith('#')).toBe(true);
   });
 
+  // 리뷰가 확인한 버그의 실측 재현: computeGridCellDisplay가 parser.parse()에 하드코딩된
+  // sheet:'Sheet1'을 넘기고 onCell/onRange가 ref.sheet를 무시한 채 호출자의 sheetIdx로만
+  // 재귀해서, 시트를 넘나드는 참조가 조용히 "참조 중인 셀 자신"을 가리켜 순환 가드(#REF!)에
+  // 걸리고 그 #REF!가 산술을 거치며 0이나 #VALUE!로 둔갑했다. 이 앱 자신의 xlsx export 형태
+  // (캐시된 result 없이 formula만 있는)를 그대로 재현한다.
+  describe('cross-sheet formula references (the bug this task fixes)', () => {
+    async function parseTwoSheetWorkbook(
+      build: (sheet1: ExcelJS.Worksheet, sheet2: ExcelJS.Worksheet) => void,
+    ) {
+      const workbook = new ExcelJS.Workbook();
+      const sheet1 = workbook.addWorksheet('Sheet1');
+      const sheet2 = workbook.addWorksheet('Sheet2');
+      build(sheet1, sheet2);
+      const buffer = await workbook.xlsx.writeBuffer();
+      const grid = await parseXlsxToGrid(Buffer.from(buffer));
+      // sheetNumber는 1-based(엑셀 관례, row/col과 같은 규칙) — Sheet1=1, Sheet2=2.
+      const textAt = (sheetNumber: number, row: number, col: number): string => {
+        const cell = grid.sheets[sheetNumber - 1]?.rows[row - 1]?.[col - 1];
+        return cell === 0 || cell === undefined ? '' : cell.v;
+      };
+      return { grid, textAt };
+    }
+
+    test('Sheet2!A1 = SUM(Sheet1!A1:A1), no cached result — computes 2287, not 0 (exact brief ' +
+      'reproduction)', async () => {
+      const { textAt } = await parseTwoSheetWorkbook((sheet1, sheet2) => {
+        sheet1.getCell('A1').value = 2287;
+        sheet2.getCell('A1').value = { formula: 'SUM(Sheet1!A1:A1)', result: undefined };
+      });
+      expect(textAt(2, 1, 1)).toBe('2287');
+    });
+
+    test('a direct cross-sheet cell reference (Sheet2!A1 = "Sheet1!A1*1") computes 2287, not ' +
+      '#VALUE! (the brief\'s second reproduction)', async () => {
+      const { textAt } = await parseTwoSheetWorkbook((sheet1, sheet2) => {
+        sheet1.getCell('A1').value = 2287;
+        sheet2.getCell('A1').value = { formula: 'Sheet1!A1*1', result: undefined };
+      });
+      expect(textAt(2, 1, 1)).toBe('2287');
+    });
+
+    test('a formula referencing a sheet name that does not exist in the workbook degrades to ' +
+      '#REF!, never a crash and never a silently wrong number', async () => {
+      const { textAt } = await parseTwoSheetWorkbook((sheet1) => {
+        sheet1.getCell('A1').value = { formula: 'DeletedSheet!A1', result: undefined };
+      });
+      expect(textAt(1, 1, 1)).toBe('#REF!');
+    });
+
+    test('same-sheet formulas in a MULTI-sheet workbook are completely unaffected — an unqualified ' +
+      'reference on Sheet2 still resolves against Sheet2\'s own cells, not Sheet1\'s', async () => {
+      const { textAt } = await parseTwoSheetWorkbook((sheet1, sheet2) => {
+        sheet1.getCell('A1').value = 999; // 다른 값 — 잘못 해석되면 이게 섞여든다.
+        sheet2.getCell('A1').value = 10;
+        sheet2.getCell('A2').value = { formula: 'A1+1', result: undefined };
+      });
+      expect(textAt(2, 2, 1)).toBe('11');
+    });
+  });
+
   test('a few thousand formula rows parse in a reasonable time (no O(N²) blow-up)', async () => {
     // 3000행 × (독립 수식 1개 + 앞 행을 참조하는 체인형 수식 1개) — 체인형이 memo 없이 계산되면
     // 총 계산 횟수가 O(N²)로 폭증해 이 한계를 한참 넘긴다.

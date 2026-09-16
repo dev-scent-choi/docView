@@ -30,6 +30,34 @@ function rawCellText(grid: GridDocument, sheetIdx: number, row: number, col: num
   return cell === 0 || cell === undefined ? '' : cell.v;
 }
 
+/** 시트 이름 → 인덱스 매핑. fast-formula-parser가 `onCell`/`onRange`에 돌려주는 `ref.sheet`(참조된
+ * 셀이 **실제로** 속한 시트의 이름 — 수식이 `A1`처럼 시트를 명시하지 않았으면 parser.parse()에
+ * 넘긴 position.sheet로 채워지고, `Sheet2!A1`처럼 명시했으면 그 이름 그대로다)를 실제 재귀에 쓸
+ * sheetIdx로 되돌리는 데 쓴다 — 참조마다(onCell/onRange 콜백마다) 매번 `grid.sheets.findIndex(...)`로
+ * 선형 탐색하면 수식 하나가 참조를 많이 가질수록 비용이 쌓이므로, top-level 호출 하나(=수식 셀 하나의
+ * 평가 전체)당 한 번만 만들어 재귀 전체에서 재사용한다(아래 computeGridCellDisplay의
+ * `sheetNameIndex` 매개변수 참고).
+ *
+ * 이름이 중복된 시트(정상 엑셀 파일은 이름 유일성을 강제하므로 나오지 않지만, 손상되었거나 수기로
+ * 편집된 파일에 대한 방어)는 먼저 나온(인덱스가 작은) 시트를 결정적으로 우선한다 — 이름이 겹치면
+ * 애초에 "정답"이 없으므로, 임의로 고르는 대신 항상 같은 답을 내는 편을 택한다. */
+function buildSheetNameIndex(grid: GridDocument): ReadonlyMap<string, number> {
+  const index = new Map<string, number>();
+  grid.sheets.forEach((sheet, i) => {
+    if (!index.has(sheet.name)) index.set(sheet.name, i);
+  });
+  return index;
+}
+
+/** buildSheetNameIndex의 LazyGridStore 버전 — sheetMeta가 GridSheet과 같은 `name` 필드를 가진다. */
+function buildStoreSheetNameIndex(store: LazyGridStore): ReadonlyMap<string, number> {
+  const index = new Map<string, number>();
+  store.sheetMeta.forEach((meta, i) => {
+    if (!index.has(meta.name)) index.set(meta.name, i);
+  });
+  return index;
+}
+
 /**
  * 셀 하나의 "표시용" 값을 계산한다 — 클라이언트의 옛 computeCellDisplay(grid-editor.ts)와
  * 동일한 로직이지만, Yjs cells 맵 대신 canonical GridDocument를 직접 읽으므로 화면 밖(로드
@@ -66,7 +94,12 @@ export function computeGridCellDisplay(
   evalGuard: Set<string> = new Set(),
   memo: MemoLike = new Map(),
   tainted: Set<string> = new Set(),
+  sheetNameIndex?: ReadonlyMap<string, number>,
 ): unknown {
+  // top-level 호출(재귀 호출은 항상 이 매개변수를 넘겨준다)에서만 새로 만든다 — 그리드 구조는
+  // 이 함수 호출 하나의 재귀 전체(=수식 셀 하나 평가) 동안 바뀌지 않는다는 전제가 buildFormulaInputGrid/
+  // applyComputedFormulaValues의 불변식과 같으므로, 재빌드는 항상 안전하고 값은 절대 낡지 않는다.
+  const nameIndex = sheetNameIndex ?? buildSheetNameIndex(grid);
   const key = `${sheetIdx}:${row}:${col}`;
   const raw = rawCellText(grid, sheetIdx, row, col);
   if (!raw.startsWith('=')) {
@@ -82,19 +115,43 @@ export function computeGridCellDisplay(
     return FormulaError.REF.name;
   }
   evalGuard.add(key);
-  // onRange가 너무 큰 범위를 만났음을 기록하는 플래그 — fast-formula-parser의 parse()는 평가 중
-  // 동기적으로 던져진 에러를 전부 FormulaError.ERROR('#ERROR!')로 재포장해버려서(원본 에러의
-  // name을 보존하지 않음, node_modules/fast-formula-parser/grammar/hooks.js의 parse() catch
-  // 블록 참고), onRange 안에서 FormulaError.REF를 던져도 우리 쪽 catch까지 '#REF!'로 도달하지
-  // 않는다. 그래서 던지는 대신 플래그로 표시해두고, parser.parse()가 끝난 뒤(무엇을 반환했든)
-  // 그 결과를 덮어써서 '#REF!'를 돌려준다.
+  // onRange가 너무 큰 범위를 만났거나(rangeTooLarge) 존재하지 않는 시트를 참조했음(rangeSheetMissing)을
+  // 기록하는 플래그 — fast-formula-parser의 parse()는 평가 중 동기적으로 던져진 에러를 전부
+  // FormulaError.ERROR('#ERROR!')로 재포장해버려서(원본 에러의 name을 보존하지 않음,
+  // node_modules/fast-formula-parser/grammar/hooks.js의 parse() catch 블록 참고), onRange 안에서
+  // FormulaError.REF를 던져도 우리 쪽 catch까지 '#REF!'로 도달하지 않는다. 그래서 던지는 대신
+  // 플래그로 표시해두고, parser.parse()가 끝난 뒤(무엇을 반환했든— 예: 존재하지 않는 시트를 빈
+  // 범위로 취급해 SUM이 그럴듯하지만 틀린 값을 냈더라도) 그 결과를 덮어써서 '#REF!'를 돌려준다.
   let rangeTooLarge = false;
+  let rangeSheetMissing = false;
   let result: unknown;
   try {
     result = withPooledParser(
       {
-        onCell: (ref: CellRef) => computeGridCellDisplay(grid, sheetIdx, ref.row - 1, ref.col - 1, evalGuard, memo, tainted),
+        // ref.sheet: 참조된 셀이 실제로 속한 시트 이름 — 수식이 `A1`처럼 시트를 안 적었으면
+        // fast-formula-parser가 parser.parse()에 넘긴 position.sheet(아래 parse() 호출 참고,
+        // 이제 이 셀 자신의 실제 시트 이름)로 채워 넣고, `Sheet2!A1`처럼 명시했으면 그 이름
+        // 그대로다 — 그래서 같은 시트를 참조하는 흔한 경우(`A1`)는 항상 sheetIdx 자기 자신으로
+        // 돌아와 기존 동작과 완전히 같고, 다른 시트를 참조하면 처음으로 그 시트로 정확히 재귀한다.
+        onCell: (ref: CellRef) => {
+          const targetIdx = nameIndex.get(ref.sheet);
+          if (targetIdx === undefined) {
+            // 존재하지 않는(삭제되었거나, 손상/수기 편집 파일의) 시트 이름 — 순환 참조 감지와
+            // 같은 관용구로 '#REF!'를 이 참조 하나의 값으로 직접 돌려준다(다른 참조나 이 수식의
+            // 나머지 부분에는 영향을 주지 않는다).
+            return FormulaError.REF.name;
+          }
+          return computeGridCellDisplay(grid, targetIdx, ref.row - 1, ref.col - 1, evalGuard, memo, tainted, nameIndex);
+        },
         onRange: (ref: RangeRef) => {
+          const targetIdx = nameIndex.get(ref.sheet);
+          if (targetIdx === undefined) {
+            // 순회를 시작하기 전에 걸러낸다 — 빈 배열을 돌려줘 이 범위를 소비하는 함수(SUM 등)가
+            // "존재하지 않는 시트라 사실상 아무 것도 없다"를 "정말로 빈 범위"(합계 0 등 그럴듯하지만
+            // 틀린 값)로 착각하지 않게, 최종 결과는 아래에서 반드시 '#REF!'로 덮어쓴다.
+            rangeSheetMissing = true;
+            return [];
+          }
           const cellCount = (ref.to.row - ref.from.row + 1) * (ref.to.col - ref.from.col + 1);
           if (cellCount > MAX_RANGE_CELLS) {
             // 순회를 시작하기 전에 걸러낸다 — "너무 크다는 걸 알아챌 때까지 순회"하면 이미
@@ -107,7 +164,7 @@ export function computeGridCellDisplay(
           for (let r = ref.from.row; r <= ref.to.row; r += 1) {
             const rowVals: unknown[] = [];
             for (let c = ref.from.col; c <= ref.to.col; c += 1) {
-              rowVals.push(computeGridCellDisplay(grid, sheetIdx, r - 1, c - 1, evalGuard, memo, tainted));
+              rowVals.push(computeGridCellDisplay(grid, targetIdx, r - 1, c - 1, evalGuard, memo, tainted, nameIndex));
             }
             rows.push(rowVals);
           }
@@ -115,12 +172,16 @@ export function computeGridCellDisplay(
         },
       },
       (parser) => {
-        const parsed = parser.parse(raw.slice(1), { row: row + 1, col: col + 1, sheet: 'Sheet1' });
-        return rangeTooLarge ? FormulaError.REF.name : parsed;
+        // position.sheet: 이 수식 셀 "자신"이 실제로 속한 시트 이름 — fast-formula-parser가
+        // 수식 안의 시트 미명시 참조(`A1`)를 ref.sheet로 채울 때 이 값을 그대로 쓴다(위 onCell/
+        // onRange 문서 주석 참고). grid.sheets[sheetIdx]가 어떤 이유로든 없으면(있을 수 없지만
+        // 방어적으로) 옛 하드코딩 동작을 최후의 fallback으로만 쓴다.
+        const parsed = parser.parse(raw.slice(1), { row: row + 1, col: col + 1, sheet: grid.sheets[sheetIdx]?.name ?? 'Sheet1' });
+        return rangeTooLarge || rangeSheetMissing ? FormulaError.REF.name : parsed;
       },
     );
   } catch (error) {
-    result = rangeTooLarge ? FormulaError.REF.name : (error instanceof FormulaError ? error.name : '#ERROR!');
+    result = rangeTooLarge || rangeSheetMissing ? FormulaError.REF.name : (error instanceof FormulaError ? error.name : '#ERROR!');
   } finally {
     evalGuard.delete(key);
   }
@@ -148,7 +209,10 @@ function computeGridCellDisplaySync(
   memo: MemoLike,
   tainted: Set<string>,
   onMiss: (sheetIdx: number, row: number) => void,
+  sheetNameIndex?: ReadonlyMap<string, number>,
 ): unknown {
+  // computeGridCellDisplay와 같은 이유로 top-level 호출에서만 새로 만든다(위 문서 주석 참고).
+  const nameIndex = sheetNameIndex ?? buildStoreSheetNameIndex(store);
   const rawCellTextSync = (r: number, c: number): string => {
     const originalCol = store.logicalToOriginalCol[sheetIdx]?.[c];
     const key = gridCellKey(sheetIdx, r, c);
@@ -182,19 +246,28 @@ function computeGridCellDisplaySync(
     return FormulaError.REF.name;
   }
   evalGuard.add(key);
-  // onRange가 너무 큰 범위를 만났음을 기록하는 플래그 — fast-formula-parser의 parse()는 평가 중
-  // 동기적으로 던져진 에러를 전부 FormulaError.ERROR('#ERROR!')로 재포장해버려서(원본 에러의
-  // name을 보존하지 않음, node_modules/fast-formula-parser/grammar/hooks.js의 parse() catch
-  // 블록 참고), onRange 안에서 FormulaError.REF를 던져도 우리 쪽 catch까지 '#REF!'로 도달하지
-  // 않는다. 그래서 던지는 대신 플래그로 표시해두고, parser.parse()가 끝난 뒤(무엇을 반환했든)
-  // 그 결과를 덮어써서 '#REF!'를 돌려준다.
+  // onRange가 너무 큰 범위를 만났거나(rangeTooLarge) 존재하지 않는 시트를 참조했음(rangeSheetMissing)을
+  // 기록하는 플래그 — computeGridCellDisplay와 같은 이유(fast-formula-parser가 onRange 안에서 던진
+  // 에러를 전부 '#ERROR!'로 재포장해버림)로 던지는 대신 플래그로 표시해두고, parser.parse()가 끝난
+  // 뒤(무엇을 반환했든) 그 결과를 덮어써서 '#REF!'를 돌려준다.
   let rangeTooLarge = false;
+  let rangeSheetMissing = false;
   let result: unknown;
   try {
     result = withPooledParser(
       {
-        onCell: (ref: CellRef) => computeGridCellDisplaySync(store, sheetIdx, ref.row - 1, ref.col - 1, evalGuard, memo, tainted, onMiss),
+        // ref.sheet의 의미와 targetIdx 해석 방식은 computeGridCellDisplay와 동일(그 문서 주석 참고).
+        onCell: (ref: CellRef) => {
+          const targetIdx = nameIndex.get(ref.sheet);
+          if (targetIdx === undefined) return FormulaError.REF.name;
+          return computeGridCellDisplaySync(store, targetIdx, ref.row - 1, ref.col - 1, evalGuard, memo, tainted, onMiss, nameIndex);
+        },
         onRange: (ref: RangeRef) => {
+          const targetIdx = nameIndex.get(ref.sheet);
+          if (targetIdx === undefined) {
+            rangeSheetMissing = true;
+            return [];
+          }
           const cellCount = (ref.to.row - ref.from.row + 1) * (ref.to.col - ref.from.col + 1);
           if (cellCount > MAX_RANGE_CELLS) {
             // 순회를 시작하기 전에 걸러낸다 — "너무 크다는 걸 알아챌 때까지 순회"하면 이미
@@ -207,7 +280,7 @@ function computeGridCellDisplaySync(
           for (let r = ref.from.row; r <= ref.to.row; r += 1) {
             const rowVals: unknown[] = [];
             for (let c = ref.from.col; c <= ref.to.col; c += 1) {
-              rowVals.push(computeGridCellDisplaySync(store, sheetIdx, r - 1, c - 1, evalGuard, memo, tainted, onMiss));
+              rowVals.push(computeGridCellDisplaySync(store, targetIdx, r - 1, c - 1, evalGuard, memo, tainted, onMiss, nameIndex));
             }
             rows.push(rowVals);
           }
@@ -215,12 +288,14 @@ function computeGridCellDisplaySync(
         },
       },
       (parser) => {
-        const parsed = parser.parse(raw.slice(1), { row: row + 1, col: col + 1, sheet: 'Sheet1' });
-        return rangeTooLarge ? FormulaError.REF.name : parsed;
+        // position.sheet: computeGridCellDisplay와 동일하게, 이 수식 셀 자신이 실제로 속한 시트
+        // 이름을 넘긴다(store.sheetMeta[sheetIdx]가 없을 수 없지만 방어적으로 fallback한다).
+        const parsed = parser.parse(raw.slice(1), { row: row + 1, col: col + 1, sheet: store.sheetMeta[sheetIdx]?.name ?? 'Sheet1' });
+        return rangeTooLarge || rangeSheetMissing ? FormulaError.REF.name : parsed;
       },
     );
   } catch (error) {
-    result = rangeTooLarge ? FormulaError.REF.name : (error instanceof FormulaError ? error.name : '#ERROR!');
+    result = rangeTooLarge || rangeSheetMissing ? FormulaError.REF.name : (error instanceof FormulaError ? error.name : '#ERROR!');
   } finally {
     evalGuard.delete(key);
   }

@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import ExcelJS from 'exceljs';
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { GRID_CACHE_FORMAT_VERSION } from '../src/spreadsheet.js';
 
 async function loadViewerModuleWithTempDir() {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'docview-viewer-test-'));
@@ -14,6 +16,10 @@ async function loadViewerModuleWithTempDir() {
   return { dir, storageModule, viewerModule };
 }
 
+// formatVersion 필드를 일부러 넣지 않는다 — 이 describe 블록의 테스트들은 gridindex 자가치유만
+// 검증한다. store.writeMeta를 호출하지 않으므로(각 테스트가 store.readMeta(id)로 얻을 meta가
+// 없다) regenerateStaleGridCache는 항상 즉시 false로 끝나 아래 loadGrid 호출은 기존 gridindex
+// 경로 그대로 동작한다 — 두 관심사(캐시 버전 자가치유는 아래 별도 describe)가 서로 간섭하지 않는다.
 function sampleGridHeader() {
   return {
     styles: [],
@@ -122,6 +128,124 @@ describe('viewer.ts: loadGrid self-heals and reuses a persisted gridindex', () =
 
     const grid = await viewerModule.loadGrid(id);
     expect(grid.lineOffsets).toEqual([0, 122, 134]); // 실제로 다시 스캔한 값
+  });
+});
+
+/** LoadedGrid(grid.buffer + lineOffsets + sheetStartLine)에서 셀 하나의 표시 텍스트를 직접
+ * 읽는다 — viewer.ts의 sliceRows와 같은 인덱싱 규칙이지만, 테스트에서만 필요해 여기 따로 둔다. */
+function cellTextAt(
+  grid: { buffer: Buffer; lineOffsets: readonly number[]; sheetStartLine: readonly number[] },
+  sheetIdx: number,
+  row: number,
+  col: number,
+): string {
+  const line = grid.sheetStartLine[sheetIdx] + row;
+  const start = grid.lineOffsets[line];
+  const end = line + 1 < grid.lineOffsets.length ? grid.lineOffsets[line + 1] - 1 : grid.buffer.length;
+  const rowCells = JSON.parse(grid.buffer.toString('utf8', start, end)) as Array<{ v: string } | 0>;
+  const cell = rowCells[col];
+  return cell === 0 || cell === undefined ? '' : cell.v;
+}
+
+async function makeCrossSheetXlsx(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet1 = workbook.addWorksheet('Sheet1');
+  sheet1.getCell('A1').value = 2287;
+  const sheet2 = workbook.addWorksheet('Sheet2');
+  sheet2.getCell('A1').value = { formula: 'SUM(Sheet1!A1:A1)' };
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(buffer as ArrayBuffer);
+}
+
+/** xlsx/formulas.ts의 시트 간 참조 버그가 고쳐지기 전에 만들어졌을 법한 grid.json을 그대로
+ * 흉내낸다 — formatVersion 필드 자체가 없고(옛 serializeGrid는 이 필드를 쓰지 않았다),
+ * Sheet2!A1(SUM(Sheet1!A1:A1))이 실제로는 '0'(브리프가 재현한 그 버그의 산출물)으로 잘못
+ * 캐시돼 있다. */
+function staleCrossSheetGridJsonl(): Buffer {
+  const header = {
+    styles: [],
+    sheets: [
+      { name: 'Sheet1', rowCount: 1, colCount: 1, colWidths: [], merges: [], freezeRows: 0, freezeCols: 0 },
+      { name: 'Sheet2', rowCount: 1, colCount: 1, colWidths: [], merges: [], freezeRows: 0, freezeCols: 0 },
+    ],
+  };
+  const parts = [
+    JSON.stringify(header),
+    JSON.stringify([{ v: '2287' }]),
+    JSON.stringify([{ v: '0' }]), // 버그 당시의 (틀린) 캐시된 결과
+  ];
+  return Buffer.from(parts.join('\n'), 'utf8');
+}
+
+describe('viewer.ts: loadGrid self-heals a stale-format grid.json cache (GRID_CACHE_FORMAT_VERSION)', () => {
+  let tempDirs: string[] = [];
+
+  afterEach(() => {
+    delete process.env.DOCVIEW_DATA_DIR;
+    delete process.env.DOCVIEW_STORAGE;
+    vi.resetModules();
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    tempDirs = [];
+  });
+
+  test('a grid.json with no formatVersion field (pre-fix cache) is regenerated from the original ' +
+    'file on next view, replacing a wrong cross-sheet-formula value with the correct one', async () => {
+    const { dir, storageModule, viewerModule } = await loadViewerModuleWithTempDir();
+    tempDirs.push(dir);
+    const { store, newDocumentId } = storageModule;
+    const id = newDocumentId();
+
+    await store.saveOriginal(id, 'xlsx', await makeCrossSheetXlsx());
+    await store.writeMeta({
+      id,
+      name: 'x.xlsx',
+      ext: 'xlsx',
+      status: 'ready',
+      pageCount: 2,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+      viewKind: 'grid',
+    });
+    // 업로드 시점에 만들어진 뒤로 한 번도 재생성되지 않은, 실제 버그의 산출물을 흉내낸 낡은 캐시.
+    await store.saveDerived(id, 'grid', staleCrossSheetGridJsonl());
+
+    const grid = await viewerModule.loadGrid(id);
+
+    expect(grid.header.formatVersion).toBe(GRID_CACHE_FORMAT_VERSION);
+    expect(cellTextAt(grid, 1, 0, 0)).toBe('2287'); // 더 이상 '0'이 아니다.
+
+    // 재생성 결과가 디스크에도 실제로 저장돼, 다음 조회부터는 다시 계산할 필요가 없어야 한다.
+    const persisted = (await store.readDerived(id, 'grid')).toString('utf8');
+    expect(persisted).toContain('"2287"');
+    expect(JSON.parse(persisted.split('\n')[0]).formatVersion).toBe(GRID_CACHE_FORMAT_VERSION);
+  });
+
+  test('a stale-format grid.json falls back to serving the existing cache as-is (no crash) when ' +
+    'the original file is unavailable for regeneration', async () => {
+    const { dir, storageModule, viewerModule } = await loadViewerModuleWithTempDir();
+    tempDirs.push(dir);
+    const { store, newDocumentId } = storageModule;
+    const id = newDocumentId();
+
+    // 의도적으로 원본을 저장하지 않는다(예: 오래돼 정리된 원본, 혹은 메모리 모드에서 만료됨을
+    // 흉내). 자가치유가 실패해도 조회 자체는 절대 깨지면 안 된다.
+    await store.writeMeta({
+      id,
+      name: 'x.xlsx',
+      ext: 'xlsx',
+      status: 'ready',
+      pageCount: 2,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+      viewKind: 'grid',
+    });
+    await store.saveDerived(id, 'grid', staleCrossSheetGridJsonl());
+
+    const grid = await viewerModule.loadGrid(id);
+
+    // 재생성이 실패했으니 낡은(옳지 않을 수 있는) 캐시를 그대로 서빙한다 — 크래시하지 않는 것이 핵심.
+    expect(grid.header.formatVersion).toBeUndefined();
+    expect(cellTextAt(grid, 1, 0, 0)).toBe('0');
   });
 });
 

@@ -630,4 +630,101 @@ describe('xlsx/formulas.ts: computeGridCellDisplayAsync (LazyGridStore, cache-mi
     },
     30_000,
   );
+
+  // 리뷰가 확인한 버그: computeGridCellDisplaySync/computeGridCellDisplay 둘 다 parser.parse()에
+  // 언제나 하드코딩된 sheet:'Sheet1'을 넘기고, onCell/onRange가 ref.sheet(참조된 셀이 실제로
+  // 속한 시트 이름)를 완전히 무시한 채 항상 호출자의 sheetIdx로만 재귀한다 — 그래서 시트를 넘나드는
+  // 참조가 조용히 "참조하는 셀 자신"을 가리키게 되어 순환 가드에 걸려 #REF!가 되고, 그 결과가
+  // 산술 연산을 거치며 그럴듯하지만 틀린 값(0 등)으로 둔갑한다. 이 테스트는 room.ts의 실제
+  // 프로덕션 경로(joinEditSession → 페이지 구독 → recomputeFormulasForPage)로 정확히 그 시나리오를
+  // 재현해, 동시편집기(live collaborative editor)의 GRID_COMPUTED_MAP도 이 버그에 실제로 영향을
+  // 받는지(뷰어뿐 아니라) 직접 확인한다.
+  //
+  // 시트 1(수식이 있는 쪽)만 구독한다 — 참조 대상인 시트 0은 일부러 구독하지 않는다. 한 연결은
+  // 동시에 한 시트만 구독할 수 있으므로(room.pageSubscriptions는 연결당 {sheet,pages} 하나만
+  // 들고, MESSAGE_PAGE_SUBSCRIBE 핸들러 문서 주석 참고 — 탭 전환처럼 나중 구독이 이전 구독을
+  // 대체한다) 두 시트를 동시에 sendSubscribe하면 안 된다. 게다가 recomputeFormulasForPage는
+  // Yjs 구독 창이 아니라 canonical LazyGridStore를 직접 읽으므로(캐시 미스는 onMiss→getRow로
+  // 채운다) 참조 대상 시트를 구독할 필요가 전혀 없다 — 위 "a formula referencing a row outside
+  // the subscribed page" 테스트가 같은 시트 안에서 이미 증명하는 것과 같은 성질을, 여기서는
+  // 시트 경계를 넘어서도 그대로 확인한다.
+  test('a cross-sheet formula (Sheet2!A1 = SUM(Sheet1!A1:A1)) computes the referenced sheet\'s ' +
+    'value through the live editor recompute path, not 0/#REF!, even though only Sheet2 is subscribed', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession } = await import('../src/collab/room.js');
+    const { gridCellKey, GRID_COMPUTED_MAP } = await import('../src/collab/gridShared.js');
+
+    const docId = randomUUID();
+    const workbook = new ExcelJS.Workbook();
+    const sheet1 = workbook.addWorksheet('Sheet1');
+    sheet1.getCell('A1').value = 2287;
+    // 필러 행 — lazyGridStore.ts의 preSeedWorkbookReaderState 문서 주석이 실측한 exceljs 4.4.0
+    // 스트리밍 리더 자체의 레이스 컨디션("약 11KB 미만 zip에서 100% 재현")을 피하기 위함이다.
+    // 그 레이스는 workbook.xml/rels/styles/sharedStrings 4종에 한해 이미 우회돼 있지만, CPU 경합이
+    // 심한 환경(다른 테스트 파일과 병렬 실행 등)에서 아주 작은 다중 시트 zip을 스트리밍으로 읽을 때
+    // 두 번째 시트가 통째로 누락되는(sheetMeta에 한 개만 들어가는) 것을 이 테스트 작성 중 직접
+    // 재현했다 — 이 파일 자체와 무관한, 이미 알려진 exceljs 취약 영역이므로 여기서 고치는 대신
+    // 안전하게(문서 크기를 임계값 밖으로) 피해 간다.
+    for (let r = 2; r <= 300; r += 1) sheet1.getCell(r, 2).value = r;
+    const sheet2 = workbook.addWorksheet('Sheet2');
+    sheet2.getCell('A1').value = { formula: 'SUM(Sheet1!A1:A1)' };
+    for (let r = 2; r <= 300; r += 1) sheet2.getCell(r, 2).value = r;
+    const original = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+    await store.saveOriginal(docId, 'xlsx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.xlsx',
+      ext: 'xlsx',
+      status: 'ready',
+      pageCount: 2,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+      viewKind: 'grid',
+    });
+
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+    sendSubscribe(socket, 1, [0]);
+    await flushEventLoop(300);
+
+    const computed = socket.mirror.getMap<string>(GRID_COMPUTED_MAP);
+    expect(computed.get(gridCellKey(1, 0, 0))).toBe('2287');
+  }, 20_000);
+
+  test('a cross-sheet formula referencing a sheet name that does not exist degrades to #REF!, ' +
+    'not a crash or a silently wrong value', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession } = await import('../src/collab/room.js');
+    const { gridCellKey, GRID_COMPUTED_MAP } = await import('../src/collab/gridShared.js');
+
+    const docId = randomUUID();
+    const workbook = new ExcelJS.Workbook();
+    const sheet1 = workbook.addWorksheet('Sheet1');
+    // "Ghost" 시트를 참조하지만 실제로는 만들지 않는다(삭제/손상/수기 편집된 파일을 흉내).
+    // 참조를 산술 연산으로 감싸지 않는다 — onCell이 이 참조 하나에 돌려주는 '#REF!' 문자열이
+    // 산술을 거치면 Excel 의미론상 '#VALUE!'가 된다(브리프의 "Sheet1!A1*1" 재현 시나리오와
+    // 같은 성질). 여기서 확인하려는 것은 "존재하지 않는 시트가 그럴듯한 값으로 둔갑하지 않는다"는
+    // 것이므로, 참조를 가공 없이 그대로 셀 값으로 노출해 순수하게 '#REF!'를 검증한다.
+    sheet1.getCell('A1').value = { formula: 'Ghost!A1' };
+    const original = Buffer.from((await workbook.xlsx.writeBuffer()) as ArrayBuffer);
+    await store.saveOriginal(docId, 'xlsx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.xlsx',
+      ext: 'xlsx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+      viewKind: 'grid',
+    });
+
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'xlsx', [], false);
+    sendSubscribe(socket, 0, [0]);
+    await flushEventLoop(300);
+
+    const computed = socket.mirror.getMap<string>(GRID_COMPUTED_MAP);
+    expect(computed.get(gridCellKey(0, 0, 0))).toBe('#REF!');
+  }, 20_000);
 });
