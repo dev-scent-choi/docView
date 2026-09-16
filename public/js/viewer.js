@@ -966,7 +966,26 @@ function injectGridStyles(styles) {
     // 의도를 명시적으로 남겨 둔다.
     if (style.a === 'l') parts.push('text-align:left');
     if (style.w) parts.push('white-space:normal');
-    return `.gs${i}{${parts.join(';')}}`;
+    // 엑셀 테두리 굵기(1=가는 선, 2=굵은 선)를 그리드 동시편집기(src/client/grid-editor.ts의
+    // borderCss/applyStyleToTd)와 똑같은 규칙으로 CSS화한다: 지정된 변만 개별 border-* longhand로
+    // 얹는다. 지정 없는 변은 그대로 둬서 .grid-table td의 기본 점선 격자가 그 변에서 계속 보이게
+    // 한다.
+    const borderParts = [];
+    if (style.bt) borderParts.push(`border-top:${style.bt}px solid var(--v-text)`);
+    if (style.br) borderParts.push(`border-right:${style.br}px solid var(--v-text)`);
+    if (style.bb) borderParts.push(`border-bottom:${style.bb}px solid var(--v-text)`);
+    if (style.bl) borderParts.push(`border-left:${style.bl}px solid var(--v-text)`);
+    // 테두리 선언은 .gs{N} 단독 클래스 선택자가 아니라 `.grid-table td.gs{N}`로 낸다 — 기본 격자
+    // 규칙(css/style.css의 `.grid-table td { border: 1px dotted ... }`, 클래스 1개+태그 1개 =
+    // 특이도 (0,1,1))이 순수 `.gs{N}`(클래스 1개 = 특이도 (0,1,0))보다 특이도가 더 높아서, 선언
+    // 순서와 무관하게 항상 이겨 버린다(먼저/나중 문제가 아니라 특이도 자체가 밀리는 문제 —
+    // Playwright getComputedStyle로 직접 재현·확인함: `.gs{N}{border-top:...}`만으로는 실제
+    // 화면에 전혀 반영되지 않았다). `.grid-table td.gs{N}`(클래스 2개+태그 1개 = 특이도 (0,2,1))로
+    // 올려야 기본 격자 shorthand의 해당 변을 확실히 덮어쓴다. 폰트/색/정렬 등 다른 선언은 애초에
+    // `.grid-table td`와 겹치는 규칙이 없어 특이도 경합이 없으므로 그대로 `.gs{N}`만으로 둔다.
+    const cssForStyle = [`.gs${i}{${parts.join(';')}}`];
+    if (borderParts.length > 0) cssForStyle.push(`.grid-table td.gs${i}{${borderParts.join(';')}}`);
+    return cssForStyle.join('\n');
   });
   const styleEl = document.createElement('style');
   styleEl.textContent = rules.join('\n');
