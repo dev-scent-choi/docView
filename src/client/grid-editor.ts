@@ -2018,6 +2018,20 @@ async function main(): Promise<void> {
     document.addEventListener('mouseup', onFillDragEnd);
   });
 
+  /** 한 행(<tr>) 안에서의 겹침 순서 — buildRow()가 각 <tr>을 position+z-index로 자체 스태킹
+   * 컨텍스트로 격리해 두므로(행 간 우열은 그 <tr>의 z-index가 정한다), 이 값들은 전부 "같은 행
+   * 안에서만" 비교된다. 가로 스크롤을 하면 얼린 칸이 아닌 칸들이 실제로 행번호 열 **위를 지나가므로**,
+   * 왼쪽에 고정된 것일수록 높은 값을 줘야 한다(같은 값이면 DOM 순서가 이기는데, 행번호 <th>는 늘
+   * 그 행의 첫 자식이라 항상 진다 — 그게 "가로로 스크롤하면 얼린 행의 행번호가 사라지는" 버그였다).
+   *   행번호 열(left:0)  > 얼린 열(left:28px~) > 얼린 행의 나머지 칸 > 보통 칸
+   * 행번호 열 값은 CSS(.grid-edit-table .g-edit-rownum)의 z-index와 같아야 한다 — 틀 고정이 없는
+   * 시트에서는 CSS 값만으로 같은 순서가 나와야 하기 때문. */
+  const Z_ROWNUM = 5;
+  /** 얼린 열 — tbody에서는 얼린 행의 나머지 칸 위에, <thead>에서는 보통 열 문자 머리글
+   * (CSS z-index:2) 위에 와야 한다. 두 경우 다 "행번호 열 바로 아래 층"이라 값이 같다. */
+  const Z_FROZEN_COL = 4;
+  const Z_FROZEN_ROW = 3;
+
   /**
    * 위 freezeRows행 / 왼쪽 freezeCols열을 실제로 sticky 처리한다. 렌더링 직후 DOM에 실제로 붙은
    * 뒤에 호출해야 offsetHeight/offsetWidth로 진짜 셀 크기를 잴 수 있다 — 그래야 컬럼 letter 헤더
@@ -2040,7 +2054,11 @@ async function main(): Promise<void> {
         rowCells.forEach((cell) => {
           cell.style.position = 'sticky';
           cell.style.top = `${top}px`;
-          cell.style.zIndex = cell.classList.contains('g-frozen-col') ? '4' : '3';
+          // 행번호 <th>는 이 행에서도 계속 맨 위여야 한다 — 얼린 행의 나머지 칸은 sticky left가
+          // 없어서 가로 스크롤 때 이 칸 위로 밀려 들어오는데, .g-frozen-pane이 불투명 배경이라
+          // 같은 z-index면 행번호를 통째로 지워 버린다(DOM 순서상 <th>가 항상 먼저다).
+          if (cell.classList.contains('g-edit-rownum')) cell.style.zIndex = String(Z_ROWNUM);
+          else cell.style.zIndex = String(cell.classList.contains('g-frozen-col') ? Z_FROZEN_COL : Z_FROZEN_ROW);
           cell.classList.add('g-frozen-pane');
           rowHeight = Math.max(rowHeight, cell.getBoundingClientRect().height);
         });
@@ -2056,10 +2074,23 @@ async function main(): Promise<void> {
         colCells.forEach((cell) => {
           cell.style.position = 'sticky';
           cell.style.left = `${left}px`;
-          if (!cell.style.zIndex) cell.style.zIndex = '3';
+          if (!cell.style.zIndex) cell.style.zIndex = String(Z_FROZEN_COL);
           cell.classList.add('g-frozen-pane');
           colWidth = Math.max(colWidth, cell.getBoundingClientRect().width);
         });
+        // 얼린 "열"은 그 열의 문자 머리글(A, B…)도 같이 고정해야 한다 — 안 그러면 데이터 칸만
+        // 왼쪽에 남고 머리글은 그대로 흘러가, 고정된 A·B열 위에 엉뚱한 글자(J, K…)가 붙는다.
+        // .g-frozen-pane 클래스는 일부러 안 붙인다(그 배경 규칙이 머리글의 회색 배경을 덮어
+        // 얼린 열 머리글만 색이 달라진다 — <thead> th는 이미 불투명 배경을 갖고 있다).
+        const headCell = tableEl.querySelector<HTMLElement>(`thead th[data-col="${c}"]`);
+        if (headCell) {
+          headCell.style.position = 'sticky';
+          headCell.style.left = `${left}px`;
+          headCell.style.zIndex = String(Z_FROZEN_COL);
+          // 그 열의 tbody 칸이 하나도 없는 극단적인 경우(빈 스크롤 창)에도 폭 누적이 0으로
+          // 무너지지 않게, 머리글 폭을 대신 쓴다 — 두 폭은 <colgroup>이 똑같이 정한다.
+          if (colWidth === 0) colWidth = headCell.getBoundingClientRect().width;
+        }
         left += colWidth;
       }
     }

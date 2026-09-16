@@ -1596,7 +1596,13 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   text-align: center;
   min-width: 28px;
   transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
-  z-index: 1;
+  /* 가로로 스크롤하면 이 열은 left:0에 그대로 붙어 있고 나머지 칸들이 그 "위를 지나간다" — 그래서
+     같은 행(<tr>은 grid-editor.ts가 자체 스태킹 컨텍스트로 격리한다) 안의 어떤 것보다도 위에
+     그려져야 한다. 예전의 z-index:1은 같은 행의 스필 span(.g-cell-spill, z-index:1)·포커스된
+     칸(td:focus, z-index:3)·틀 고정 칸(applyFreezePanes가 인라인으로 3~4)에게 밀려서, 가로
+     스크롤 중에 행번호가 그 칸들 밑으로 사라졌다(틀 고정 행은 불투명 배경이라 아예 지워졌다).
+     값은 grid-editor.ts의 Z_ROWNUM과 같아야 한다. */
+  z-index: 5;
   /* 엑셀처럼 행 머리글 위에 커서를 올리면 "이 행을 선택" 오른쪽 화살표로 바뀐다. */
   cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpolygon points='3,2 3,14 13,8' fill='%23000000' stroke='%23ffffff' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, pointer;
 }
