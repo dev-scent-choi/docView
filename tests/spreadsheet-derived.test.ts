@@ -101,6 +101,148 @@ describe('parseXlsxToGrid: sparse trailing rows', () => {
   });
 });
 
+/** 워크시트를 xlsx 바이트로 굽고 다시 parseXlsxToGrid로 읽어, 첫 시트의 표시 텍스트만 꺼낸다.
+ * (ExcelJS가 쓰는 수식에는 계산 결과가 캐시되지 않으므로 — displayValue 문서 주석 참고 —
+ * 이 경로로 만든 수식 셀은 전부 "캐시된 결과 없음", 즉 서버가 직접 계산해야 하는 칸이다.) */
+async function parseSheet(build: (sheet: ExcelJS.Worksheet) => void) {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  build(sheet);
+  const buffer = await workbook.xlsx.writeBuffer();
+  const grid = await parseXlsxToGrid(Buffer.from(buffer));
+  const gridSheet = grid.sheets[0]!;
+  const textAt = (row: number, col: number): string => {
+    const cell = gridSheet.rows[row - 1]?.[col - 1];
+    return cell === 0 || cell === undefined ? '' : cell.v;
+  };
+  return { grid, gridSheet, textAt };
+}
+
+describe('parseXlsxToGrid: formulas are computed server-side for the read-only viewer', () => {
+  test('a formula with no cached result shows the COMPUTED value, not the raw formula text', async () => {
+    const { textAt } = await parseSheet((sheet) => {
+      sheet.getCell('A1').value = 2;
+      sheet.getCell('A2').value = 40;
+      sheet.getCell('A3').value = { formula: 'SUM(A1:A2)', result: undefined };
+    });
+    expect(textAt(3, 1)).toBe('42');
+  });
+
+  test('a chained formula (a formula referencing another formula cell) computes correctly — the ' +
+    'non-trivial case the shared per-pass memo has to get right', async () => {
+    // A1=1, A2=A1+1, ... A31=A30+1 → 사슬 끝은 31이어야 한다. memo를 패스마다 하나씩만 만드는
+    // 구현이라면 각 칸이 정확히 한 번씩만 계산된다(O(N²) 폭증 없음, computeGridCellDisplay 주석 참고).
+    const N = 31;
+    const { textAt } = await parseSheet((sheet) => {
+      sheet.getCell('A1').value = 1;
+      for (let r = 2; r <= N; r += 1) {
+        sheet.getCell(`A${r}`).value = { formula: `A${r - 1}+1`, result: undefined };
+      }
+    });
+    expect(textAt(N, 1)).toBe(String(N));
+    expect(textAt(2, 1)).toBe('2');
+  });
+
+  test('a formula whose range covers other FORMULA cells sums their computed values ' +
+    '(the real file’s `N49=SUM(B49:M49)` shape, where B49..M49 are themselves `=SUM(...)`)', async () => {
+    const { textAt } = await parseSheet((sheet) => {
+      sheet.getCell('A1').value = 1;
+      sheet.getCell('A2').value = 2;
+      sheet.getCell('B1').value = 10;
+      sheet.getCell('B2').value = 20;
+      sheet.getCell('A3').value = { formula: 'SUM(A1:A2)', result: undefined };
+      sheet.getCell('B3').value = { formula: 'SUM(B1:B2)', result: undefined };
+      sheet.getCell('C3').value = { formula: 'SUM(A3:B3)', result: undefined };
+    });
+    expect(textAt(3, 1)).toBe('3');
+    expect(textAt(3, 2)).toBe('30');
+    expect(textAt(3, 3)).toBe('33');
+  });
+
+  test('a circular reference yields the #REF! error string instead of hanging or crashing', async () => {
+    // tests/xlsxFormulas.test.ts의 기존 순환 참조 픽스처와 같은 모양(A1=B1, B1=A1).
+    const { textAt } = await parseSheet((sheet) => {
+      sheet.getCell('A1').value = { formula: 'B1', result: undefined };
+      sheet.getCell('B1').value = { formula: 'A1', result: undefined };
+    });
+    expect(textAt(1, 1)).toBe('#REF!');
+    expect(textAt(1, 2)).toBe('#REF!');
+  });
+
+  test('cells formatted with a thousands separator (#,##0) are still summed as NUMBERS — the ' +
+    'display text "1,761" must not be read back as text and silently summed to 0', async () => {
+    // data/originals/1a982ed5-…xlsx(실제 사용자 파일)의 재현 조건: B..M은 전부 nf="#,##0",
+    // N은 =SUM(B:M). 표시 텍스트를 그대로 수식 엔진에 먹이면 Number("1,761")=NaN이라 합계가 0이 된다.
+    const values = [1761, 1331, 1677, 1839, 1540, 1668, 1917, 1628];
+    const { textAt } = await parseSheet((sheet) => {
+      values.forEach((value, i) => {
+        const cell = sheet.getCell(1, i + 1);
+        cell.value = value;
+        cell.numFmt = '#,##0';
+      });
+      const total = sheet.getCell(1, values.length + 1);
+      total.value = { formula: `SUM(A1:${String.fromCharCode(64 + values.length)}1)`, result: undefined };
+      total.numFmt = '#,##0';
+    });
+    expect(textAt(1, 1)).toBe('1,761'); // 표시 형식 자체는 그대로 유지된다
+    // 합계는 실제 합(13,361)이어야 하고, 일반 숫자 칸과 **같은** 쉼표 서식으로 보여야 한다.
+    expect(textAt(1, values.length + 1)).toBe('13,361');
+  });
+
+  test('a formula that Excel DID cache keeps showing the cached result (no behaviour change)', async () => {
+    const { textAt } = await parseSheet((sheet) => {
+      sheet.getCell('A1').value = 2;
+      sheet.getCell('A2').value = { formula: 'A1*3', result: 6 };
+    });
+    expect(textAt(2, 1)).toBe('6');
+  });
+
+  test('a plain TEXT cell that merely starts with "=" is left alone (not evaluated)', async () => {
+    const { textAt } = await parseSheet((sheet) => {
+      sheet.getCell('A1').value = '=not a formula';
+    });
+    expect(textAt(1, 1)).toBe('=not a formula');
+  });
+
+  test('a formula the engine cannot evaluate degrades to an error string or the raw formula text, ' +
+    'never to a blank cell', async () => {
+    const { textAt } = await parseSheet((sheet) => {
+      sheet.getCell('A1').value = { formula: 'TOTALLYUNKNOWNFN(1,2)', result: undefined };
+    });
+    const shown = textAt(1, 1);
+    expect(shown).not.toBe('');
+    expect(shown === '=TOTALLYUNKNOWNFN(1,2)' || shown.startsWith('#')).toBe(true);
+  });
+
+  test('a few thousand formula rows parse in a reasonable time (no O(N²) blow-up)', async () => {
+    // 3000행 × (독립 수식 1개 + 앞 행을 참조하는 체인형 수식 1개) — 체인형이 memo 없이 계산되면
+    // 총 계산 횟수가 O(N²)로 폭증해 이 한계를 한참 넘긴다.
+    const ROWS = 3000;
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Sheet1');
+    for (let r = 1; r <= ROWS; r += 1) {
+      sheet.getCell(r, 1).value = r;
+      sheet.getCell(r, 2).value = { formula: `A${r}*2`, result: undefined };
+      sheet.getCell(r, 3).value = r === 1 ? { formula: 'A1', result: undefined } : { formula: `C${r - 1}+A${r}`, result: undefined };
+    }
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    const start = Date.now();
+    const grid = await parseXlsxToGrid(Buffer.from(buffer));
+    const elapsedMs = Date.now() - start;
+
+    const gridSheet = grid.sheets[0]!;
+    const textAt = (row: number, col: number) => {
+      const cell = gridSheet.rows[row - 1]?.[col - 1];
+      return cell === 0 || cell === undefined ? '' : cell.v;
+    };
+    expect(textAt(ROWS, 2)).toBe(String(ROWS * 2));
+    // 체인 끝 = 1..ROWS의 합
+    expect(textAt(ROWS, 3)).toBe(String((ROWS * (ROWS + 1)) / 2));
+    expect(elapsedMs).toBeLessThan(30_000);
+  }, 60_000);
+});
+
 describe('spreadsheet.ts: newly-exported helpers behave identically to before', () => {
   test('displayValue/extractStyle/parseMergeRange work when called directly (not just via parseXlsxToGrid)', () => {
     const workbook = new ExcelJS.Workbook();

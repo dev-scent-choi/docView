@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import type { DocumentStore } from './storage.js';
+import { computeGridCellDisplay } from './xlsx/formulas.js';
 
 /** 대형 시트를 훑는 동기 반복문 중간에 이벤트 루프에 제어권을 돌려준다 — 이게 없으면 큰 xlsx를
  * 열 때(파싱이든 동시편집 시딩이든) 그 몇 초~몇십 초 동안 Node가 단일 스레드라 그 문서를 연
@@ -12,6 +13,14 @@ export function yieldToEventLoop(): Promise<void> {
  * 오버헤드 자체가 커지고, 너무 뜸하면 양보 효과가 없다. 2000행은 실측 없이 정한 보수적인 값이라
  * 필요하면 나중에 조정 가능하다. */
 export const YIELD_EVERY_N_ROWS = 2000;
+
+/** parseXlsxToGrid의 수식 계산 패스가 이 개수의 **수식 셀**마다 한 번씩 양보한다 — 행이 아니라
+ * 셀 단위인 이유는, 그 패스가 도는 대상이 "모든 행"이 아니라 "수식이 들어 있는 칸만 모은 목록"이라
+ * 행 기준 간격으로는 (수식이 한 행에 몰려 있을 때) 아무 효과가 없을 수 있기 때문이다. 수식 한 칸의
+ * 계산 비용은 참조 범위 크기에 비례해 최대 MAX_RANGE_CELLS(xlsx/formulas.ts)까지 갈 수 있으므로,
+ * 행 단위(2000)보다 훨씬 촘촘하게 잡아 대형 파일 업로드 한 번이 서버 전체를 멈추지 않게 한다
+ * (room.ts의 RECOMPUTE_YIELD_EVERY_N_ROWS가 같은 이유로 페이지 크기의 1/4을 쓰는 것과 같은 취지). */
+export const YIELD_EVERY_N_FORMULA_CELLS = 500;
 
 /** 그리드 뷰 데이터 모델 — 원본 파일 대신 표시용 값·스타일만 담는다. */
 export interface GridCell {
@@ -299,8 +308,11 @@ export function displayValue(cell: ExcelJS.Cell): string {
     if ('formula' in formula) {
       const result = formula.result;
       // 캐시된 계산 결과가 없는 경우(우리 export가 저장한 수식은 결과를 캐시하지 않는다) —
-      // 빈 값 대신 수식 원문을 그대로 돌려준다. 동시편집기는 이 값을 다시 계산해 보여주고,
-      // 읽기전용 뷰어는 최소한 "여기 수식이 있다"는 걸 알 수 있다(빈 칸보다 훨씬 낫다).
+      // 빈 값 대신 수식 원문을 그대로 돌려준다. 이 함수 단독으로는 여기서 끝이지만,
+      // parseXlsxToGrid는 워크북을 다 읽은 뒤 2차 패스(applyComputedFormulaValues)에서 이렇게
+      // 표시된 칸을 서버에서 직접 계산해 그 결과로 바꿔 넣는다 — 그래야 읽기전용 뷰어도
+      // 동시편집기와 똑같은 값을 보여준다. 계산이 실패하면(#REF! 등 에러 값이 아니라 정말로
+      // 값을 만들지 못하면) 이 수식 원문이 그대로 남아, 최소한 "여기 수식이 있다"는 건 알 수 있다.
       if (result === null || result === undefined) return `=${formula.formula}`;
       if (result instanceof Date) return formatDate(result);
       if (typeof result === 'number') return formatNumber(result, cell.numFmt);
@@ -309,6 +321,170 @@ export function displayValue(cell: ExcelJS.Cell): string {
     return '';
   }
   return String(value);
+}
+
+/** displayValue가 만든 표시용 텍스트(예: "2,287")를 계산·편집에 쓸 수 있는 "값 텍스트"(예: "2287")로
+ * 되돌린다. Number("2,287")은 NaN이라, 이 텍스트를 그대로 수식 엔진에 먹이면 그 셀을 숫자가 아닌
+ * 것으로 취급해 조용히 0으로 계산해버린다(실제 재현된 버그: 합계 열이 항상 0). 쉼표 구분 표시
+ * 형식(number/currency)이 걸린 칸만, 숫자로 되돌릴 수 있을 때에만 벗겨낸다 — 되돌린 결과가 유한한
+ * 숫자가 아니면(예: 수식 원문 "=SUM(B3,M3)", 쉼표가 들어간 일반 텍스트) 원문을 그대로 돌려준다.
+ * "화면에 어떻게 보일지"는 style.nf/nd로 이미 따로 전달되므로 여기서는 순수 값만 복원하면 된다.
+ *
+ * 동시편집 시딩(xlsx/collab.ts의 seedGridFromXlsx/seedGridPageFromXlsx)과 읽기전용 뷰어의 수식
+ * 계산 패스(이 파일의 applyComputedFormulaValues)가 **같은 규칙**을 써야 하므로 여기서 한 번만
+ * 정의한다 — 한쪽만 고치면 "편집기에서는 맞는데 뷰어에서는 0" 같은 불일치가 다시 생긴다. */
+export function unformattedCellValue(text: string, style: GridStyle | undefined): string {
+  if (!style?.nf || (style.nf !== 'number' && style.nf !== 'currency')) return text;
+  const stripped = text.replace(/[₩,\s]/g, '');
+  return Number.isFinite(Number(stripped)) && stripped !== '' ? stripped : text;
+}
+
+/** displayValue가 "수식 원문 그대로" 폴백을 탄 칸인지 가려내기 위한 판정 — 값이 ExcelJS의 수식
+ * 값 객체여야 한다. 표시 텍스트가 '='로 시작한다는 것만으로는 부족하다: 사용자가 진짜로 "=abc"
+ * 라는 **문자열**을 입력해 둔 칸도 똑같이 '='로 시작하는데, 그런 칸까지 계산해 '#ERROR!'로
+ * 덮어써버리면 멀쩡히 보이던 텍스트가 깨진다. */
+function isFormulaCellValue(value: ExcelJS.CellValue): boolean {
+  return value !== null && typeof value === 'object' && !(value instanceof Date) && 'formula' in value;
+}
+
+/** computeGridCellDisplay가 돌려준 값(number | string | boolean | 에러 이름 문자열 ...)을 그리드에
+ * 저장할 표시 텍스트로 만든다. 숫자는 displayValue가 일반 숫자 칸에 쓰는 것과 **같은**
+ * formatNumber(value, cell.numFmt)를 그대로 태운다 — 계산된 합계가 엑셀이 캐시해 둔 결과와 같은
+ * 자릿수·쉼표 서식으로 보여야 하기 때문이다. '#REF!'/'#ERROR!' 같은 에러 이름은 문자열이라
+ * 그대로 통과해, 엑셀이 깨진 수식에 보여주는 것과 같은 모양으로 표시된다. */
+function formatFormulaResult(value: unknown, numFmt?: string): string {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return formatDate(value);
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  if (typeof value === 'number') {
+    // 부동소수 잡음(0.1+0.2=0.30000000000000004) 제거 — formatComputedValueForStorage
+    // (xlsx/formulas.ts)가 동시편집기 쪽에 쓰는 것과 같은 반올림 규칙. 절댓값이 너무 커서
+    // value*1e10이 Infinity가 되는 경우에는 반올림을 건너뛴다(그 자릿수에서는 잡음도 없다).
+    const rounded = Math.round(value * 1e10) / 1e10;
+    return formatNumber(Number.isFinite(rounded) ? rounded : value, numFmt);
+  }
+  return String(value);
+}
+
+/** 수식 계산 패스가 계산해 채워야 하는 칸 하나(= displayValue가 수식 원문을 그대로 남긴 칸). */
+interface PendingFormulaCell {
+  readonly sheetIdx: number;
+  readonly row: number;
+  readonly col: number;
+  /** 원본 엑셀 서식 코드 — 계산 결과를 일반 숫자 칸과 같은 규칙으로 서식화하기 위해 들고 다닌다. */
+  readonly numFmt?: string;
+}
+
+/** 수식 계산 패스가 읽을 입력 그리드를 만든다 — 표시용 그리드와 내용은 같지만, 쉼표 서식이 걸린
+ * 숫자 칸의 텍스트만 unformattedCellValue로 값 텍스트로 되돌려 둔다(그래야 SUM 등이 그 칸을
+ * 숫자로 본다).
+ *
+ * 메모리: 수식이 **하나도 없는** 시트는 원본 시트 객체를 그대로 재사용하고, 수식이 있는 시트
+ * 안에서도 서식이 벗겨질 칸이 하나도 없는 행은 원본 행 배열을 그대로 공유한다 — 실제로 새로
+ * 할당되는 건 "쉼표 서식 숫자가 한 칸이라도 있는 행"뿐이다. 수십만 행 문서에서 표시용 그리드를
+ * 통째로 복제하지 않기 위한 조치다. */
+async function buildFormulaInputGrid(
+  sheets: readonly GridSheet[],
+  styles: readonly GridStyle[],
+  sheetsWithFormulas: ReadonlySet<number>,
+): Promise<GridDocument> {
+  const inputSheets: GridSheet[] = [];
+  for (let sheetIdx = 0; sheetIdx < sheets.length; sheetIdx += 1) {
+    const sheet = sheets[sheetIdx];
+    if (!sheetsWithFormulas.has(sheetIdx)) {
+      inputSheets.push(sheet);
+      continue;
+    }
+    const inputRows: Array<ReadonlyArray<GridCell | 0>> = [];
+    for (let r = 0; r < sheet.rows.length; r += 1) {
+      const row = sheet.rows[r];
+      let unformatted: Array<GridCell | 0> | null = null;
+      for (let c = 0; c < row.length; c += 1) {
+        const cell = row[c];
+        if (cell === 0) continue;
+        const raw = unformattedCellValue(cell.v, cell.s === undefined ? undefined : styles[cell.s]);
+        if (raw === cell.v) continue;
+        // 이 행에서 처음으로 서식을 벗길 칸을 만난 순간에만 행을 복제한다(copy-on-write).
+        if (!unformatted) unformatted = row.slice();
+        // 계산 엔진은 v만 읽으므로 스타일 참조는 싣지 않는다(이 그리드는 순수 값 전용).
+        unformatted[c] = { v: raw };
+      }
+      inputRows.push(unformatted ?? row);
+      if ((r + 1) % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
+    }
+    inputSheets.push({ ...sheet, rows: inputRows });
+  }
+  return { sheets: inputSheets, styles };
+}
+
+/**
+ * 워크북을 다 읽은 뒤 도는 2차 패스 — displayValue가 "캐시된 결과가 없어" 수식 원문을 그대로
+ * 남겨둔 칸들을 서버에서 직접 계산해 그 결과로 바꿔 넣는다. 읽기전용 뷰어가 동시편집기
+ * (collab/room.ts의 recomputeFormulasForPage)와 **같은** 값을 보여주게 하기 위한 것으로, 계산
+ * 자체도 같은 함수(xlsx/formulas.ts의 computeGridCellDisplay)를 쓴다.
+ *
+ * **전체 시트를 다 만든 뒤에 도는 이유**: 수식은 자기 시트의 어느 칸이든(창 밖이든 아래쪽이든)
+ * 참조할 수 있으므로, 행을 채우는 도중에 계산하면 아직 읽지 않은 아래쪽 참조가 빈 칸으로 보인다.
+ *
+ * **memo/tainted를 패스 전체가 공유하는 이유**: 체인형 수식(뒤 칸이 앞 칸을 참조)에서 memo가
+ * 없으면 총 계산 횟수가 O(N²)로 폭증한다(computeGridCellDisplay 문서 주석 참고). 그래서 이
+ * 함수 호출 하나 = 재계산 패스 하나로 보고 memo/tainted를 **여기서 한 번만** 만든다 — 셀마다·
+ * 행마다 새로 만들면 안 된다.
+ *
+ * **계산이 다 끝난 뒤에야 표시용 그리드에 써 넣는 이유(중요)**: buildFormulaInputGrid는 메모리를
+ * 아끼려고 "서식을 벗길 칸이 없는 행"의 배열을 표시용 그리드와 **그대로 공유**한다. 그래서 계산
+ * 도중에 결과를 표시용 그리드에 바로 써 넣으면 그게 입력 그리드까지 같이 바꿔버린다 — 예를 들어
+ * 이 프로젝트의 실제 파일처럼 `B49=SUM(B3:B48)`(수식)이고 `N49=SUM(B49:M49)`(그 수식들의 합)인
+ * 경우, 먼저 계산된 B49의 표시 텍스트("12,153")가 입력 그리드에 덮어씌워져 N49가 그 칸을 더 이상
+ * 수식으로도 숫자로도 보지 못하고 0을 내놓는다(실제로 재현됨). 결과를 전부 모은 뒤 한 번에
+ * 반영하면, 모든 계산이 "파일을 막 읽었을 때의 원본 상태"만 보게 되어 이 종류의 별칭(aliasing)
+ * 문제가 원천적으로 사라진다. memo 캐시 키가 좌표뿐인 것도 이 불변식(패스 동안 입력이 바뀌지
+ * 않음) 위에서만 안전하다.
+ */
+async function applyComputedFormulaValues(
+  sheets: readonly GridSheet[],
+  sheetRows: ReadonlyArray<Array<Array<GridCell | 0>>>,
+  styles: readonly GridStyle[],
+  pending: readonly PendingFormulaCell[],
+): Promise<void> {
+  if (pending.length === 0) return;
+  const inputGrid = await buildFormulaInputGrid(
+    sheets,
+    styles,
+    new Set(pending.map((p) => p.sheetIdx)),
+  );
+  const memo = new Map<string, unknown>();
+  const tainted = new Set<string>();
+  const computedTexts: string[] = new Array(pending.length).fill('');
+  for (let i = 0; i < pending.length; i += 1) {
+    const { sheetIdx, row, col, numFmt } = pending[i];
+    try {
+      computedTexts[i] = formatFormulaResult(
+        computeGridCellDisplay(inputGrid, sheetIdx, row, col, new Set(), memo, tainted),
+        numFmt,
+      );
+    } catch {
+      // 계산이 예외로 끝나면(예: 지원하지 않는 구문으로 인한 깊은 재귀) 빈 문자열로 남겨 아래에서
+      // 수식 원문을 그대로 두게 한다 — 업로드 자체가 실패하는 것보다 "여기 수식이 있다"고
+      // 보여주는 편이 낫다(이 변경 이전의 동작으로 폴백).
+      computedTexts[i] = '';
+    }
+    if ((i + 1) % YIELD_EVERY_N_FORMULA_CELLS === 0) await yieldToEventLoop();
+  }
+
+  for (let i = 0; i < pending.length; i += 1) {
+    const text = computedTexts[i];
+    // 빈 결과는 반영하지 않는다: 칸을 비워 버리면 "여기 수식이 있다"는 정보까지 사라지고,
+    // 값 없는 꼬리 행 트리밍이 이미 끝난 뒤라 행 수 계산과도 어긋난다.
+    if (text === '') continue;
+    const { sheetIdx, row, col } = pending[i];
+    const cells = sheetRows[sheetIdx]?.[row];
+    const cell = cells?.[col];
+    // 꼬리 행 트리밍으로 사라진 칸일 수 있으므로 존재 여부를 먼저 본다.
+    if (!cells || cell === 0 || cell === undefined || cell.v === text) continue;
+    cells[col] = cell.s === undefined ? { v: text } : { v: text, s: cell.s };
+    if ((i + 1) % YIELD_EVERY_N_FORMULA_CELLS === 0) await yieldToEventLoop();
+  }
 }
 
 export function parseMergeRange(range: string): GridMerge | null {
@@ -449,6 +625,10 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
   const themes = (workbook.model as unknown as { themes?: Record<string, string> }).themes;
   const themeColors = parseThemeColors(themes?.theme1);
   const sheets: GridSheet[] = [];
+  // sheets와 1:1로 대응하는 "쓰기 가능한" 행 배열 핸들 — GridSheet.rows는 readonly로 선언돼 있어
+  // 수식 계산 패스가 결과를 써 넣을 수 없으므로, 같은 배열 객체를 여기에도 담아 둔다.
+  const sheetRows: Array<Array<Array<GridCell | 0>>> = [];
+  const pendingFormulas: PendingFormulaCell[] = [];
 
   // workbook.eachSheet/sheet.eachRow는 콜백형 동기 API라 중간에 await로 이벤트 루프에 양보할 수
   // 없다 — 배열(workbook.worksheets)을 직접 도는 for 루프로 바꿔, 대형 시트를 열 때 그 문서를 연
@@ -495,6 +675,10 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
     }
 
     const rows: Array<Array<GridCell | 0>> = [];
+    // 이 시트가 sheets 배열에서 갖게 될 인덱스 — 아래 sheets.push가 이 반복의 마지막이고, 여기까지
+    // 왔으면 더 이상 continue로 건너뛰지 않으므로 지금 값이 곧 최종 인덱스다(숨김/빈 시트가
+    // 걸러지므로 워크북 상의 시트 번호와는 다를 수 있다).
+    const sheetIdx = sheets.length;
     for (let r = 1; r <= rowCount; r += 1) {
       const row = sheet.getRow(r);
       const cells: Array<GridCell | 0> = new Array(colCount).fill(0);
@@ -508,6 +692,11 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
         const styleRef = extractStyle(cell, palette, themeColors, sheetProtected);
         if (text === '' && styleRef === undefined) return;
         cells[colNumber - 1] = styleRef === undefined ? { v: text } : { v: text, s: styleRef };
+        // displayValue가 캐시된 결과가 없어 수식 원문을 그대로 남긴 칸 — 워크북을 다 읽은 뒤
+        // applyComputedFormulaValues가 직접 계산해 채운다(displayValue 문서 주석 참고).
+        if (text.startsWith('=') && isFormulaCellValue(cell.value)) {
+          pendingFormulas.push({ sheetIdx, row: r - 1, col: colNumber - 1, numFmt: cell.numFmt });
+        }
       });
       rows.push(cells);
       if (r % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
@@ -536,9 +725,13 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
     const freezeCols = frozenView ? ((frozenView as { xSplit?: number }).xSplit ?? 0) : 0;
 
     sheets.push({ name: sheet.name, rowCount: rows.length, colCount, colWidths, merges, freezeRows, freezeCols, rows });
+    sheetRows.push(rows);
   }
 
-  return { sheets, styles: palette.toArray() };
+  const styles = palette.toArray();
+  // 2차 패스 — 시트를 전부 만든 뒤에야 수식이 참조하는 칸이 모두 채워져 있다.
+  await applyComputedFormulaValues(sheets, sheetRows, styles, pendingFormulas);
+  return { sheets, styles };
 }
 
 /** 간단한 RFC4180 CSV 파서 (따옴표·이스케이프 지원) */

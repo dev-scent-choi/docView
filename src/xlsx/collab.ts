@@ -17,7 +17,7 @@ import {
   type SheetStructure,
 } from '../collab/gridShared.js';
 import type { GridCell, GridDocument, GridStyle } from '../spreadsheet.js';
-import { parseXlsxToGrid, yieldToEventLoop, YIELD_EVERY_N_ROWS } from '../spreadsheet.js';
+import { parseXlsxToGrid, unformattedCellValue, yieldToEventLoop, YIELD_EVERY_N_ROWS } from '../spreadsheet.js';
 import type { LazyGridSheetMeta, LazyGridStore } from './lazyGridStore.js';
 import { getRow } from './lazyGridStore.js';
 
@@ -126,15 +126,10 @@ function mergeCoveredCells(merges: readonly GridMergeShape[]): Set<string> {
 
 /** parseXlsxToGrid가 만든 표시용 텍스트(예: "2,287")를 협업 문서의 실제 셀 값으로 그대로 심으면
  * 안 된다 — Number("2,287")는 NaN이라, 이 값을 참조하는 다른 수식(SUM 등)이 이 셀을 숫자가 아닌
- * 것으로 취급해 조용히 0으로 계산해버린다(실제 재현된 버그: 합계 열이 항상 0으로 보임). 쉼표 구분
- * 표시 형식(number/currency)이 걸린 칸만, 화면표시용 텍스트에서 쉼표를 제거해 원래 숫자 문자열로
- * 되돌린 뒤 심는다 — "화면에 어떻게 보일지"는 style.nf/nd로 이미 별도로 심어지므로 여기서는 순수
- * 값만 복원하면 된다. */
-function seedableCellValue(text: string, style: GridStyle | undefined): string {
-  if (!style?.nf || (style.nf !== 'number' && style.nf !== 'currency')) return text;
-  const stripped = text.replace(/[₩,\s]/g, '');
-  return Number.isFinite(Number(stripped)) && stripped !== '' ? stripped : text;
-}
+ * 것으로 취급해 조용히 0으로 계산해버린다(실제 재현된 버그: 합계 열이 항상 0으로 보임).
+ * 규칙 자체는 읽기전용 뷰어의 수식 계산 패스와 똑같아야 하므로 spreadsheet.ts에 한 번만 두고
+ * 여기서는 그대로 가져다 쓴다(unformattedCellValue 문서 주석 참고). */
+const seedableCellValue = unformattedCellValue;
 
 /** 읽기전용 그리드 뷰(parseXlsxToGrid의 결과)를 협업용 Y.Doc에 시딩한다.
  * 큰 시트를 셀 하나하나 동기로 심으면 그동안 서버 전체가 멈추므로(spreadsheet.ts의

@@ -28,10 +28,13 @@ async function makeSampleXlsx(): Promise<Buffer> {
 }
 
 describe('collab: xlsx <-> Yjs grid bridge', () => {
-  test('a formula cell with no cached result seeds as the raw formula text, not blank', async () => {
+  test('a formula cell with no cached result is computed by parseXlsxToGrid, not left blank or as raw text', async () => {
     // exportXlsxFromGrid이 저장하는 수식은 { formula } 만 있고 result가 없다(계산은 우리가
-    // 안 하니까) — 그런 파일을 다시 seed할 때 빈 문자열이 아니라 "=수식" 텍스트가 나와야
-    // 동시편집기의 실시간 계산 엔진이 다시 계산해 보여줄 수 있다.
+    // export 시점에 안 하니까) — 그런 파일을 다시 읽어들일 때 빈 문자열이나 수식 원문이 아니라
+    // parseXlsxToGrid 자신의 2차 계산 패스(applyComputedFormulaValues)가 계산한 값이 나와야
+    // 읽기전용 뷰어도 동시편집기와 같은 값을 보여준다(더 이상 seedGridFromXlsx가 실제 편집
+    // 경로에 쓰이지 않으므로 — 그건 LazyGridStore 기반 seedGridPageFromXlsx로 대체됐다 — 이
+    // 테스트는 그 대체 경로가 아니라 parseXlsxToGrid 자체의 계산 결과를 검증한다).
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Sheet1');
     sheet.getCell('A1').value = 10;
@@ -42,11 +45,11 @@ describe('collab: xlsx <-> Yjs grid bridge', () => {
     const grid = await parseXlsxToGrid(buffer);
     const b1 = grid.sheets[0].rows[0][1];
     expect(b1).not.toBe(0);
-    expect((b1 as { v: string }).v).toBe('=SUM(A1:A2)');
+    expect((b1 as { v: string }).v).toBe('30');
 
     const ydoc = new Y.Doc();
     await seedGridFromXlsx(ydoc, grid);
-    expect(ydoc.getMap<string>(GRID_CELLS_MAP).get(gridCellKey(0, 0, 1))).toBe('=SUM(A1:A2)');
+    expect(ydoc.getMap<string>(GRID_CELLS_MAP).get(gridCellKey(0, 0, 1))).toBe('30');
   });
 
   test('export does not call spliceRows/spliceColumns when nothing was actually edited, even if ExcelJS-raw rowCount/columnCount differ from actualRowCount/actualColumnCount', async () => {
