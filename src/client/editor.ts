@@ -52,7 +52,16 @@ const token = params.get('token') ?? '';
  * `editable: () => canEdit`로 이 값을 직접 참조해 키보드/붙여넣기/드롭 등 DOM에서 오는 편집
  * 이벤트 전체를 스스로 거부하고, 여기서는 그 위에 툴바(서식 리본) 자체를 숨겨 애초에 사용자가
  * 고칠 수 있다고 착각하지 않게 한다. 실제 쓰기 차단은 여전히 서버(collab/room.ts의
- * readOnlyConns)가 독립적으로 수행한다. */
+ * readOnlyConns)가 독립적으로 수행한다.
+ *
+ * 주의: `editable:false`는 ProseMirror 코어의 `editHandlers` 목록(keydown/paste/cut/drop/
+ * composition류)에 있는 DOM 이벤트만 막는다 — view.dispatch()를 직접 부르는 경로(툴바 버튼 등)는
+ * 이 값을 아예 안 본다(그래서 리본을 숨기는 게 장식이 아니라 실질적 방어다). 표 열 너비 드래그처럼
+ * editHandlers 밖의 handleDOMEvents 경로는 현재 prosemirror-tables 자신이 내부에서 view.editable을
+ * 확인해 막아주고 있을 뿐, ProseMirror 코어가 보장하는 동작이 아니다 — 이 라이브러리를 업그레이드
+ * 하거나 handleDOMEvents를 쓰는 새 플러그인을 추가할 때는 그 플러그인이 editable을 스스로
+ * 확인하는지 다시 확인할 것. 어느 경우든 서버 쪽 readOnlyConns 차단이 최종 방어선이라 이 가정이
+ * 깨져도 실제 쓰기가 반영되지는 않는다. */
 let canEdit = true;
 
 const titleEl = document.getElementById('doc-title') as HTMLElement;
