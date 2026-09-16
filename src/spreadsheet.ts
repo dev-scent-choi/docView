@@ -349,6 +349,14 @@ export function displayValue(cell: ExcelJS.Cell): string {
   const value = cell.value;
   if (value === null || value === undefined) return '';
   if (value instanceof Date) return formatDate(value);
+  // 리터럴(수식이 아닌) 논리값 칸 — typeof는 'object'가 아니라 'boolean'이라 아래 object 분기에
+  // 걸리지 않고 이 체크가 없으면 맨 아래 String(value)로 떨어져 소문자 "true"/"false"가 된다.
+  // formatFormulaResult(수식 계산 결과용, 이 파일 아래쪽)는 이미 대문자 "TRUE"/"FALSE"를 쓰고
+  // 실제 엑셀도 논리값 칸을 대문자로 보여주므로, 여기서도 같은 규칙으로 맞춘다 — 그래야
+  // isSpillEligible(viewer.js/grid-editor.ts)의 rawText==='TRUE'||'FALSE' 특례가 계산된 수식
+  // 결과뿐 아니라 리터럴 논리값 칸에도 똑같이 걸린다(이전엔 대소문자가 달라 리터럴 칸에는
+  // 전혀 걸리지 않았다).
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
   if (typeof value === 'number') return formatNumber(value, cell.numFmt);
   if (typeof value === 'object') {
     const rich = value as ExcelJS.CellRichTextValue;
@@ -366,6 +374,9 @@ export function displayValue(cell: ExcelJS.Cell): string {
       // 값을 만들지 못하면) 이 수식 원문이 그대로 남아, 최소한 "여기 수식이 있다"는 건 알 수 있다.
       if (result === null || result === undefined) return `=${formula.formula}`;
       if (result instanceof Date) return formatDate(result);
+      // 엑셀이 이미 캐시해 둔 논리값 결과("=A1>0" 등) — 위 리터럴 논리값과 같은 이유로 대문자로
+      // 맞춘다. 캐시가 없어 서버가 직접 계산하는 경로는 formatFormulaResult가 이미 대문자를 쓴다.
+      if (typeof result === 'boolean') return result ? 'TRUE' : 'FALSE';
       if (typeof result === 'number') return formatNumber(result, cell.numFmt);
       return String(result);
     }
@@ -589,7 +600,20 @@ function borderWeight(border?: Partial<ExcelJS.Border>): BorderWeight | undefine
 
 /** 원본 엑셀 서식 코드(예: "#,##0.00", "0.0%", "\"₩\"#,##0")를 그대로 저장하지 않고, 툴바가 다루는
  * 몇 가지 자주 쓰는 범주(쉼표/통화/백분율)+소수 자릿수로 단순화해서 읽는다 — 서식 코드 전체를
- * 파싱하는 건 범위 밖이고, 어차피 우리 툴바도 이 세 가지 버튼만 제공한다. */
+ * 파싱하는 건 범위 밖이고, 어차피 우리 툴바도 이 세 가지 버튼만 제공한다.
+ *
+ * **날짜 서식은 의도적으로 분류하지 않는다**(리뷰에서 지적된 gap — 날짜 칸이 기본 왼쪽 정렬/스필
+ * 대상으로 잘못 취급되는 문제 — 는 여기서 NumberFormatKind에 'date'를 추가하는 대신 isSpillEligible
+ * 쪽에서 표시 텍스트 모양(YYYY-MM-DD)만으로 처리했다). 이유: NumberFormatKind/style.nf는 이 파일
+ * 밖에서도 실제 값 서식(그리드 편집기의 쉼표/통화/백분율 표시 형식 드롭다운 cell-numfmt-select —
+ * public/editor-grid.html·src/client/grid-editor.ts, xlsx로 재내보낼 때 서식 코드를 고르는
+ * src/xlsx/collab.ts의 numFmtStringFor)를 좌우하는 공유 타입이다. 그 소비처들은 전부 이 세 범주
+ * only 기준으로 쓰여 있어(드롭다운엔 애초에 "날짜" 옵션이 없고, numFmtStringFor의 switch도 세
+ * 범주만 안다), 'date'를 새 멤버로 넣으면 날짜 칸의 서식 드롭다운이 어떤 옵션도 선택되지 않은 채
+ * 빈 채로 뜨는 등 이 정렬/스필 버그와 무관한 곳에서 새로운(더 눈에 띄는) 부작용이 생긴다. 반면 이
+ * 앱이 날짜를 실제로 그리는 경로는 formatDate(이 파일) 단 하나뿐이고, 원본 서식 코드가 무엇이든
+ * 항상 "YYYY-MM-DD"나 "YYYY-MM-DD HH:MM" 모양으로만 렌더링하므로, 그 모양을 표시 텍스트에서 직접
+ * 알아보는 쪽이 공유 타입을 건드리지 않고도 훨씬 좁고 안전하게 같은 문제를 고친다. */
 function classifyNumFmt(numFmt?: string): { nf?: NumberFormatKind; nd?: number } {
   if (!numFmt || numFmt === 'General' || numFmt === '@') return {};
   const decimals = numFmt.match(/\.(0+)/)?.[1].length ?? 0;
@@ -647,6 +671,14 @@ export function extractStyle(
   const horizontal = cell.alignment?.horizontal;
   if (horizontal === 'center') style.a = 'c';
   else if (horizontal === 'right') style.a = 'r';
+  // 명시적 왼쪽 정렬도 캡처한다 — 안 그러면 이미 소스 xlsx에서 명시적으로 왼쪽 정렬된 칸(예:
+  // 숫자 서식이면서 왼쪽 정렬인 칸)이 style.a 미지정으로 저장돼, isSpillEligible(뷰어/편집기
+  // 둘 다) 쪽에서 "명시적 style.a==='l'은 항상 넘친다" 분기를 절대 못 타고 style.nf 기반 기본
+  // 오른쪽 정렬로 잘못 분류되어 스필이 되레 억제된다(엑셀 실제 동작과 반대인, 옆 빈 칸으로 안
+  // 넘치는 방향의 사소한 표시 차이). 'l'이 이제 실제 파일에서도 나올 수 있게 됐지만, 이 값을
+  // 읽는 다른 소비처(ALIGN_TO_CSS/ALIGN_TO_EXCEL, 뷰어 injectGridStyles)는 이미 'l'을 다루도록
+  // 돼 있어 부작용이 없다(확인 완료).
+  else if (horizontal === 'left') style.a = 'l';
   const vertical = cell.alignment?.vertical;
   if (vertical === 'top') style.va = 't';
   else if (vertical === 'middle') style.va = 'm';

@@ -960,6 +960,11 @@ function injectGridStyles(styles) {
     if (style.bg) parts.push(`background:${style.bg}`);
     if (style.a === 'c') parts.push('text-align:center');
     if (style.a === 'r') parts.push('text-align:right');
+    // 'l'(명시적 왼쪽 정렬)은 .grid-table td의 브라우저 기본값이 이미 왼쪽이라 생략해도 시각적
+    // 차이가 없지만(.grid-table td에 다른 기본 text-align 규칙 없음, css/style.css 확인 완료),
+    // extractStyle(spreadsheet.ts)이 이제 실제 파일의 명시적 왼쪽 정렬을 'l'로 읽어 들이므로
+    // 의도를 명시적으로 남겨 둔다.
+    if (style.a === 'l') parts.push('text-align:left');
     if (style.w) parts.push('white-space:normal');
     return `.gs${i}{${parts.join(';')}}`;
   });
@@ -1073,6 +1078,14 @@ function markMatches(rawText, query) {
  * 프레임마다 수십~수백 칸을 다시 그리므로 칸마다 그런 호출이 들어가면 레이아웃 스래싱으로
  * 직결된다(grid-editor.ts의 applySpillDisplay 문서 주석에 있는 것과 같은 교훈). 여기 판정은
  * 전부 이미 들고 있는 데이터(style 객체, 문자열)만으로 끝난다. */
+// 날짜 칸도 엑셀 기본은 오른쪽 정렬이라 스필 대상이 아니다. classifyNumFmt(src/spreadsheet.ts)는
+// 의도적으로 날짜를 style.nf 범주에 넣지 않으므로(그 문서 주석 참고 — nf를 건드리면 서식 드롭다운·
+// xlsx 재내보내기 쪽에 더 눈에 띄는 부작용이 생긴다) 여기서 표시 텍스트의 "모양"만으로 판정한다:
+// 이 앱이 날짜를 그리는 경로는 formatDate(src/spreadsheet.ts) 단 하나뿐이고, 원본 서식 코드가
+// 무엇이든 항상 이 모양(YYYY-MM-DD, 또는 시:분이 있으면 그 뒤에 공백+HH:MM)으로만 렌더링되므로
+// 이 정규식과 일치하는 텍스트는 항상 날짜다(리터럴 날짜 칸은 displayValue가, 수식 결과 날짜는
+// formatFormulaResult가 둘 다 이 formatDate를 그대로 호출한다).
+const DATE_LIKE_TEXT = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/;
 function isSpillEligible(style, rawText) {
   if (style) {
     if (style.a === 'c' || style.a === 'r') return false; // 명시적 가운데/오른쪽 정렬 — 절대 안 넘친다
@@ -1080,6 +1093,7 @@ function isSpillEligible(style, rawText) {
     if (style.nf) return false; // 숫자 서식이 걸려 있으면 기본 오른쪽 정렬
   }
   if (rawText === 'TRUE' || rawText === 'FALSE') return false; // 논리값도 엑셀 기본은 가운데 정렬
+  if (DATE_LIKE_TEXT.test(rawText.trim())) return false; // 날짜도 엑셀 기본은 오른쪽 정렬(위 주석 참고)
   const trimmed = rawText.trim();
   // 회계 서식의 음수 괄호 표기 "(1,234)"도 숫자로 인식되게 부호로 풀어준다
   const unwrapped =

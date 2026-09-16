@@ -321,3 +321,90 @@ describe('spreadsheet.ts: newly-exported helpers behave identically to before', 
     expect(parseMergeRange('A1:B1')).toEqual({ r: 1, c: 1, rs: 1, cs: 2 });
   });
 });
+
+// 코드 리뷰가 찾아낸 3개 gap(af7e680의 스필-정렬 수정을 좁힌 후속 케이스)에 대한 회귀 테스트.
+describe('spreadsheet.ts: isSpillEligible gaps found in code review', () => {
+  describe('gap 1: extractStyle now captures explicit horizontal:"left" from source xlsx files', () => {
+    test('a cell explicitly left-aligned in the source file gets style.a === "l" ' +
+      '(previously only the live editor align-left button could ever produce "l")', () => {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      const cell = sheet.getCell('A1');
+      cell.value = 1234;
+      cell.numFmt = '#,##0';
+      cell.alignment = { horizontal: 'left' };
+
+      const palette = new StylePalette();
+      const styleIndex = extractStyle(cell, palette, [], false);
+      expect(styleIndex).toBeDefined();
+      expect(palette.toArray()[styleIndex!].a).toBe('l');
+    });
+
+    test('center/right alignment are unaffected by the new branch (existing behaviour preserved)', () => {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      sheet.getCell('A1').alignment = { horizontal: 'center' };
+      sheet.getCell('A2').alignment = { horizontal: 'right' };
+      // A3: 정렬을 아예 지정하지 않음(기본값 유지) — extractStyle이 style.a를 전혀 안 넣어야 한다.
+
+      const palette = new StylePalette();
+      const cIdx = extractStyle(sheet.getCell('A1'), palette, [], false);
+      const rIdx = extractStyle(sheet.getCell('A2'), palette, [], false);
+      const noneIdx = extractStyle(sheet.getCell('A3'), palette, [], false);
+      expect(palette.toArray()[cIdx!].a).toBe('c');
+      expect(palette.toArray()[rIdx!].a).toBe('r');
+      expect(noneIdx).toBeUndefined(); // 정렬도 다른 서식도 없으면 여전히 스타일 자체가 없다
+    });
+  });
+
+  describe('gap 2: date-formatted cells are (deliberately) not classified into style.nf', () => {
+    test('a date number format (e.g. "yyyy-mm-dd") does not set style.nf — the fix for spill ' +
+      'lives in isSpillEligible\'s text-shape check (viewer.js/grid-editor.ts), not here; this ' +
+      'test locks in that design choice so it is not "fixed" by someone re-adding a date branch ' +
+      'to classifyNumFmt without reading the doc comment (which explains the toolbar/export blast radius)', () => {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      const cell = sheet.getCell('A1');
+      cell.value = new Date(Date.UTC(2024, 0, 15));
+      cell.numFmt = 'yyyy-mm-dd';
+
+      const palette = new StylePalette();
+      const styleIndex = extractStyle(cell, palette, [], false);
+      // 날짜 값 자체는 displayValue가 "2024-01-15" 텍스트로 정확히 그려낸다(스타일과 무관) —
+      // 아래에서 그 텍스트 모양을 직접 확인한다.
+      expect(displayValue(cell)).toBe('2024-01-15');
+      if (styleIndex !== undefined) {
+        expect(palette.toArray()[styleIndex].nf).toBeUndefined();
+      }
+    });
+  });
+
+  describe('gap 3: literal boolean cell values now display uppercase, matching formatFormulaResult', () => {
+    test('a literal TRUE/FALSE cell value displays as uppercase "TRUE"/"FALSE" (previously ' +
+      'lowercase "true"/"false" via the generic String(value) fallback, which meant the ' +
+      'isSpillEligible rawText==="TRUE"||"FALSE" guard never matched a literal boolean cell)', () => {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Sheet1');
+      sheet.getCell('A1').value = true;
+      sheet.getCell('A2').value = false;
+
+      expect(displayValue(sheet.getCell('A1'))).toBe('TRUE');
+      expect(displayValue(sheet.getCell('A2'))).toBe('FALSE');
+    });
+
+    test('a formula cell with an Excel-cached boolean result also displays uppercase ' +
+      '(the same String(value) bug existed in the cached-formula-result branch)', () => {
+      // sheet.getCell(...).value = {formula, result} 를 통해 실제 ExcelJS Cell을 거치면 exceljs
+      // 자신의 FormulaValue._copyModel(node_modules/exceljs/lib/doc/cell.js)이 result:false를
+      // `if (value) copy[name] = value` 같은 truthy 체크로 조용히 지워 버려(false는 falsy) 다시
+      // 읽으면 result 자체가 undefined가 되는, displayValue와 무관한 exceljs 자체 동작이 섞인다.
+      // displayValue는 cell.value/cell.numFmt만 읽으므로, 그 두 속성만 있는 최소 객체를 직접
+      // 넘겨 exceljs의 그 특이 동작을 우회하고 우리 코드의 분기만 순수하게 검증한다.
+      const trueResultCell = { value: { formula: 'A2>0', result: true } } as unknown as ExcelJS.Cell;
+      const falseResultCell = { value: { formula: 'A3>0', result: false } } as unknown as ExcelJS.Cell;
+
+      expect(displayValue(trueResultCell)).toBe('TRUE');
+      expect(displayValue(falseResultCell)).toBe('FALSE');
+    });
+  });
+});

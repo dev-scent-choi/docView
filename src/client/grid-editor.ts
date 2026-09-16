@@ -503,7 +503,16 @@ async function main(): Promise<void> {
    * 기본 규칙(숫자/날짜/수식 결과는 기본 오른쪽 정렬, 일반 텍스트는 기본 왼쪽 정렬)을 흉내낸다.
    * 이 시점엔 원본 값의 타입 정보가 없고 화면에 그려질 텍스트(text)만 있으므로, 우선 스타일에
    * 적힌 숫자 서식(style.nf)을 보고, 없으면 표시 텍스트 자체가(쉼표·통화 기호·퍼센트·공백·
-   * 회계식 음수 괄호를 걷어내고 보면) 유한한 숫자로 읽히는지를 폴백으로 쓴다. */
+   * 회계식 음수 괄호를 걷어내고 보면) 유한한 숫자로 읽히는지를 폴백으로 쓴다.
+   *
+   * 날짜 칸도 엑셀 기본은 오른쪽 정렬이라 스필 대상이 아니다. classifyNumFmt(src/spreadsheet.ts)는
+   * 의도적으로 날짜를 style.nf 범주에 넣지 않으므로(그 문서 주석 참고 — nf를 건드리면 이 파일의
+   * 서식 드롭다운(cell-numfmt-select)·xlsx 재내보내기(collab.ts의 numFmtStringFor) 쪽에 더 눈에
+   * 띄는 부작용이 생긴다) 여기서도 표시 텍스트의 "모양"만으로 판정한다: 이 앱이 날짜를 그리는
+   * 경로는 formatDate(src/spreadsheet.ts) 단 하나뿐이고, 원본 서식 코드가 무엇이든 항상 이
+   * 모양(YYYY-MM-DD, 시:분이 있으면 그 뒤에 공백+HH:MM)으로만 렌더링되므로 이 정규식과 일치하는
+   * 텍스트는 항상 날짜다. */
+  const DATE_LIKE_TEXT = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/;
   function isSpillEligible(style: CellStyleAttrs | undefined, text: string): boolean {
     if (style) {
       if (style.a === 'c' || style.a === 'r') return false; // 명시적 가운데/오른쪽 정렬 — 절대 안 넘친다
@@ -511,6 +520,7 @@ async function main(): Promise<void> {
       if (style.nf) return false; // 숫자 서식이 걸려 있으면 기본 오른쪽 정렬
     }
     if (text === 'TRUE' || text === 'FALSE') return false; // 논리값도 엑셀 기본은 가운데 정렬
+    if (DATE_LIKE_TEXT.test(text.trim())) return false; // 날짜도 엑셀 기본은 오른쪽 정렬(위 주석 참고)
     const trimmed = text.trim();
     // 회계 서식의 음수 괄호 표기 "(1,234)"도 숫자로 인식되게 부호로 풀어준다
     const unwrapped =
