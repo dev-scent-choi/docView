@@ -1,8 +1,13 @@
 import * as Y from 'yjs';
 import { describe, expect, test } from 'vitest';
 import { strFromU8, unzipSync, zipSync } from 'fflate';
-import { PPTX_SLIDES_ARRAY, type SlideEntry } from '../src/collab/pptxShared.js';
-import { exportPptxFromSlides, seedSlidesFromPptx } from '../src/pptx/collab.js';
+import { PPTX_SLIDE_CONTENTS_MAP, PPTX_SLIDES_ARRAY, type SlideEntry } from '../src/collab/pptxShared.js';
+import {
+  exportPptxFromSlides,
+  seedSlideContentFromXml,
+  seedSlidesFromPptx,
+  type PerSlideContentsMap,
+} from '../src/pptx/collab.js';
 import { makeSamplePng, makeSamplePptx } from './helpers.js';
 
 /** zip 로컬 파일 헤더를 순서대로 파싱해 엔트리별 압축 방식(0=저장/무압축, 8=deflate)을 읽는다 —
@@ -267,6 +272,76 @@ describe('exportPptxFromSlides', () => {
     const result = exportPptxFromSlides(original, slidesArray);
 
     expect(result.survivingEntryIds).toEqual([survivingIdBefore]); // 깨진 두 번째 항목은 빠짐
+  });
+});
+
+// --- 읽기 전용 연결에 MESSAGE_SLIDE_CONTENT_SUBSCRIBE(지연 시딩)를 허용하기 전 반드시 확인해야
+// 했던 전제: "시딩만 하고 편집은 전혀 안 한" 슬라이드를 내보낸 결과가, "애초에 한 번도 열지 않은"
+// 슬라이드를 내보낸 결과와 바이트 단위로 완전히 같은가(room.ts의 MESSAGE_SLIDE_CONTENT_SUBSCRIBE
+// 주석 참고 — 읽기 전용 연결을 이 메시지에 허용하는 근거가 바로 이 동등성이다). exportPptxFromSlides
+// 위쪽의 baseline 비교(542행 부근 "실제로 편집된 도형만 병합한다")가 이미 이 보장을 코드로 구현하고
+// 있지만(원본 재파싱 결과와 Yjs를 왕복한 결과가 같으면 병합 자체를 건너뛴다), 그 주장을 실제로
+// exportPptxFromSlides를 호출해 산출 바이트까지 비교하는 실측 테스트로 남겨 둔다 — 위쪽
+// "a slide that was never opened is exported byte-for-byte identical to its original XML"류 테스트들과
+// 달리 이 테스트는 "시딩된 상태"와 "시딩 안 된 상태" 두 산출물을 **서로** 비교한다(둘 다 원본과
+// 같다는 것만으로는, 그 둘이 서로 같다는 것까지는 보장하지 않는다 — 예컨대 시딩이 압축 순서나 다른
+// 파트에 부작용을 남기면 원본과 개별로는 같아도 서로 다를 수 있다).
+describe('exportPptxFromSlides — seeding a slide without editing it never changes the saved bytes', () => {
+  test('seed-then-export equals never-seeded-export, byte-for-byte, for the same original file', () => {
+    const original = makeSamplePptx(['Hello World', 'Second Slide']);
+
+    // 기준선 A: 한 번도 열지 않은(=slideContents가 비어 있는) 상태로 내보낸다.
+    const ydocA = new Y.Doc();
+    const slidesArrayA = ydocA.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    seedSlidesFromPptx(original, slidesArrayA);
+    const slideContentsA = ydocA.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const neverSeeded = exportPptxFromSlides(original, slidesArrayA, slideContentsA);
+
+    // 기준선 B: slideContents 인자 자체를 아예 넘기지 않은 상태(기존 호출부와 100% 동일 경로,
+    // 병합 루프 자체를 건너뛴다) — 이것도 A와 같아야 한다.
+    const neverSeededNoArg = exportPptxFromSlides(original, slidesArrayA);
+
+    // 이제 별도의(독립된) 룸 상태에서 첫 번째 슬라이드만 실제로 "연다"(지연 시딩) — 하지만 사용자
+    // 편집은 전혀 하지 않는다. seedSlideContentFromXml은 room.ts의 doSeedSlideContent가 읽기 전용
+    // 연결의 MESSAGE_SLIDE_CONTENT_SUBSCRIBE 요청에 대해 정확히 호출하는 바로 그 함수다.
+    const ydocB = new Y.Doc();
+    const slidesArrayB = ydocB.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    seedSlidesFromPptx(original, slidesArrayB);
+    const slideContentsB = ydocB.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const firstEntry = slidesArrayB.get(0);
+    seedSlideContentFromXml(slideContentsB, firstEntry.id, original, firstEntry.sourceSlidePart!);
+    expect(slideContentsB.has(firstEntry.id)).toBe(true); // 정말로 시딩됐는지 먼저 확인(공허한 통과 방지)
+
+    const afterSeedButUnedited = exportPptxFromSlides(original, slidesArrayB, slideContentsB);
+
+    expect(afterSeedButUnedited.bytes).toEqual(neverSeeded.bytes);
+    expect(neverSeededNoArg.bytes).toEqual(neverSeeded.bytes);
+    // finalParts/survivingEntryIds도 시딩 여부와 무관해야 한다(내용 병합은 파트 이름 배정 로직
+    // "이후" 단계이므로 영향을 줄 이유가 없다는 것까지 함께 확인해 둔다).
+    expect(afterSeedButUnedited.finalParts).toEqual(neverSeeded.finalParts);
+  });
+
+  test('seeding EVERY slide (still without editing any of them) also produces byte-identical output', () => {
+    // 위 테스트가 "한 슬라이드만 열었을 때"라면, 이 테스트는 "바로보기 뷰어가 모든 슬라이드를
+    // 순서대로 넘기며 전부 다 열어 본" 상황을 흉내낸다 — baseline 비교가 도형 하나하나에 대해
+    // 독립적으로 동작하는지(슬라이드 전체 개수와 무관하게 스케일되는지) 확인한다.
+    const original = makeSamplePptx(['A', 'B', 'C']);
+
+    const ydocA = new Y.Doc();
+    const slidesArrayA = ydocA.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    seedSlidesFromPptx(original, slidesArrayA);
+    const neverSeeded = exportPptxFromSlides(original, slidesArrayA);
+
+    const ydocB = new Y.Doc();
+    const slidesArrayB = ydocB.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    seedSlidesFromPptx(original, slidesArrayB);
+    const slideContentsB = ydocB.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    for (const entry of slidesArrayB.toArray()) {
+      seedSlideContentFromXml(slideContentsB, entry.id, original, entry.sourceSlidePart!);
+    }
+    const allSeeded = exportPptxFromSlides(original, slidesArrayB, slideContentsB);
+
+    expect(allSeeded.bytes).toEqual(neverSeeded.bytes);
   });
 });
 

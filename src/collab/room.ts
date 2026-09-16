@@ -1922,46 +1922,65 @@ function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {
       case MESSAGE_SLIDE_CONTENT_SUBSCRIBE: {
         try {
           const payload = decoding.readVarString(decoder);
-          if (room.readOnlyConns.has(conn)) {
-            // 시딩은 공유 Y.Doc에 쓰기다 — 게다가 export 병합 루프가 이제 slideContents를 그대로
-            // 다음 자동저장이 디스크에 쓰는 내용에 반영하므로, 결국 "읽기 전용으로 들어온 연결의
-            // 요청이 실제 저장 파일에 영향을 줄 수 있는" 쓰기다. MESSAGE_GRID_STRUCTURE_OP과 같은
-            // 원칙으로 서버가 직접 막는다(클라이언트가 편집 UI를 숨기는 것과 별개로) — 페이로드는
-            // 로그에 남기지 않는다(조작된 연결이 로그를 불릴 수 있는 창구를 줄인다).
-            console.error('슬라이드 콘텐츠 구독 메시지 거부(읽기 전용 연결)');
+          const parsed: unknown = JSON.parse(payload);
+          if (!isValidSlideContentSubscription(parsed)) {
+            console.error('슬라이드 콘텐츠 구독 메시지 거부(형식 오류):', payload.slice(0, 200));
+          } else if (room.readOnlyConns.has(conn) && parsed.duplicateOfId !== undefined) {
+            // 읽기 전용 연결은 시딩 자체는 이제 허용하지만(아래 else 분기 및 그 주석 참고),
+            // duplicateOfId를 실은 요청만은 그대로 거부한다 — doSeedSlideContent는 duplicateOfId가
+            // 오면 slideEntryId가 가리키는 실제 엔트리의 kind/출처를 전혀 검증하지 않고 그 자리에
+            // duplicateOfId가 가리키는 **다른** 슬라이드의 콘텐츠를 그대로 복사해 넣는다
+            // (pptx/collab.ts의 duplicateSlideContent). 슬라이드 복제는 원래 실제 편집(slidesArray에
+            // 새 'duplicate' 엔트리를 쓰는 것)이 있어야만 클라이언트가 정당하게 만들어낼 수 있는
+            // 상황이고, 그 쓰기 자체는 이미 MESSAGE_SYNC 분기가 읽기 전용 연결에서 막는다 — 즉
+            // 정상적인 읽기 전용 클라이언트는 이 필드를 절대 보내지 않는다(UI에도 복제 버튼이 없다).
+            // 그런데 이 필드를 막지 않고 그대로 허용하면, 조작된 소켓 메시지가 "아직 한 번도 안 열린
+            // 진짜 원본 슬라이드 A"의 slideEntryId와 "전혀 다른 슬라이드 B"의 id를 duplicateOfId로
+            // 실어 보내는 것만으로 A의 시딩 결과를 B의 콘텐츠로 바꿔치기할 수 있다 — 그 결과는
+            // baseline(A의 원본 XML)과 달라 export 병합 루프의 "편집 안 됨" 건너뛰기를 통과하지
+            // 못하고, 다음 자동저장이 A의 실제 저장 파일에 B의 텍스트를 섞어 넣는다(진짜 데이터
+            // 손상). 일반 시딩(duplicateOfId 없음)은 원본 XML을 그대로 옮기는 것뿐이라 이 위험이
+            // 없으므로 그쪽만 허용한다.
+            console.error('슬라이드 콘텐츠 구독 메시지 거부(읽기 전용 연결의 복제 시딩 시도)');
           } else {
-            const parsed: unknown = JSON.parse(payload);
-            if (!isValidSlideContentSubscription(parsed)) {
-              console.error('슬라이드 콘텐츠 구독 메시지 거부(형식 오류):', payload.slice(0, 200));
+            // 연결당 동시 시딩 상한(FINAL REVIEW I1) — 이미 이 slideEntryId를 기다리는 중이면
+            // (같은 슬라이드를 빠르게 두 번 구독하는 정상적인 경우) 상한 검사 없이 그대로
+            // seedSlideContentIfNeeded로 넘긴다(어차피 room.pendingSlideSeeds가 실제 작업을
+            // dedup한다) — 상한은 "서로 다른" 슬라이드 id를 향한 동시 요청 개수만 제한한다.
+            let inFlight = room.connSlideSeedsInFlight.get(conn);
+            if (!inFlight) {
+              inFlight = new Set<string>();
+              room.connSlideSeedsInFlight.set(conn, inFlight);
+            }
+            if (!inFlight.has(parsed.slideEntryId) && inFlight.size >= MAX_CONCURRENT_SLIDE_SEEDS_PER_CONN) {
+              console.error(
+                `슬라이드 콘텐츠 구독 메시지 거부(연결당 동시 시딩 상한 초과, 문서 ${room.docId})`,
+              );
             } else {
-              // 연결당 동시 시딩 상한(FINAL REVIEW I1) — 이미 이 slideEntryId를 기다리는 중이면
-              // (같은 슬라이드를 빠르게 두 번 구독하는 정상적인 경우) 상한 검사 없이 그대로
-              // seedSlideContentIfNeeded로 넘긴다(어차피 room.pendingSlideSeeds가 실제 작업을
-              // dedup한다) — 상한은 "서로 다른" 슬라이드 id를 향한 동시 요청 개수만 제한한다.
-              let inFlight = room.connSlideSeedsInFlight.get(conn);
-              if (!inFlight) {
-                inFlight = new Set<string>();
-                room.connSlideSeedsInFlight.set(conn, inFlight);
-              }
-              if (!inFlight.has(parsed.slideEntryId) && inFlight.size >= MAX_CONCURRENT_SLIDE_SEEDS_PER_CONN) {
-                console.error(
-                  `슬라이드 콘텐츠 구독 메시지 거부(연결당 동시 시딩 상한 초과, 문서 ${room.docId})`,
-                );
-              } else {
-                const slideEntryId = parsed.slideEntryId;
-                inFlight.add(slideEntryId);
-                // 시딩은 store.readOriginal(디스크 I/O) + parseSlideShapes를 거치므로 비동기다 —
-                // 여기서 await하면 소켓 메시지 처리 자체가 막히므로 흘려보낸다. 실패해도 이 연결은
-                // 끊지 않되(원본 유실 금지 원칙과 별개로 시딩 실패 자체는 "아직 못 연" 상태일 뿐 이미
-                // 저장된 데이터의 손상이 아니다), 조용히 성공한 것처럼 넘어가지 않고 반드시 로그를 남긴다.
-                void seedSlideContentIfNeeded(room, slideEntryId, parsed.duplicateOfId)
-                  .catch((error: unknown) => {
-                    console.error(`슬라이드 콘텐츠 시딩 실패 (문서 ${room.docId}):`, error);
-                  })
-                  .finally(() => {
-                    inFlight!.delete(slideEntryId);
-                  });
-              }
+              const slideEntryId = parsed.slideEntryId;
+              inFlight.add(slideEntryId);
+              // 시딩은 store.readOriginal(디스크 I/O) + parseSlideShapes를 거치므로 비동기다 —
+              // 여기서 await하면 소켓 메시지 처리 자체가 막히므로 흘려보낸다. 실패해도 이 연결은
+              // 끊지 않되(원본 유실 금지 원칙과 별개로 시딩 실패 자체는 "아직 못 연" 상태일 뿐 이미
+              // 저장된 데이터의 손상이 아니다), 조용히 성공한 것처럼 넘어가지 않고 반드시 로그를 남긴다.
+              //
+              // 읽기 전용 연결에서도 이 경로를 그대로 허용한다(더 이상 위 duplicateOfId 분기가
+              // 걸러내지 못하는 경로는 없다) — 시딩은 원본 XML 바이트를 그대로 Y.Doc에 옮겨
+              // 채우는 것뿐이고, 절대 기존 콘텐츠를 덮어쓰지 않으며(doSeedSlideContent/
+              // seedSlideContentFromXml의 has() 체크), export 병합 루프는 "편집되지 않은"(=baseline과
+              // 동일한) 도형을 건너뛰므로(exportPptxFromSlides의 baseline 비교, pptx/collab.ts) 시딩
+              // 자체는 저장되는 바이트를 전혀 바꾸지 않는다 — 공유 Y.Doc을 캐시/전송 계층으로 쓰는
+              // 읽기(=미리보기 렌더링)일 뿐이다(MESSAGE_GRID_STRUCTURE_OP처럼 실제 구조를 바꾸는
+              // 진짜 쓰기와는 근본적으로 다르다). 실제 텍스트 편집은 이 메시지가 아니라 각
+              // Y.XmlFragment에 대한 MESSAGE_SYNC/syncStep2·update로 오고, 그건 위 MESSAGE_SYNC
+              // 분기가 readOnlyConns를 그대로 검사해 여전히 막는다.
+              void seedSlideContentIfNeeded(room, slideEntryId, parsed.duplicateOfId)
+                .catch((error: unknown) => {
+                  console.error(`슬라이드 콘텐츠 시딩 실패 (문서 ${room.docId}):`, error);
+                })
+                .finally(() => {
+                  inFlight!.delete(slideEntryId);
+                });
             }
           }
         } catch (error) {

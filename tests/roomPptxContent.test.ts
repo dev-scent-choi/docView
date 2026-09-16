@@ -1857,4 +1857,243 @@ describe('room.ts: pptx slide-content lazy seeding (MESSAGE_SLIDE_CONTENT_SUBSCR
     expect(shapes).toHaveLength(1);
     expect(shapes[0].doc.textContent).toBe('Hello World');
   });
+
+  // --- "바로보기"(quick-view)가 pptx를 canEdit:false로 editor-slides.html에 여는 새 경로가
+  // 제기한 회귀: 읽기 전용 연결의 MESSAGE_SLIDE_CONTENT_SUBSCRIBE를 room.ts가 그동안 통째로
+  // 거부해 왔기 때문에, 편집자가 그 문서를 단 한 번도 열어본 적이 없으면 읽기 전용 열람자는 모든
+  // 슬라이드에서 "이 슬라이드는 아직 미리보기를 사용할 수 없습니다" 안내만 영원히 본다(재현 확인됨).
+  // 아래는 그 버그 자체(수정 전 실패)와, 수정(읽기 전용 연결도 순수 시딩은 허용)이 실제로 문제를
+  // 없애면서도 진짜 편집 차단은 그대로 유지하는지를 함께 검증한다.
+  test('a read-only connection can seed a never-opened slide — the pptx quick-view fix', async () => {
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', makeSamplePptx(['Hello World']));
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+
+    // 읽기 전용 토큰으로 접속한다 — "바로보기"가 만드는 것과 같은 연결(joinEditSession의 마지막
+    // 인자 readOnly=true, src/routes/edit.ts가 canEdit:false에 대해 계산하는 것과 동일).
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], true);
+
+    const ydoc = getRoomYdocForTest(docId)!;
+    const entryId = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY).get(0).id;
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    // 아직 아무도(편집자조차) 이 문서를 연 적이 없다 — 수정 전 버그의 정확한 전제 조건.
+    expect(slideContents.has(entryId)).toBe(false);
+
+    subscribeSlideContent(socket, entryId);
+    await flushEventLoop();
+
+    // 수정 후: 읽기 전용 연결의 구독 요청만으로도 서버가 원본 XML에서 콘텐츠를 시딩해 slideContents를
+    // 채운다 — 클라이언트(editor-slides.ts)의 slideContents.observe가 이걸 감지해 캔버스를 다시
+    // 그리므로, "편집자가 먼저 열어야 한다"는 안내 대신 실제 슬라이드 내용이 보인다.
+    const perSlide = slideContents.get(entryId);
+    expect(perSlide).toBeDefined();
+    expect(perSlide!.size).toBeGreaterThan(0);
+    const shapeMap = perSlide!.get('2')!; // 샘플 pptx의 유일한 도형(helpers.ts의 pptxSlideXml)
+    const fragment = shapeMap.get('content') as Y.XmlFragment;
+    const text = (fragment.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    expect(text.toString()).toBe('Hello World');
+  });
+
+  test('a read-only connection with duplicateOfId is still rejected — it cannot swap in another slide\'s content', async () => {
+    // room.ts의 doSeedSlideContent는 duplicateOfId가 오면 slideEntryId가 가리키는 실제 엔트리의
+    // kind/출처를 전혀 검증하지 않고 duplicateOfId가 가리키는 **다른** 슬라이드의 콘텐츠를 그대로
+    // 복사해 넣는다(pptx/collab.ts의 duplicateSlideContent) — 정상적인 읽기 전용 클라이언트는 이
+    // 필드를 절대 보내지 않지만(복제는 편집 행위이고 UI에도 없다), 조작된 소켓 메시지가 이 필드를
+    // 실어 보내면 "아직 한 번도 안 열린 슬라이드 A"의 시딩 결과를 "전혀 다른 슬라이드 B"의
+    // 콘텐츠로 바꿔치기할 수 있다 — 그 결과는 baseline(A의 원본 XML)과 달라 export 병합 루프의
+    // "편집 안 됨" 건너뛰기를 통과하지 못하므로 다음 자동저장이 실제 저장 파일을 손상시킨다. 읽기
+    // 전용 연결의 순수 시딩만 허용하고 이 경로는 계속 막아야 한다(room.ts의 MESSAGE_SLIDE_CONTENT_
+    // SUBSCRIBE 핸들러 주석 참고).
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+
+    const docId = randomUUID();
+    await store.saveOriginal(docId, 'pptx', makeSamplePptx(['Slide A Text', 'Slide B Text']));
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 2,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+
+    const socket = new FakeSocket();
+    await joinEditSession(socket as never, {} as never, docId, 'pptx', [], true);
+
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryA = slidesArray.get(0).id;
+    const entryB = slidesArray.get(1).id;
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+
+    // 공격 시도: "A를 연다"면서 duplicateOfId로 B를 실어 보낸다. 둘 다 아직 한 번도 열리지 않았다.
+    subscribeSlideContent(socket, entryA, entryB);
+    await flushEventLoop();
+
+    // 거부됐어야 한다 — A는 전혀 시딩되지 않은 채로 남는다(B의 콘텐츠로 바꿔치기되지 않았다).
+    expect(slideContents.has(entryA)).toBe(false);
+
+    // 대조군: duplicateOfId 없는 일반 구독은 여전히 정상 동작한다(위 회귀가 순수 시딩까지
+    // 막아버리는 과잉 수정이 아님을 확인).
+    subscribeSlideContent(socket, entryA);
+    await flushEventLoop();
+    expect(slideContents.has(entryA)).toBe(true);
+    const shapeMap = slideContents.get(entryA)!.get('2')!;
+    const fragment = shapeMap.get('content') as Y.XmlFragment;
+    expect((fragment.get(0) as Y.XmlElement).get(0)!.toString()).toBe('Slide A Text');
+  });
+
+  test('a read-only connection still cannot make a real text edit persist, even for a slide it just seeded itself', async () => {
+    // 핵심 안전장치 검증(roomDocxReadOnly.test.ts와 같은 패턴을 pptx 텍스트박스 콘텐츠에 적용):
+    // 읽기 전용 연결이 이제 시딩(콘텐츠를 "보이게" 함)은 트리거할 수 있지만, 그 슬라이드의 실제
+    // 텍스트를 바꾸는 진짜 편집은 여전히 서버가 직접 막아야 한다 — 시딩과 편집은 서로 다른 메시지
+    // 경로(MESSAGE_SLIDE_CONTENT_SUBSCRIBE vs MESSAGE_SYNC/messageYjsUpdate)이고, room.ts의
+    // MESSAGE_SYNC 분기는 readOnlyConns를 문서 종류와 무관하게 그대로 검사한다.
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest, getCurrentBytes } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+
+    const attacker = new FakeSocket();
+    await joinEditSession(attacker as never, {} as never, docId, 'pptx', [], true);
+
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    // 읽기 전용 연결 자신이 먼저 슬라이드를 "연다"(위에서 검증한, 이제 허용되는 경로).
+    subscribeSlideContent(attacker, entryId);
+    await flushEventLoop();
+    syncMirrorWithRoom(attacker);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const mirrorPerSlide = attacker.mirror.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP).get(entryId)!;
+    const mirrorFragment = mirrorPerSlide.get('2')!.get('content') as Y.XmlFragment;
+    const mirrorText = (mirrorFragment.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    expect(mirrorText.toString()).toBe('Hello World'); // 시딩 자체는 됐다 — 이제 그 위에 편집을 시도한다
+
+    // 클라이언트 UI(editor-slides.ts의 ProseMirror/y-prosemirror 바인딩)를 완전히 우회해, 이미
+    // 시딩된 실제 텍스트박스에 원시 update 프레임을 직접 흘려보낸다 — 악의적이거나 버그 있는
+    // 클라이언트를 흉내낸다(roomDocxReadOnly.test.ts의 sendRawUpdate와 같은 위협 모델).
+    const maliciousUpdate = captureMirrorUpdate(attacker.mirror, () =>
+      mirrorText.insert(0, 'INJECTED-BY-READONLY-PPTX-CLIENT: '),
+    );
+    sendUpdateToServer(attacker, maliciousUpdate);
+    await flushEventLoop();
+
+    // 룸의 canonical Y.Doc 자체가 바뀌지 않았어야 한다.
+    const canonicalFragment = slideContents.get(entryId)!.get('2')!.get('content') as Y.XmlFragment;
+    const canonicalText = (canonicalFragment.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    expect(canonicalText.toString()).toBe('Hello World');
+    expect(canonicalText.toString()).not.toContain('INJECTED-BY-READONLY-PPTX-CLIENT');
+
+    // 실제로 내보낼(저장/다운로드할) 바이트에도 주입된 텍스트가 없어야 한다 — 두 가지 경로 모두 확인:
+    // (1) 이 룸 상태로 직접 export, (2) getCurrentBytes(디스크에 아직 flush되지 않은 상태에서
+    // room.ts가 실제로 다운로드에 쓰는 바로 그 경로).
+    const directExport = exportPptxFromSlides(original, slidesArray, slideContents);
+    const directXml = strFromU8(unzipSync(directExport.bytes)[`ppt/slides/${directExport.finalParts[0]}`]);
+    expect(directXml).not.toContain('INJECTED-BY-READONLY-PPTX-CLIENT');
+    expect(directXml).toContain('Hello World');
+
+    const currentBytes = await getCurrentBytes(docId);
+    expect(currentBytes).not.toBeNull();
+    const currentEntries = unzipSync(currentBytes!);
+    const currentSlideXml = strFromU8(currentEntries[`ppt/slides/${slidesArray.get(0).sourceSlidePart}`]);
+    expect(currentSlideXml).not.toContain('INJECTED-BY-READONLY-PPTX-CLIENT');
+
+    // 공격자 자신의 미러에 로컬로 반영된 것과는 별개로(Yjs는 로컬 적용을 막지 않는다), 뒤늦게
+    // 들어온 다른(정상 권한) 연결도 그 주입된 내용을 절대 보면 안 된다.
+    const observer = new FakeSocket();
+    await joinEditSession(observer as never, {} as never, docId, 'pptx', [], false);
+    syncMirrorWithRoom(observer);
+    await flushEventLoop();
+    const observerFragment = observer.mirror
+      .getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP)
+      .get(entryId)!
+      .get('2')!
+      .get('content') as Y.XmlFragment;
+    const observerText = (observerFragment.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    expect(observerText.toString()).toBe('Hello World');
+  });
+
+  test('sanity check: the same raw text edit IS applied and saved for a normal (non-read-only) connection', async () => {
+    // 위 거부 테스트가 실제로 무언가를 검증하고 있는지(메커니즘 자체가 죽어서 항상 "안 바뀜"으로
+    // 보이는 거짓 양성이 아닌지) 확인하는 대조군 — canEdit:true 연결에서는 같은 시도가 그대로
+    // 반영돼야 한다(roomDocxReadOnly.test.ts의 같은 이름의 대조군과 동일한 목적).
+    const { store } = await import('../src/storage.js');
+    const { joinEditSession, getRoomYdocForTest } = await import('../src/collab/room.js');
+    const { PPTX_SLIDES_ARRAY, PPTX_SLIDE_CONTENTS_MAP } = await import('../src/collab/pptxShared.js');
+    const { exportPptxFromSlides } = await import('../src/pptx/collab.js');
+    const { strFromU8, unzipSync } = await import('fflate');
+
+    const docId = randomUUID();
+    const original = makeSamplePptx(['Hello World']);
+    await store.saveOriginal(docId, 'pptx', original);
+    await store.writeMeta({
+      id: docId,
+      name: 'x.pptx',
+      ext: 'pptx',
+      status: 'ready',
+      pageCount: 1,
+      createdAt: new Date().toISOString(),
+      progress: 100,
+    });
+
+    const editor = new FakeSocket();
+    await joinEditSession(editor as never, {} as never, docId, 'pptx', [], false);
+    const ydoc = getRoomYdocForTest(docId)!;
+    const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+    const entryId = slidesArray.get(0).id;
+
+    subscribeSlideContent(editor, entryId);
+    await flushEventLoop();
+    syncMirrorWithRoom(editor);
+    await flushEventLoop();
+
+    const mirrorFragment = editor.mirror
+      .getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP)
+      .get(entryId)!
+      .get('2')!
+      .get('content') as Y.XmlFragment;
+    const mirrorText = (mirrorFragment.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    const update = captureMirrorUpdate(editor.mirror, () => mirrorText.insert(0, 'APPLIED-BY-EDITOR-CLIENT: '));
+    sendUpdateToServer(editor, update);
+    await flushEventLoop();
+
+    const slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const result = exportPptxFromSlides(original, slidesArray, slideContents);
+    const xml = strFromU8(unzipSync(result.bytes)[`ppt/slides/${result.finalParts[0]}`]);
+    expect(xml).toContain('APPLIED-BY-EDITOR-CLIENT: Hello World');
+  });
 });

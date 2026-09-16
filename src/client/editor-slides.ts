@@ -107,8 +107,9 @@ const MESSAGE_SLIDE_CONTENT_SUBSCRIBE = 5;
 // 요청은 그 비용을 그대로 낭비하고 두 번째는 결국 조용히 no-op된다). slideContents.observe가
 // 실제로 그 슬라이드 키가 채워진 것을 감지하면(main() 참고) 이 집합에서 제거한다.
 //
-// 다만 서버 쪽 시딩이 어떤 이유로든(에러 throw, 읽기 전용 연결, 잘못된 payload, 존재하지 않는
-// 슬라이드 엔트리 등) 실패하면 slideContents에는 아무것도 쓰이지 않으므로 observe가 영영 안
+// 다만 서버 쪽 시딩이 어떤 이유로든(에러 throw, duplicateOfId를 실은 읽기 전용 연결의 요청 거부,
+// 연결당 동시 시딩 상한 초과, 잘못된 payload, 존재하지 않는 슬라이드 엔트리 등) 실패하면
+// slideContents에는 아무것도 쓰이지 않으므로 observe가 영영 안
 // 불리고, 이 집합에 남은 entryId는 세션이 끝날 때까지 제거되지 않는다 — 그러면 그 슬라이드는
 // 이후 몇 번을 다시 클릭해도 이 함수 맨 위 가드에서 조용히 no-op되어 영구히 빈 캔버스로 남는다.
 // 이를 막기 위해 아래 subscribeSlideContent에서 항목을 추가할 때마다 유한한 수명(타임아웃)을
@@ -194,13 +195,17 @@ function buildSlideKeymap(): Record<string, Command> {
 }
 
 /**
- * 읽기 전용 열람자가 "아직 아무도 열어본 적 없는" 슬라이드를 볼 때 캔버스에 보여줄 안내.
- * (Task 9 리뷰에서 지적된 항목 — canEdit 세션은 subscribeSlideContent로 서버 지연 시딩을
- * 요청할 수 있지만, 읽기 전용 연결은 room.ts가 그 요청 자체를 서버에서 거부하므로 응답이 영영
- * 오지 않는다. 그 상태를 아무 설명 없는 빈 캔버스로 방치하지 않고, 편집자가 먼저 열어야 한다는
- * 것을 명시적으로 알린다. 원본 슬라이드 내용/이미지를 렌더링하는 것은 이 기능 전체의 범위 밖이라
- * 시도하지 않는다.) canvasEl.replaceChildren()이 이미 이전 내용을 비운 뒤 호출되므로 여기서는
- * 추가만 한다.
+ * (Task 9 당시 도입 — 2026-09-17 읽기 전용 시딩 허용 수정으로 현재는 호출부가 없다) 읽기 전용
+ * 열람자가 "아직 아무도 열어본 적 없는" 슬라이드를 볼 때 캔버스에 보여주던 안내. 그 시점엔
+ * canEdit 세션만 subscribeSlideContent로 서버 지연 시딩을 요청할 수 있었고, 읽기 전용 연결은
+ * room.ts가 그 요청 자체를 서버에서 거부해 응답이 영영 오지 않았다 — 지금은 room.ts의
+ * MESSAGE_SLIDE_CONTENT_SUBSCRIBE 핸들러가 읽기 전용 연결의 순수 시딩 요청도 그대로 처리하므로
+ * (duplicateOfId를 실은 요청만 거부한다), renderCanvasForSlide는 canEdit 여부와 무관하게 항상
+ * subscribeSlideContent를 부르고 이 함수는 더 이상 쓰이지 않는다. 시딩 자체가 실패하는(연결당
+ * 동시 시딩 상한 초과 등) 드문 경우는 canEdit 세션이 겪는 것과 같은 무설명 빈 캔버스로 수렴하므로
+ * 새 회귀는 아니다. 당장 도로 쓸 데는 없지만 앞으로 "시딩이 아예 막힌 경우"를 다시 구분해 알려야
+ * 할 상황이 생기면 그대로 재사용할 수 있어 남겨 둔다. canvasEl.replaceChildren()이 이미 이전
+ * 내용을 비운 뒤 호출된다는 전제(호출부가 생기면 지켜야 할 조건)로 여기서는 추가만 한다.
  */
 function showSlideUnavailablePlaceholder(): void {
   const placeholder = document.createElement('div');
@@ -257,16 +262,12 @@ function renderCanvasForSlide(entryId: string): void {
 
   const perSlide = slideContents.get(entryId);
   if (!perSlide) {
-    if (canEdit) {
-      subscribeSlideContent(entryId); // 아직 안 열렸다 — 요청하고 observe가 다시 불러줄 때까지 대기
-    } else {
-      // 읽기 전용 연결은 시딩(=Y.Doc 쓰기)을 트리거하는 구독 요청을 room.ts가 서버에서 직접
-      // 거부한다(MESSAGE_SLIDE_CONTENT_SUBSCRIBE 핸들러의 readOnlyConns 체크) — 그러니 보내봤자
-      // 응답이 오지 않을 요청을 굳이 보내지 않는다. 편집자가 먼저 이 슬라이드를 열어 시딩해 줄
-      // 때까지 이 뷰어는 이유를 알 수 있는 안내를 본다 — 나중에 다른 세션의 편집자가 이 슬라이드를
-      // 열면 slideContents.observe(main() 참고)가 이 함수를 다시 불러 정상적으로 대체된다.
-      showSlideUnavailablePlaceholder();
-    }
+    // room.ts의 MESSAGE_SLIDE_CONTENT_SUBSCRIBE 핸들러는 이제 읽기 전용 연결의 순수 시딩 요청도
+    // 그대로 처리한다(duplicateOfId가 실린 요청만 거부한다 — room.ts 주석 참고): 시딩은 원본 XML
+    // 바이트를 Y.Doc에 그대로 옮기는 읽기/캐시 동작일 뿐 저장되는 파일을 바꾸지 않기 때문이다.
+    // 그래서 canEdit 여부와 무관하게 항상 구독을 요청하고, observe가 다시 불러줄 때까지 빈 캔버스로
+    // 기다린다(이전에는 읽기 전용일 때 서버가 요청 자체를 거부해 안내 문구만 보여줬다).
+    subscribeSlideContent(entryId);
     return;
   }
   // perSlide는 이미 존재하지만(슬라이드가 한 번은 시딩됨) 그 안에서 텍스트박스가 나중에
