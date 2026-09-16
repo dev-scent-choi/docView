@@ -8,7 +8,6 @@ const pagesContainer = document.getElementById('pages');
 const docTitle = document.getElementById('doc-title');
 const pageJumpInput = document.getElementById('page-jump-input');
 const pageJumpTotal = document.getElementById('page-jump-total');
-const gridCellRefEl = document.getElementById('grid-cell-ref');
 const gridFormulaRefEl = document.getElementById('grid-formula-ref');
 const gridFormulaValueEl = document.getElementById('grid-formula-value');
 const gridZoomHostEl = document.getElementById('grid-zoom-host');
@@ -1374,12 +1373,10 @@ function selectedCellText() {
   return cell.v ?? '';
 }
 
-/** 선택된 칸이 바뀔 때마다 하단 상태줄의 작은 참조 표시(#grid-cell-ref)와, 툴바 바로 밑의 수식
- * 입력줄 자리(읽기 전용 #grid-formula-ref/#grid-formula-value)를 한 번에 갱신한다 — 두 표시가
- * 같은 선택 상태를 가리키므로 이 함수 하나로 중복 없이 같이 맞춘다. */
+/** 선택된 칸이 바뀔 때마다 툴바 바로 밑의 수식 입력줄 자리(읽기 전용 #grid-formula-ref/
+ * #grid-formula-value)를 갱신한다. */
 function updateSelectionDisplays() {
   const ref = gridState.selected ? `${colLetter(gridState.selected.col)}${gridState.selected.row}` : '';
-  if (gridCellRefEl) gridCellRefEl.textContent = ref;
   if (gridFormulaRefEl) gridFormulaRefEl.textContent = ref;
   if (gridFormulaValueEl) gridFormulaValueEl.textContent = selectedCellText();
 }

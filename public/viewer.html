@@ -142,9 +142,10 @@
 
   <main id="grid" class="grid-container" hidden>
     <!-- 편집기(editor-grid.html)의 수식 입력줄(.formula-bar: 이름 상자 + fx + 셀 내용)과 같은 자리
-         (툴바 바로 밑, 그리드 내용 바로 위)에 두는 읽기 전용 버전 — 하단 상태줄의 #grid-cell-ref는
-         참조만 작게 보여주는 것과 달리, 여기는 선택한 칸의 실제 값을 폭 제한 없이 전체 보여준다.
-         뷰어는 고칠 수 없으므로 <input>이 아니라 표시 전용 <div>를 쓴다(수정 기능은 전혀 없음). -->
+         (툴바 바로 밑, 그리드 내용 바로 위)에 두는 읽기 전용 버전 — 선택한 칸의 실제 값을 폭 제한
+         없이 전체 보여준다(하단 상태줄에는 더 이상 별도의 작은 참조 표시가 없다 — 예전에 있던
+         #grid-cell-ref는 사용자 요청으로 제거했다). 뷰어는 고칠 수 없으므로 <input>이 아니라 표시
+         전용 <div>를 쓴다(수정 기능은 전혀 없음). -->
     <div class="grid-formula-bar">
       <span id="grid-formula-ref" class="cell-ref-box"></span>
       <span class="fx-icon" aria-hidden="true">fx</span>
@@ -161,7 +162,6 @@
     <div class="grid-status-bar">
       <div class="grid-tabs-row">
         <div id="sheet-tabs" class="grid-sheet-tabs" role="tablist"></div>
-        <span id="grid-cell-ref" class="grid-cell-ref"></span>
       </div>
       <div class="grid-status-row">
         <span id="grid-status-text" class="grid-status-text">읽기 전용</span>
