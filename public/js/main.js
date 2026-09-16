@@ -45,20 +45,24 @@ async function deleteDocument(docId) {
   return fetchJson(`/api/documents/${docId}`, { method: 'DELETE' });
 }
 
-/** 업로더 본인 열람용 — 전체 권한 토큰을 발급해 이동한다. 항상 viewerUrl(업로드 시점에 미리
- * 만들어 둔 렌더링 캐시를 그냥 HTTP로 읽는 가벼운 화면)로 연다 — xlsx/pptx도 마찬가지다.
- * 예전에는 xlsx/pptx의 "바로 보기"도 편집 화면(editor-grid.html/editor-slides.html)을 그대로
- * 재사용했는데(server가 canEdit 여부와 무관하게 항상 editorUrl을 내려주므로 가능은 했다), 그
- * 화면은 열람뿐이어도 Yjs Y.Doc·WebSocket·LazyGridStore 전체 스트리밍 파싱·전체 시트 서식
- * 동기화까지 실제 동시편집과 똑같이 다 거쳐서 열람 속도가 불필요하게 느렸다 — 편집 툴바·수식
- * 입력창 등은 어차피 안 보이니 얻는 것 없이 비용만 지불하고 있었다. 동시편집이 실제로 필요한
- * 경우는 "동시편집 열기" 버튼(openEditor)의 몫이다.
+/** 업로더 본인 열람용 — 전체 권한 토큰을 발급해 이동한다.
+ * xlsx는 viewerUrl(업로드 시점에 미리 만들어 둔 그리드 렌더링 캐시를 그냥 HTTP로 읽는 가벼운
+ * 화면)로 연다 — Yjs·WebSocket·LazyGridStore 전체 스트리밍 파싱·전체 시트 서식 동기화까지 실제
+ * 동시편집과 똑같이 다 거치는 편집 화면보다 훨씬 가볍고, viewer.html/js가 xlsx 전용으로 그
+ * 그리드를 직접 렌더링하는 경로를 이미 갖고 있어 얻는 것 없이 비용만 지불할 이유가 없다.
+ * docx/pptx는 viewer.html에 PDF 페이지 이미지로 보여주는 경로만 있고(그리드 같은 자체 렌더링이
+ * 없다) — 그래서 대신 편집 화면을 읽기전용으로 재사용한다(editorUrl, 2026-09-17 결정). PDF
+ * 변환을 거치지 않고 원본 그대로(하이퍼링크·서식 등) 화면에 보여줄 수 있는 게 이 선택의 이유이고,
+ * 그 대가로 열람이 편집과 같은 만큼의 초기 로딩 비용(Yjs 동기화 등)을 치른다는 걸 알고 받아들인
+ * 절충이다 — xlsx가 굳이 이 경로를 안 쓰는 것과 대조된다. docx/pptx가 editorUrl을 못 받는
+ * 경우(예: 변환기가 없어 동시편집 자체가 비활성화된 배포)는 viewerUrl로 그대로 대체한다.
  * docx/xlsx/pptx가 아닌 문서(PDF 등 pages 뷰)는 동시편집 대상이 아니므로 canEdit이 곧 마크업
  * (리뷰 코멘트) 추가/삭제 권한이 된다 — 업로더 본인이 보는 화면이니 기본으로 켜서 발급한다. */
 async function openViewer(docId, viewer, ext) {
   const canEdit = !supportsEdit({ ext });
   const issued = await issueToken(docId, viewer, true, true, true, canEdit);
-  location.href = issued.viewerUrl;
+  const preferEditorScreen = ext === 'docx' || ext === 'pptx';
+  location.href = (preferEditorScreen && issued.editorUrl) || issued.viewerUrl;
 }
 
 /** 업로더 본인 편집용 — 전체 권한 + canEdit 토큰을 발급해 동시편집기로 이동한다(docx/xlsx). */
