@@ -2152,6 +2152,19 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
 }
 .conn-status[data-status="disconnected"] { background: rgba(255, 107, 87, 0.18); color: #ff8b76; }
 
+/* docx 편집기(editor.ts)의 읽기 전용 배지 — grid-editor.ts의 #grid-status-text "읽기 전용" 표시와
+   같은 의도이되, editor.html에는 그런 하단 상태줄이 없어 conn-status 옆에 pill로 붙인다.
+   unsupported-warning과 같은 경고색 계열(#fdf3d7/#7a5b06)을 써서 "이 화면은 지금 조작할 수
+   없다"는 신호가 연결 상태 배지와 시각적으로 구분되게 한다. */
+.readonly-badge {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: #fdf3d7;
+  color: #7a5b06;
+}
+
 /* Office 365 스타일 "저장 중… / 저장됨 / 저장 실패" 표시 — 아이콘 세 개를 겹쳐두고 data-status로 하나만 보인다. */
 .save-status {
   display: inline-flex;

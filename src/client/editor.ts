@@ -47,8 +47,17 @@ interface ViewInfo {
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
 
+/** false면 이 문서는 읽기 전용이다(동시편집 권한 없는 링크) — grid-editor.ts의 같은 이름 변수와
+ * 같은 역할. main()에서 서버가 내려준 토큰 권한으로 설정된다. ProseMirror의 EditorView가
+ * `editable: () => canEdit`로 이 값을 직접 참조해 키보드/붙여넣기/드롭 등 DOM에서 오는 편집
+ * 이벤트 전체를 스스로 거부하고, 여기서는 그 위에 툴바(서식 리본) 자체를 숨겨 애초에 사용자가
+ * 고칠 수 있다고 착각하지 않게 한다. 실제 쓰기 차단은 여전히 서버(collab/room.ts의
+ * readOnlyConns)가 독립적으로 수행한다. */
+let canEdit = true;
+
 const titleEl = document.getElementById('doc-title') as HTMLElement;
 const statusEl = document.getElementById('conn-status') as HTMLElement;
+const readonlyBadgeEl = document.getElementById('readonly-badge') as HTMLElement;
 const presenceEl = document.getElementById('presence-list') as HTMLElement;
 const warningEl = document.getElementById('unsupported-warning') as HTMLElement;
 const editorHost = document.getElementById('editor') as HTMLElement;
@@ -401,9 +410,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!info.permissions.canEdit) {
-    showFatalError('이 링크에는 동시편집 권한이 없습니다. 뷰어에서 열람만 가능합니다.');
-    return;
+  // canEdit:false여도 이 편집기 화면 자체는 그대로 보여준다 — grid-editor.ts(xlsx)/editor-slides.ts
+  // (pptx)와 같은 정책: 실제 쓰기 차단은 서버가 읽기 전용 연결로 처리하므로(collab/room.ts), 여기선
+  // 서식 도구(리본) 그룹만 숨겨 애초에 사용자가 고칠 수 있다고 착각하지 않게 한다 — 뒤로가기/제목/
+  // 검색/참여자 같은 상단 줄은 도구가 아니라 계속 보여야 하므로 toolbar 전체가 아니라
+  // .toolbar-format만 숨긴다.
+  canEdit = info.permissions.canEdit;
+  if (!canEdit) {
+    toolbar.querySelector('.toolbar-format')?.setAttribute('hidden', '');
+    readonlyBadgeEl.hidden = false;
   }
 
   titleEl.textContent = info.name;
@@ -466,7 +481,13 @@ async function main(): Promise<void> {
   // 곧바로 불리면 아직 대입되지 않은 view를 참조해 예외가 난다 — 그러면 main()의 catch가
   // showFatalError를 호출해 이미 마운트된 .ProseMirror까지 통째로 숨겨버린다. 그래서 생성자는
   // 기본 동작으로 완료시키고, view가 확실히 대입된 뒤 setProps로 커스텀 콜백을 나중에 건다.
-  const view = new EditorView(editorHost, { state });
+  // editable: 프로세미러 표준 EditorView 옵션 — false면 DOM contentEditable을 끄고, 키보드
+  // 입력·IME 조합·붙여넣기·드롭·자르기 등 "DOM에서 오는" 편집 이벤트 전체를 프로세미러 자신이
+  // 무시한다(prosemirror-view의 editHandlers가 view.editable을 직접 검사). 다만 이 게이트는
+  // 어디까지나 DOM 이벤트 경로에만 걸리고 view.dispatch를 직접 호출하는 코드(예: 아래 툴바 버튼
+  // 클릭 핸들러)는 우회한다 — 그래서 이 옵션만으로는 부족하고, 툴바(.toolbar-format) 자체를
+  // 위에서 이미 숨겨 그 우회로를 원천 차단했다.
+  const view = new EditorView(editorHost, { state, editable: () => canEdit });
   view.setProps({
     dispatchTransaction(tr) {
       const newState = view.state.apply(tr);
