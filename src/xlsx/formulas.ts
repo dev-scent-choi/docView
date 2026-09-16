@@ -34,14 +34,18 @@ function rawCellText(grid: GridDocument, sheetIdx: number, row: number, col: num
  * 셀이 **실제로** 속한 시트의 이름 — 수식이 `A1`처럼 시트를 명시하지 않았으면 parser.parse()에
  * 넘긴 position.sheet로 채워지고, `Sheet2!A1`처럼 명시했으면 그 이름 그대로다)를 실제 재귀에 쓸
  * sheetIdx로 되돌리는 데 쓴다 — 참조마다(onCell/onRange 콜백마다) 매번 `grid.sheets.findIndex(...)`로
- * 선형 탐색하면 수식 하나가 참조를 많이 가질수록 비용이 쌓이므로, top-level 호출 하나(=수식 셀 하나의
- * 평가 전체)당 한 번만 만들어 재귀 전체에서 재사용한다(아래 computeGridCellDisplay의
- * `sheetNameIndex` 매개변수 참고).
+ * 선형 탐색하면 수식 하나가 참조를 많이 가질수록 비용이 쌓이므로, memo/tainted와 정확히 같은 방식으로
+ * 재계산 **패스** 하나(예: spreadsheet.ts의 applyComputedFormulaValues 한 번의 호출, 또는 room.ts의
+ * recomputeFormulasForPage 한 번의 호출 — 그 패스가 계산하는 수식 셀 전부)당 호출자가 한 번만 만들어
+ * 아래 computeGridCellDisplay/computeGridCellDisplaySync/computeGridCellDisplayAsync의
+ * `sheetNameIndex` 매개변수로 넘긴다(각 함수의 문서 주석 참고). sheetNameIndex를 넘기지 않는 호출
+ * (테스트 등 직접 호출)은 그 호출 하나(=수식 셀 하나의 평가 전체) 동안만 한 번 만들어 재귀에서
+ * 재사용하는 것으로 안전하게 폴백한다.
  *
  * 이름이 중복된 시트(정상 엑셀 파일은 이름 유일성을 강제하므로 나오지 않지만, 손상되었거나 수기로
  * 편집된 파일에 대한 방어)는 먼저 나온(인덱스가 작은) 시트를 결정적으로 우선한다 — 이름이 겹치면
  * 애초에 "정답"이 없으므로, 임의로 고르는 대신 항상 같은 답을 내는 편을 택한다. */
-function buildSheetNameIndex(grid: GridDocument): ReadonlyMap<string, number> {
+export function buildSheetNameIndex(grid: GridDocument): ReadonlyMap<string, number> {
   const index = new Map<string, number>();
   grid.sheets.forEach((sheet, i) => {
     if (!index.has(sheet.name)) index.set(sheet.name, i);
@@ -49,8 +53,10 @@ function buildSheetNameIndex(grid: GridDocument): ReadonlyMap<string, number> {
   return index;
 }
 
-/** buildSheetNameIndex의 LazyGridStore 버전 — sheetMeta가 GridSheet과 같은 `name` 필드를 가진다. */
-function buildStoreSheetNameIndex(store: LazyGridStore): ReadonlyMap<string, number> {
+/** buildSheetNameIndex의 LazyGridStore 버전 — sheetMeta가 GridSheet과 같은 `name` 필드를 가진다.
+ * 마찬가지로 재계산 패스 하나(room.ts의 recomputeFormulasForPage 한 번의 호출)당 호출자가 한 번만
+ * 만들어 넘긴다. */
+export function buildStoreSheetNameIndex(store: LazyGridStore): ReadonlyMap<string, number> {
   const index = new Map<string, number>();
   store.sheetMeta.forEach((meta, i) => {
     if (!index.has(meta.name)) index.set(meta.name, i);
@@ -85,6 +91,11 @@ function buildStoreSheetNameIndex(store: LazyGridStore): ReadonlyMap<string, num
  * `memo.set(...)` 직전에 `tainted.has(key)`면 캐시를 건너뛴다 — 계산된 값 자체는 이번 호출에는
  * 그대로 반환하되(그래야 이번 호출의 결과가 여전히 정확하다), 다음 호출을 위해 남겨두지는 않는다
  * (d2bff59 이전의 "매 호출마다 새로 계산" 동작과 동일 — 사이클에 걸린 칸에 한해서만).
+ *
+ * **sheetNameIndex(성능)**: memo/tainted와 마찬가지로 재계산 패스 하나 동안 호출자가 한 번만 만들어
+ * 공유해야 하는 값이다(위 buildSheetNameIndex 문서 주석 참고) — 참조를 만날 때마다(onCell/onRange
+ * 콜백마다) 새로 만들면 수식 하나가 참조를 많이 가질수록, 패스 하나에 수식 셀이 많을수록 그만큼
+ * 반복해서 같은 매핑을 다시 만드는 꼴이라 비용이 쌓인다.
  */
 export function computeGridCellDisplay(
   grid: GridDocument,
@@ -96,9 +107,11 @@ export function computeGridCellDisplay(
   tainted: Set<string> = new Set(),
   sheetNameIndex?: ReadonlyMap<string, number>,
 ): unknown {
-  // top-level 호출(재귀 호출은 항상 이 매개변수를 넘겨준다)에서만 새로 만든다 — 그리드 구조는
-  // 이 함수 호출 하나의 재귀 전체(=수식 셀 하나 평가) 동안 바뀌지 않는다는 전제가 buildFormulaInputGrid/
-  // applyComputedFormulaValues의 불변식과 같으므로, 재빌드는 항상 안전하고 값은 절대 낡지 않는다.
+  // sheetNameIndex를 넘겨받으면(applyComputedFormulaValues 같은 pass-level 호출자, 또는 재귀 호출 —
+  // 재귀 호출은 항상 이 매개변수를 넘겨준다) 그대로 재사용하고, 넘겨받지 못하면(테스트 등 직접
+  // 호출) 이 호출 하나에서만 새로 만든다 — 그리드 구조는 이 함수 호출 하나의 재귀 전체(=수식 셀
+  // 하나 평가) 동안 바뀌지 않는다는 전제가 buildFormulaInputGrid/applyComputedFormulaValues의
+  // 불변식과 같으므로, 재빌드는 항상 안전하고 값은 절대 낡지 않는다.
   const nameIndex = sheetNameIndex ?? buildSheetNameIndex(grid);
   const key = `${sheetIdx}:${row}:${col}`;
   const raw = rawCellText(grid, sheetIdx, row, col);
@@ -211,7 +224,9 @@ function computeGridCellDisplaySync(
   onMiss: (sheetIdx: number, row: number) => void,
   sheetNameIndex?: ReadonlyMap<string, number>,
 ): unknown {
-  // computeGridCellDisplay와 같은 이유로 top-level 호출에서만 새로 만든다(위 문서 주석 참고).
+  // computeGridCellDisplay와 같은 이유로, sheetNameIndex를 넘겨받으면(computeGridCellDisplayAsync
+  // 같은 pass-level 호출자, 또는 재귀 호출) 재사용하고 넘겨받지 못하면(테스트 등 직접 호출) 이
+  // 호출 하나에서만 새로 만든다(위 문서 주석 참고).
   const nameIndex = sheetNameIndex ?? buildStoreSheetNameIndex(store);
   const rawCellTextSync = (r: number, c: number): string => {
     const originalCol = store.logicalToOriginalCol[sheetIdx]?.[c];
@@ -349,6 +364,12 @@ class LayeredMemo implements MemoLike {
  * tainted 규칙 참고) — 사이클 감지는 "이 칸이 사이클의 일부"라는 구조적 사실이지 이번 시도가
  * 깨끗했는지와 무관하므로, writeLog처럼 시도별로 분리하지 않고 시도마다 그대로 공유해서 쓴다(더
  * 보수적으로만 작동한다 — 최악의 경우도 캐시를 좀 더 자주 건너뛰는 정도).
+ *
+ * `sheetNameIndex`도 memo/tainted와 같은 패스 동안 호출자(room.ts의 recomputeFormulasForPage)가
+ * 한 번만 만들어 공유해야 한다(buildStoreSheetNameIndex/computeGridCellDisplay 문서 주석 참고) —
+ * 넘겨받지 못하면(테스트 등 직접 호출) 이 호출에서 한 번만 만들어 재시도 루프 전체(및 그 안의
+ * 모든 재귀)에서 재사용한다. store.sheetMeta는 이 함수 호출 하나(=수식 셀 하나 평가, 재시도 전체
+ * 포함) 동안 바뀌지 않으므로 재시도마다 다시 만들 필요가 없다.
  */
 export async function computeGridCellDisplayAsync(
   store: LazyGridStore,
@@ -358,8 +379,12 @@ export async function computeGridCellDisplayAsync(
   evalGuard: Set<string> = new Set(),
   memo: MemoLike = new Map(),
   tainted: Set<string> = new Set(),
+  sheetNameIndex?: ReadonlyMap<string, number>,
 ): Promise<unknown> {
   const MAX_RETRIES = 10_000; // 한 수식이 참조할 수 있는 서로 다른 행 수의 넉넉한 상한(안전망)
+  // top-level 호출(pass-level 호출자가 넘겨주지 않으면)에서만 새로 만들고, 재시도 루프 전체에서
+  // 재사용한다 — computeGridCellDisplay/computeGridCellDisplaySync와 같은 이유(위 문서 주석 참고).
+  const nameIndex = sheetNameIndex ?? buildStoreSheetNameIndex(store);
   for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
     // 이번 시도에서 만난 캐시 미스를 **전부** 모은다(중복 행은 한 번만).
     //
@@ -381,7 +406,7 @@ export async function computeGridCellDisplayAsync(
       const missKey = `${missSheet}:${missRow}`;
       if (missedRows.size >= store.readCacheLimit || missedRows.has(missKey)) return;
       missedRows.set(missKey, { sheetIdx: missSheet, row: missRow });
-    });
+    }, nameIndex);
     if (missedRows.size === 0) {
       // 깨끗이 끝났으니 이번 시도에서 새로 계산된 값들(writeLog)만 공유 memo에 합친다 — 공유
       // memo에 이미 있던 항목은 건드리지 않는다(O(새 항목 수)이지 O(공유 memo 크기)가 아니다).

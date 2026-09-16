@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 import type { DocumentStore } from './storage.js';
 import type { DocumentMeta } from './types.js';
-import { computeGridCellDisplay } from './xlsx/formulas.js';
+import { buildSheetNameIndex, computeGridCellDisplay } from './xlsx/formulas.js';
 
 /** 대형 시트를 훑는 동기 반복문 중간에 이벤트 루프에 제어권을 돌려준다 — 이게 없으면 큰 xlsx를
  * 열 때(파싱이든 동시편집 시딩이든) 그 몇 초~몇십 초 동안 Node가 단일 스레드라 그 문서를 연
@@ -148,6 +148,24 @@ export function computeLineOffsets(buffer: Buffer): readonly number[] {
  * (routes/documents.ts의 runGridExtraction)과 동시편집 저장 후 재생성(collab/room.ts)
  * 양쪽에서 재사용해, 그리드 내용이 바뀔 때마다 인덱스가 항상 최신 상태로 유지되게 한다
  * (그리드가 바뀌지 않는 한 인덱스도 따로 무효화할 필요가 없다).
+ *
+ * **알려진, 좁은 쓰기 경합(리뷰 지적, 구조적으로 고치지 않기로 함)**: 아래 두 `store.saveDerived`
+ * 호출은 서로 독립적이고(문서 하나당 락이 없다), storage.ts의 saveDerived 자체도 saveOriginal과
+ * 달리 temp-file+rename의 원자적 쓰기가 아니라 `fs.writeFile`로 그 경로에 직접 쓴다. 그래서
+ * 같은 문서에 대해 이 함수가 **동시에 두 번** 호출되면(예: collab/room.ts의 flushToStore가 이
+ * 문서를 유휴 자동저장하는 바로 그 순간, routes/viewer.ts의 regenerateStaleGridCache가 같은
+ * 문서를 낡은 포맷 캐시로 감지해 재생성을 트리거하는 경우) 두 호출의 grid/gridindex 쓰기가
+ * 시간순으로 뒤섞여, "한쪽의 grid + 다른 쪽의 gridindex"처럼 서로 짝이 안 맞는 조합이 잠깐 disk에
+ * 남을 수 있다 — 이 조합이 우연히 routes/viewer.ts의 offsetsLookValid 같은 구조적 정합성 검사를
+ * (진짜 내용은 안 맞아도 통과할 만큼) 우연히 통과하면, 다음 성공적인 저장 전까지 일시적으로 깨진
+ * 파싱 결과를 서빙할 수 있다.
+ *
+ * 이 경합은 좁다 — "이 문서가 포맷이 낡은 grid 캐시를 갖고 있으면서, 동시에 바로 그 순간 실제로
+ * 동시편집 중이어야" 하는 아주 구체적인 타이밍이 겹쳐야 하고, 어느 한쪽이든 다음에 성공적으로
+ * (한쪽만) 저장하면 다시 짝이 맞는 grid/gridindex 쌍이 돼 저절로 회복된다(자가치유) — 영구적인
+ * 데이터 손실이 아니다. 제대로 고치려면 문서 단위의 실제 프로세스 간/요청 간 쓰기 조정(락)이나
+ * 원자적 다중 파일 쓰기 스킴이 필요한데, 이 정도 코드 변경은 이 함수의 범위를 넘어선다 — 지금은
+ * 이 주석으로만 남겨 다음에 이 경로를 건드리는 사람이 바로 알 수 있게 해둔다.
  */
 export async function saveGridDerived(
   store: Pick<DocumentStore, 'saveDerived'>,
@@ -464,6 +482,13 @@ async function buildFormulaInputGrid(
  * 함수 호출 하나 = 재계산 패스 하나로 보고 memo/tainted를 **여기서 한 번만** 만든다 — 셀마다·
  * 행마다 새로 만들면 안 된다.
  *
+ * **sheetNameIndex도 마찬가지로 여기서 한 번만 만드는 이유**: computeGridCellDisplay가 자신에게
+ * sheetNameIndex를 안 넘겨주면 호출마다(=여기 아래 루프의 pending 셀 하나마다) 새로 만든다 —
+ * 재귀 안에서는 재사용되지만, 이 루프가 도는 pending.length번의 top-level 호출 각각은 서로 다시
+ * 만든다는 뜻이다. memo/tainted와 똑같이 재계산 패스(=이 함수 호출) 하나에 시트 구성은 바뀌지
+ * 않으므로 여기서 한 번만 만들어 모든 pending 셀에 걸쳐 재사용한다(buildSheetNameIndex 문서
+ * 주석 참고).
+ *
  * **계산이 다 끝난 뒤에야 표시용 그리드에 써 넣는 이유(중요)**: buildFormulaInputGrid는 메모리를
  * 아끼려고 "서식을 벗길 칸이 없는 행"의 배열을 표시용 그리드와 **그대로 공유**한다. 그래서 계산
  * 도중에 결과를 표시용 그리드에 바로 써 넣으면 그게 입력 그리드까지 같이 바꿔버린다 — 예를 들어
@@ -488,12 +513,13 @@ async function applyComputedFormulaValues(
   );
   const memo = new Map<string, unknown>();
   const tainted = new Set<string>();
+  const sheetNameIndex = buildSheetNameIndex(inputGrid);
   const computedTexts: string[] = new Array(pending.length).fill('');
   for (let i = 0; i < pending.length; i += 1) {
     const { sheetIdx, row, col, numFmt } = pending[i];
     try {
       computedTexts[i] = formatFormulaResult(
-        computeGridCellDisplay(inputGrid, sheetIdx, row, col, new Set(), memo, tainted),
+        computeGridCellDisplay(inputGrid, sheetIdx, row, col, new Set(), memo, tainted, sheetNameIndex),
         numFmt,
       );
     } catch {

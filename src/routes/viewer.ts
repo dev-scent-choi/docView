@@ -173,6 +173,11 @@ function peekGridHeaderVersion(buffer: Buffer): number | undefined {
  * 실패(원본이 없거나 — 예: 메모리 저장소에서 만료됨 — 재파싱이 실패함)하면 조용히 포기하고 false를
  * 돌려준다 — 그러면 호출부는 기존의(낡았을 수 있는) 캐시를 그대로 서빙한다. 문서 열람 경로가 이
  * 자가치유 때문에 깨지는 일은 없어야 한다: 재생성은 "되면 좋은 것"이지 열람의 전제조건이 아니다.
+ *
+ * **알려진 쓰기 경합(리뷰 지적)**: 이 함수가 부르는 saveGridDerived(spreadsheet.ts)에는 이 경로가
+ * 같은 문서의 동시편집 자동저장(collab/room.ts의 flushToStore)과 락 없이 동시에 돌 때의 좁고
+ * 자가치유되는 grid/gridindex 쓰기 경합이 문서화돼 있다 — saveGridDerived의 문서 주석 참고. 이
+ * 뷰어 재생성 경로는 그 경합의 세 번째 writer일 뿐이라 그 문서 주석을 그대로 적용받는다.
  */
 async function regenerateStaleGridCache(docId: string): Promise<boolean> {
   const meta = await store.readMeta(docId);

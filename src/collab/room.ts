@@ -75,7 +75,7 @@ import {
   type PerSlideContentsMap,
   type ShapeContentMap,
 } from '../pptx/collab.js';
-import { computeGridCellDisplayAsync, formatComputedValueForStorage } from '../xlsx/formulas.js';
+import { buildStoreSheetNameIndex, computeGridCellDisplayAsync, formatComputedValueForStorage } from '../xlsx/formulas.js';
 import { PPTX_SLIDE_CONTENTS_MAP, PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
 import {
   DOC_META_MAP,
@@ -875,6 +875,11 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
   // memo와 같은 패스 동안 공유되는 "이 칸은 순환 참조의 일부라 결과를 영구 캐시하면 안 된다"
   // 표시 집합 — computeGridCellDisplay/computeGridCellDisplayAsync 문서 주석의 tainted 규칙 참고.
   const tainted = new Set<string>();
+  // memo/tainted와 같은 이유로 여기서 한 번만 만든다 — computeGridCellDisplayAsync에 안 넘기면
+  // formulaCells 하나하나(=아래 Promise.all의 각 top-level 호출)마다 새로 시트 이름 매핑을 다시
+  // 만드는데, 이 페이지 재계산 패스 하나 동안 시트 구성은 바뀌지 않으므로 그럴 필요가 없다
+  // (buildStoreSheetNameIndex/computeGridCellDisplayAsync 문서 주석 참고).
+  const sheetNameIndex = buildStoreSheetNameIndex(store);
   for (let start = pageStart; start < pageEnd; start += RECOMPUTE_YIELD_EVERY_N_ROWS) {
     const end = Math.min(start + RECOMPUTE_YIELD_EVERY_N_ROWS, pageEnd);
     // "이 칸이 수식인가"를 판정하려면 원본 텍스트가 필요하다 — getCell은 더티 오버레이를 먼저
@@ -905,7 +910,7 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
     // 이미 계산된 값만 동기 콜백 안에서 쓴다(seedGridPageFromXlsx가 getRow를 Promise.all로 먼저
     // 기다린 뒤 transact하는 것과 같은 패턴, xlsx/collab.ts 참고).
     const values = await Promise.all(
-      formulaCells.map(({ r, c }) => computeGridCellDisplayAsync(store, sheetIdx, r, c, new Set(), memo, tainted)),
+      formulaCells.map(({ r, c }) => computeGridCellDisplayAsync(store, sheetIdx, r, c, new Set(), memo, tainted, sheetNameIndex)),
     );
     room.ydoc.transact(() => {
       for (const key of nonFormulaKeys) {
