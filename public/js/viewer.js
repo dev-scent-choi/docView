@@ -9,7 +9,6 @@ const docTitle = document.getElementById('doc-title');
 const pageJumpInput = document.getElementById('page-jump-input');
 const pageJumpTotal = document.getElementById('page-jump-total');
 const gridCellRefEl = document.getElementById('grid-cell-ref');
-const gridRowInfoEl = document.getElementById('grid-row-info');
 const gridFormulaRefEl = document.getElementById('grid-formula-ref');
 const gridFormulaValueEl = document.getElementById('grid-formula-value');
 const gridZoomHostEl = document.getElementById('grid-zoom-host');
@@ -1210,11 +1209,6 @@ function renderGridViewport() {
   table.innerHTML = cols + rowsHtml.join('');
   table.style.width = `${totalColWidthPx}px`;
   table.style.transform = `translateY(${(renderFirst - 1) * GRID_ROW_H}px)`;
-
-  if (gridRowInfoEl) {
-    const currentRow = Math.min(sheet.rowCount, Math.floor(scroll.scrollTop / GRID_ROW_H) + 1);
-    gridRowInfoEl.textContent = `${currentRow.toLocaleString()} / ${sheet.rowCount.toLocaleString()}행`;
-  }
 }
 
 function renderGridHead() {
