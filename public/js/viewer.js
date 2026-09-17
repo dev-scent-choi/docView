@@ -1493,6 +1493,7 @@ async function initGridView() {
   document.getElementById('zoom-level').hidden = true;
   document.getElementById('zoom-fit-btn').hidden = true;
   document.getElementById('rotate-btn').hidden = true;
+  document.getElementById('page-view-btn').hidden = true;
   document.getElementById('page-jump-input').hidden = true;
   // "N/전체행" 정보는 이제 하단 grid-status-bar가 보여준다(예전엔 여기 상단 툴바에 작게 끼어 있었다).
   pageJumpTotal.hidden = true;
