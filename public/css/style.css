@@ -444,6 +444,10 @@ h2 {
 }
 
 .icon-btn svg { width: 17px; height: 17px; }
+/* 버튼 안에 아이콘을 두 개 두고(예: zoom-fit-btn/fullscreen-btn의 토글) JS가 hidden 속성만
+   바꾸는 방식을 쓰는데, 인라인 svg는 [hidden]의 UA 기본 규칙(display:none)이 먹지 않아서
+   두 아이콘이 한꺼번에 겹쳐 보였다 — 명시적으로 다시 꺼준다. */
+.icon-btn svg[hidden] { display: none; }
 .icon-btn:hover:not(:disabled) { background: var(--v-hover); color: var(--v-text); }
 
 /* "다른 이름으로 저장" = 저장 아이콘 + 오른쪽 아래 연필 배지 (참고 이미지 방식). 배지 자체 안에
@@ -506,7 +510,7 @@ h2 {
   padding: 0.2rem 0.3rem;
   border: 1px solid var(--v-glass-line);
   border-radius: 4px;
-  background: var(--v-hover);
+  background: var(--v-glass);
   color: var(--v-text);
   font-family: var(--font-mono);
   font-size: 0.78rem;
@@ -574,6 +578,10 @@ h2 {
   /* 100% 초과 확대 시 페이지가 컨테이너를 넘치므로 가로 스크롤을 허용한다 */
   overflow-x: auto;
 }
+/* "너비에 맞추기"를 한 번이라도 누르면 이 1120px 읽기용 폭 제한을 없애 브라우저 창 끝까지
+   페이지가 채워지게 한다(viewer.js의 setupZoomFit) — --page-width:100%가 곧 "컨테이너 폭
+   전체"이므로, 컨테이너 자체를 창 폭까지 넓히는 게 유일하게 필요한 조치다. */
+.pages-container.pages-edge-to-edge { max-width: none; }
 
 .page-frame {
   position: relative;

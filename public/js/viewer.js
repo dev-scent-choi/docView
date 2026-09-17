@@ -496,9 +496,6 @@ const TOOLBAR_OVERFLOW_PRIORITY = [
   'markup-include-wrap',
   'text-tool-btn',
   'markup-add-btn',
-  'download-as-btn',
-  'download-btn',
-  'print-btn',
 ];
 
 let toolbarOriginalOrder = null;
@@ -667,31 +664,36 @@ function setupZoomFit() {
     return nearestIndex;
   }
 
-  function widthFitPercent() {
-    const containerWidth = pagesContainer.clientWidth - 32; // 좌우 여백 감안
-    const pageWidthPt = (pageDimensions && pageDimensions[0]?.w) || 612;
-    return (containerWidth / pageWidthPt) * 100;
-  }
-
+  // --page-width:100%는 정의상 "컨테이너 폭 전체"라서(applyZoom() 참고), 폭 맞춤은 항상
+  // 100%면 된다 — pagesContainer.clientWidth를 pageWidthPt(점 단위)로 나누는 예전 계산은
+  // 서로 다른 두 단위를 섞어(퍼센트가 실제로는 "컨테이너 기준"인데 "포인트 기준"인 것처럼
+  // 계산) 화면 폭을 훌쩍 넘겨 가로 스크롤이 생기는 버그가 있었다.
   function pageFitPercent() {
-    // 페이지 전체(가로+세로)가 스크롤 없이 한 화면에 들어오도록, 폭 기준과 높이 기준 중
-    // 더 빡빡한 쪽을 쓴다. 높이는 "고정 툴바를 뺀 나머지 창 높이" 기준 — 폭 계산이
-    // pagesContainer(여러 페이지가 이어지는 스크롤 영역)를 쓰는 것과 달리, 여기선 한 페이지만
-    // 보이게 하는 게 목적이라 창 높이에서 실측 툴바 높이를 뺀 값을 쓴다.
+    // 페이지 전체(가로+세로)가 스크롤 없이 한 화면에 들어오도록, 100%(=컨테이너 폭 전체) 기준
+    // 세로 높이가 뷰포트를 넘는지 확인해서, 넘으면 세로가 맞는 비율로 같이 축소한다(가로세로
+    // 비율은 프레임의 aspect-ratio로 고정되므로 폭 percent 하나가 둘 다를 함께 줄인다).
+    const containerWidth = pagesContainer.clientWidth - 32; // 좌우 여백 감안
+    const dims = (pageDimensions && pageDimensions[0]) || { w: 612, h: 792 };
+    const frameHeightAt100 = containerWidth * (dims.h / dims.w);
     const toolbarEl = document.getElementById('toolbar');
     const availableHeight = window.innerHeight - toolbarEl.offsetHeight - 32; // 위아래 여백 감안(폭 계산과 같은 관례)
-    const pageHeightPt = (pageDimensions && pageDimensions[0]?.h) || 792;
-    return Math.min(widthFitPercent(), (availableHeight / pageHeightPt) * 100);
+    if (frameHeightAt100 <= availableHeight) return 100;
+    return (availableHeight / frameHeightAt100) * 100;
   }
 
   btn.addEventListener('click', () => {
-    zoomIndex = snapToNearestStep(zoomFitMode === 'width' ? widthFitPercent() : pageFitPercent());
+    // 이 컨테이너의 1120px 읽기용 폭 제한을 없애 브라우저 창 끝까지 채운다 — 폭/페이지
+    // 맞춤 둘 다 이 넓어진 폭을 기준으로 계산해야 "화면 끝까지"라는 의도가 맞는다.
+    pagesContainer.classList.add('pages-edge-to-edge');
+    zoomIndex = snapToNearestStep(zoomFitMode === 'width' ? 100 : pageFitPercent());
     applyZoom();
 
     zoomFitMode = zoomFitMode === 'width' ? 'page' : 'width';
     const showingPageMode = zoomFitMode === 'page';
-    widthIcon.hidden = showingPageMode;
-    pageIcon.hidden = !showingPageMode;
+    // svg 엘리먼트는 .hidden 프로퍼티를 대입해도 hidden 속성에 반영되지 않는 경우가 있어(SVGElement의
+    // HTMLOrForeignElement 믹스인 지원이 엔진마다 달라서) 속성을 직접 세팅/제거한다.
+    widthIcon.toggleAttribute('hidden', showingPageMode);
+    pageIcon.toggleAttribute('hidden', !showingPageMode);
     const label = showingPageMode ? '페이지에 맞추기' : '너비에 맞추기';
     btn.title = label;
     btn.setAttribute('aria-label', label);
@@ -711,6 +713,42 @@ function setupRotate() {
     pagesContainer.style.setProperty('--page-rotate', `${rotateDeg}deg`);
     pagesContainer.classList.toggle('pages-rotated', rotateDeg !== 0);
   });
+}
+
+/** 전체화면 보기 — 브라우저 Fullscreen API로 문서 전체(<html>)를 전체화면 전환한다.
+ * Esc나 브라우저 자체 UI로 빠져나가는 경우도 있어(버튼 클릭만이 아니라) fullscreenchange를
+ * 구독해 아이콘/상태를 항상 실제 전체화면 여부에 맞춰 동기화한다. */
+function setupFullscreen() {
+  const btn = document.getElementById('fullscreen-btn');
+  if (!btn) return;
+  if (!document.fullscreenEnabled) {
+    btn.hidden = true;
+    return;
+  }
+  const enterIcon = btn.querySelector('.fullscreen-icon-enter');
+  const exitIcon = btn.querySelector('.fullscreen-icon-exit');
+
+  function syncState() {
+    const isFullscreen = Boolean(document.fullscreenElement);
+    // svg는 .hidden 프로퍼티 대입이 hidden 속성에 반영 안 되는 경우가 있어(zoom-fit-btn과 같은
+    // 이유) 속성을 직접 세팅/제거한다.
+    enterIcon.toggleAttribute('hidden', isFullscreen);
+    exitIcon.toggleAttribute('hidden', !isFullscreen);
+    const label = isFullscreen ? '전체화면 종료' : '전체화면 보기';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-pressed', String(isFullscreen));
+  }
+
+  btn.addEventListener('click', () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  });
+  document.addEventListener('fullscreenchange', syncState);
+  syncState();
 }
 
 /* 우클릭/단축키 차단은 억지력일 뿐이며 실제 권한 강제는 서버에서 이루어진다. */
@@ -2412,6 +2450,7 @@ async function init() {
   setupPageJump();
   setupZoomFit();
   setupRotate();
+  setupFullscreen();
   setupDrawingTools();
   setupMarkupTool();
   setupTextTool();
