@@ -493,10 +493,12 @@ function setupToolbar() {
 const TOOLBAR_OVERFLOW_PRIORITY = [
   'invert-btn',
   'measure-btn',
-  'markup-toggle-btn',
   'markup-include-wrap',
   'text-tool-btn',
   'markup-add-btn',
+  'download-as-btn',
+  'download-btn',
+  'print-btn',
 ];
 
 let toolbarOriginalOrder = null;
@@ -1496,7 +1498,6 @@ async function initGridView() {
   pageJumpTotal.hidden = true;
   document.getElementById('invert-btn').hidden = true;
   document.getElementById('measure-btn').hidden = true;
-  document.getElementById('markup-toggle-btn').hidden = true;
   document.getElementById('markup-add-btn').hidden = true;
   document.getElementById('text-tool-btn').hidden = true;
   document.getElementById('markup-include-wrap').hidden = true;
@@ -1959,12 +1960,6 @@ async function loadMarkup() {
   }
 }
 
-function setMarkupVisible(visible) {
-  markup.visible = visible;
-  document.getElementById('markup-toggle-btn').setAttribute('aria-pressed', String(visible));
-  renderAllMarkup();
-}
-
 function closeMarkupPopover() {
   const existing = document.querySelector('.markup-popover');
   if (existing) existing.remove();
@@ -2043,10 +2038,6 @@ function openMarkupPopover(frame, page, box) {
 }
 
 function setupMarkupTool() {
-  document.getElementById('markup-toggle-btn').addEventListener('click', () => {
-    setMarkupVisible(!markup.visible);
-  });
-
   const addBtn = document.getElementById('markup-add-btn');
   if (permissions.canEdit) {
     addBtn.hidden = false;
