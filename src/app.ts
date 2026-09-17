@@ -32,6 +32,13 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(multipart, {
     limits: { fileSize: config.maxUploadBytes, files: 1 },
   });
+  // POST /api/documents/stream(documents.ts)용 — multipart 경계 없이 파일 바이트를 요청 본문에
+  // 그대로 실어 보내는 업로드 경로. Fastify는 등록된 파서가 없는 Content-Type의 본문을 기본
+  // 거부하므로(415), 이 타입만 명시적으로 "본문 전체를 버퍼로 그대로 넘긴다"로 등록해 둔다 —
+  // JSON/멀티파트 등 기존 타입 파싱에는 전혀 영향이 없다.
+  app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_request, payload, done) => {
+    done(null, payload);
+  });
   await app.register(fastifyWebsocket);
   await app.register(fastifyStatic, {
     root: publicDir,

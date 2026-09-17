@@ -15,6 +15,12 @@
 - (선택) LibreOffice — docx/pptx 등을 PDF로 변환하려면 필요. docx는 없어도 자동으로 서식 없는
   텍스트 미리보기 폴백으로 동작하지만, pptx는 이 폴백이 없어 LibreOffice 없이는 업로드가 거부된다
   (xlsx/csv는 LibreOffice 없이도 항상 정상 동작 — 셀 데이터만 직접 추출).
+  - xls/ods(레거시 바이너리·ODF 스프레드시트)는 업로드 시점에 LibreOffice로 xlsx로 자동
+    정규화된다(그래야 그리드 뷰·동시편집이 켜진다 — 이 서비스는 BIFF 바이너리를 직접 파싱하지
+    않는다). 정규화에 성공하면 파일명·다운로드도 그 시점부터 `.xlsx`로 바뀐다(원본 바이너리는
+    보존하지 않는다). LibreOffice가 없거나 변환이 실패하면 기존처럼 PDF 전용 열람(편집 불가)으로
+    남는다.
+  - hwp/hwpx도 같은 LibreOffice 경로로 PDF 변환만 한다 — 별도의 한글 전용 파싱 엔진은 없다.
 - (선택) DWG 열람 — dwg는 먼저 DXF로 변환한 뒤 LibreOffice로 PDF화한다(위 LibreOffice도 필요).
   DWG→DXF 변환기는 아래 둘 중 하나가 있으면 자동 감지된다:
   - **LibreDWG (권장, 로그인 불필요)** — [공식 릴리스](https://github.com/LibreDWG/libredwg/releases)의
@@ -99,7 +105,22 @@ node scripts/formula-check.mjs            # xlsx 수식 엔진(VLOOKUP/MATCH/SUM
 `Authorization: Bearer <발급받은 키>` 헤더를 붙여서 호출한다(`DOCVIEW_API_KEYS` 미설정 시에는
 개발 편의상 이 검사를 건너뛴다):
 
-1. `POST /api/documents` (multipart, 필드명 `file`, **API 키 필요**) — 문서 업로드, `{data.id}` 반환.
+1. 문서 업로드(**API 키 필요**, 둘 중 아무 방식이나) — 둘 다 같은 처리 로직을 타므로 결과는
+   동일하다(`{data.id}` 반환):
+   - `POST /api/documents` (multipart, 필드명 `file`) — 파일 필드가 있는 폼 전송에 익숙한 쪽.
+   - `POST /api/documents/stream?filename=원본파일명.ext` (요청 본문에 파일 바이트를 그대로,
+     `Content-Type: application/octet-stream`) — multipart 경계를 직접 구성할 필요 없이 파일을
+     스트림으로 그대로 흘려보낼 수 있다. 같은 서버(또는 같은 파일시스템)에 원본이 이미 있는
+     호출자가 디스크에서 바로 읽어 파이프하기에 특히 편하다. 예:
+     ```bash
+     curl -X POST \
+       --data-binary "@/path/to/문서.pptx" \
+       -H "Content-Type: application/octet-stream" \
+       -H "Authorization: Bearer <발급받은 키>" \
+       "https://<이 서비스 주소>/api/documents/stream?filename=문서.pptx"
+     ```
+     Node에서는 `fetch(url, { method: 'POST', body: fs.createReadStream(path), duplex: 'half', headers: {...} })`
+     처럼 파일 스트림을 body에 그대로 넘기면 된다(버퍼로 먼저 전부 읽을 필요 없음).
 2. `GET /api/documents/:id` — 변환 상태 폴링, `status: 'ready'`가 될 때까지.
 3. `POST /api/documents/:id/tokens` `{viewer, canEdit, canDownload, canPrint, canCopy}`
    (**API 키 필요**) — 토큰 발급, `{data.token, data.editorUrl 또는 data.viewerUrl}` 반환.

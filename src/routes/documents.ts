@@ -8,7 +8,7 @@ import { forceCloseRoom } from '../collab/room.js';
 import { config } from '../config.js';
 import { convertDwgToDxf } from '../converters/dwgConverter.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
-import { convertDxfToSvg } from '../converters/libreOffice.js';
+import { convertDxfToSvg, convertLegacySpreadsheetToXlsx } from '../converters/libreOffice.js';
 import { ConversionError, type Converter } from '../converters/types.js';
 import { getPdfPageInfo, invalidateRenderCache } from '../rendering.js';
 import { issueViewToken } from '../security.js';
@@ -142,6 +142,30 @@ async function tryGenerateVectorSvg(meta: DocumentMeta): Promise<boolean> {
   }
 }
 
+/** 업로드 핸들러가 findConverter를 부르기 전에 쓴다 — 성공하면 xls/ods 업로드를 xlsx가 올라온
+ * 것과 완전히 동일하게 취급해(ext까지 바꿔치기) 그리드 뷰·동시편집이 그대로 켜지게 한다. 실패하면
+ * (LibreOffice 미설치, 손상된 파일 등) null을 돌려주고 호출부가 원래 ext로 계속 진행한다 —
+ * xls/ods는 여전히 spreadsheetConverter(PDF 전용 열람)로 폴백 가능하다(그 경로도 LibreOffice가
+ * 필요해, LibreOffice가 아예 없으면 거기서도 결국 415로 거부된다 — 일관된 결과). */
+async function tryNormalizeLegacySpreadsheetToXlsx(
+  data: Buffer,
+  ext: 'xls' | 'ods',
+): Promise<Buffer | null> {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docview-legacyxlsx-'));
+  try {
+    const sourcePath = path.join(workDir, `source.${ext}`);
+    await fs.writeFile(sourcePath, data);
+    const targetXlsxPath = path.join(workDir, 'out.xlsx');
+    await convertLegacySpreadsheetToXlsx(sourcePath, ext, targetXlsxPath);
+    return await fs.readFile(targetXlsxPath);
+  } catch (error) {
+    console.warn(`.${ext} → xlsx 정규화 실패 (PDF 전용 열람으로 폴백):`, error);
+    return null;
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
 async function runConversion(app: FastifyInstance, converter: Converter, meta: DocumentMeta): Promise<void> {
   try {
     await store.writeMeta({ ...meta, progress: PROGRESS_CONVERTING });
@@ -159,6 +183,82 @@ async function runConversion(app: FastifyInstance, converter: Converter, meta: D
         : '문서 변환에 실패했습니다. 파일이 손상되었거나 지원되지 않는 내용입니다.';
     await store.writeMeta({ ...meta, status: 'failed', error: userMessage });
     await recordAudit({ type: 'conversion_failed', docId: meta.id, detail: meta.name });
+  }
+}
+
+interface UploadResult {
+  readonly code: number;
+  readonly body: { readonly success: boolean; readonly data?: DocumentMeta; readonly error?: string };
+}
+
+/** 업로드 진입점 두 곳(multipart 폼 필드 / 원시 바이트 스트림)이 공유하는 실제 처리 로직 —
+ * 파일명과 바이트만 받으면 나머지(확장자 판별, xls/ods 정규화, 변환기 조회, 저장, 백그라운드
+ * 변환 착수)는 완전히 동일하다. 반환값을 라우트 핸들러가 그대로 reply.code(...).send(...)에
+ * 싣는다. */
+async function ingestUpload(
+  app: FastifyInstance,
+  originalFilename: string,
+  data: Buffer,
+  callerProject: string | undefined,
+): Promise<UploadResult> {
+  let ext = path.extname(originalFilename).slice(1).toLowerCase();
+  let displayName = originalFilename;
+  // xls/ods(레거시 바이너리·ODF 스프레드시트)는 이 서비스의 그리드 뷰·동시편집 엔진이 전제하는
+  // xlsx 구조가 아니라서, 지금까지는 PDF 전용 열람만 가능했고 편집은 아예 지원되지 않았다.
+  // 여기서 xlsx로 정규화해 두면 이후 로직 전체(findConverter부터 GRID_VIEW_EXTS 분기까지)가
+  // 원래 xlsx가 올라온 것처럼 그대로 동작해 그리드 뷰·동시편집이 자동으로 켜진다 — 실패하면
+  // (LibreOffice 미설치, 손상된 파일 등) 원래 ext로 계속 진행해 기존 PDF 전용 열람으로 폴백한다.
+  if (ext === 'xls' || ext === 'ods') {
+    const converted = await tryNormalizeLegacySpreadsheetToXlsx(data, ext);
+    if (converted) {
+      data = converted;
+      // 표시 이름·다운로드 파일명(meta.name)의 확장자도 같이 바꾼다 — 안 바꾸면 실제로는
+      // xlsx 바이트인데 파일명만 "report.xls"로 남아, 다운로드한 사용자가 확장자와 실제 내용이
+      // 어긋난 파일을 받게 된다(뷰어 화면의 route.ts 다운로드 라우트가 meta.name을 그대로
+      // Content-Disposition 파일명으로 쓴다).
+      displayName = `${displayName.replace(/\.[^./]+$/, '')}.xlsx`;
+      ext = 'xlsx';
+    }
+  }
+  const converter = findConverter(ext);
+  if (!converter) {
+    return {
+      code: 415,
+      body: {
+        success: false,
+        error: `지원하지 않는 형식입니다: .${ext || '(없음)'} — 지원 형식: ${supportedExtensions.join(', ')}`,
+      },
+    };
+  }
+
+  const id = newDocumentId();
+  try {
+    await store.saveOriginal(id, ext, data);
+    const meta: DocumentMeta = {
+      id,
+      name: displayName,
+      ext,
+      status: 'processing',
+      pageCount: 0,
+      createdAt: new Date().toISOString(),
+      progress: 10,
+    };
+    await store.writeMeta(meta);
+    await recordAudit({
+      type: 'uploaded',
+      docId: id,
+      detail: callerProject ? `${originalFilename} (caller=${callerProject})` : originalFilename,
+    });
+    // 변환은 백그라운드로 진행하고 즉시 응답한다. 클라이언트는 상태를 폴링한다.
+    if (GRID_VIEW_EXTS.has(ext)) {
+      void runGridExtraction(app, meta);
+    } else {
+      void runConversion(app, converter, meta);
+    }
+    return { code: 201, body: { success: true, data: meta } };
+  } catch (error) {
+    app.log.error(error, 'upload persisting failed');
+    return { code: 500, body: { success: false, error: '업로드 저장에 실패했습니다.' } };
   }
 }
 
@@ -182,45 +282,36 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ success: false, error: '업로드 요청을 처리할 수 없습니다.' });
     }
 
-    const ext = path.extname(file.filename).slice(1).toLowerCase();
-    const converter = findConverter(ext);
-    if (!converter) {
-      return reply.code(415).send({
-        success: false,
-        error: `지원하지 않는 형식입니다: .${ext || '(없음)'} — 지원 형식: ${supportedExtensions.join(', ')}`,
-      });
-    }
-
-    const id = newDocumentId();
-    try {
-      await store.saveOriginal(id, ext, data);
-      const meta: DocumentMeta = {
-        id,
-        name: file.filename,
-        ext,
-        status: 'processing',
-        pageCount: 0,
-        createdAt: new Date().toISOString(),
-        progress: 10,
-      };
-      await store.writeMeta(meta);
-      await recordAudit({
-        type: 'uploaded',
-        docId: id,
-        detail: callerProject ? `${file.filename} (caller=${callerProject})` : file.filename,
-      });
-      // 변환은 백그라운드로 진행하고 즉시 응답한다. 클라이언트는 상태를 폴링한다.
-      if (GRID_VIEW_EXTS.has(ext)) {
-        void runGridExtraction(app, meta);
-      } else {
-        void runConversion(app, converter, meta);
-      }
-      return await reply.code(201).send({ success: true, data: meta });
-    } catch (error) {
-      request.log.error(error, 'upload persisting failed');
-      return reply.code(500).send({ success: false, error: '업로드 저장에 실패했습니다.' });
-    }
+    const result = await ingestUpload(app, file.filename, data, callerProject);
+    return await reply.code(result.code).send(result.body);
   });
+
+  app.post<{ Querystring: { filename: string } }>(
+    '/api/documents/stream',
+    {
+      preHandler: requireApiKey,
+      schema: {
+        querystring: {
+          type: 'object',
+          required: ['filename'],
+          properties: { filename: { type: 'string', minLength: 1, maxLength: 300 } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const callerProject = (request as ApiKeyAuthenticatedRequest).callerProject;
+      // Content-Type: application/octet-stream 요청만 여기 닿는다(app.ts에 등록한 원시 바이트
+      // 파서). multipart 경계를 만들 필요 없이 파일 바이트를 요청 본문에 그대로 실어 보내는
+      // 쪽을 위한 경로 — 같은 서버에 파일이 이미 있는 다른 프로젝트가 그 바이트를 파이프로
+      // 그대로 흘려보낼 때 특히 유용하다(디스크에 다시 쓰지 않고 스트리밍).
+      const data = request.body as Buffer;
+      if (!data || data.length === 0) {
+        return reply.code(400).send({ success: false, error: '업로드된 파일이 없습니다.' });
+      }
+      const result = await ingestUpload(app, request.query.filename, data, callerProject);
+      return await reply.code(result.code).send(result.body);
+    },
+  );
 
   app.get<{ Params: { id: string } }>('/api/documents/:id', async (request, reply) => {
     const meta = await store.readMeta(request.params.id);

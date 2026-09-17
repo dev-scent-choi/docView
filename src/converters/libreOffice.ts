@@ -343,6 +343,55 @@ export async function convertDxfToSvg(dxfPath: string, targetSvgPath: string): P
 }
 
 /**
+ * 레거시 스프레드시트(xls/ods) → xlsx. 이 서비스의 그리드 뷰·동시편집은 전부 xlsx(zip+XML) 구조를
+ * 전제로 짜여 있어(스프레드시트.ts/room.ts 어디에도 BIFF 바이너리(.xls) 파서가 없다) xls를 실제로
+ * "편집"하려면 업로드 시점에 xlsx로 정규화하는 것 외에 다른 방법이 없다. documents.ts의 업로드
+ * 핸들러가 findConverter를 부르기 전, ext/데이터를 아예 xlsx로 바꿔치기해 호출한다 — 그 뒤로는
+ * 시스템 전체가 원래부터 xlsx가 올라온 것처럼 동작한다(그리드 뷰·동시편집 전부 자동으로 켜짐).
+ * 변환 후로는 다운로드도 xlsx로 내려간다(원본 .xls 바이트는 보존하지 않는다) — 편집 자체가 xlsx
+ * 모델을 통해서만 가능하므로 "편집됐을 수도 있는 문서"를 원본 바이너리 형식으로 되돌려 줄 방법이
+ * 애초에 없다.
+ */
+export async function convertLegacySpreadsheetToXlsx(
+  sourcePath: string,
+  sourceExt: 'xls' | 'ods',
+  targetXlsxPath: string,
+): Promise<void> {
+  if (!sofficePath) {
+    throw new Error('LibreOffice(soffice)를 찾을 수 없습니다.');
+  }
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docview-legacyxlsx-'));
+  try {
+    const stagedSource = path.join(workDir, `source.${sourceExt}`);
+    await fs.copyFile(sourcePath, stagedSource);
+    await withProfileSlot(async (profileDir) => {
+      await execFileAsync(
+        sofficePath,
+        [
+          '--headless',
+          '--norestore',
+          `-env:UserInstallation=${pathToFileURL(profileDir).href}`,
+          '--convert-to',
+          'xlsx',
+          '--outdir',
+          workDir,
+          stagedSource,
+        ],
+        { timeout: CONVERT_TIMEOUT_MS },
+      );
+    });
+    const produced = path.join(workDir, 'source.xlsx');
+    const stat = await fs.stat(produced).catch(() => null);
+    if (!stat || stat.size === 0) {
+      throw new Error('LibreOffice가 XLSX를 생성하지 못했습니다.');
+    }
+    await fs.copyFile(produced, targetXlsxPath);
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+/**
  * 서버 시작 시 프로필 풀을 미리 웜업해 첫 변환의 콜드 스타트(수 초)를 없앤다.
  * 각 슬롯에서 초소형 문서를 한 번씩 변환해 LibreOffice 프로필을 생성해 둔다.
  */
