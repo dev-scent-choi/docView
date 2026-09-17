@@ -491,11 +491,6 @@ function setupToolbar() {
    보였다. 대신 우선순위가 낮은 도구부터 실제 버튼 엘리먼트를 이 메뉴 안으로 옮긴다(엘리먼트를
    그대로 옮기므로 이미 걸려 있던 클릭 리스너가 그대로 살아있다 — 복제/재구현 불필요). */
 const TOOLBAR_OVERFLOW_PRIORITY = [
-  'translate-btn',
-  'draw-btn',
-  'erase-btn',
-  'contents-btn',
-  'undo-btn',
   'invert-btn',
   'measure-btn',
   'markup-toggle-btn',
@@ -1496,7 +1491,6 @@ async function initGridView() {
   document.getElementById('zoom-level').hidden = true;
   document.getElementById('zoom-fit-btn').hidden = true;
   document.getElementById('rotate-btn').hidden = true;
-  document.getElementById('page-view-btn').hidden = true;
   document.getElementById('page-jump-input').hidden = true;
   // "N/전체행" 정보는 이제 하단 grid-status-bar가 보여준다(예전엔 여기 상단 툴바에 작게 끼어 있었다).
   pageJumpTotal.hidden = true;
