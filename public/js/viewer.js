@@ -643,16 +643,18 @@ function setupPageJump() {
   pageJumpInput.addEventListener('focus', () => pageJumpInput.select());
 }
 
-/** "폭에 맞추기" — 페이지 실제 폭이 뷰포트 폭에 딱 맞도록 배율을 계산해 적용한다. */
+/** "너비에 맞추기"/"페이지에 맞추기" 토글 — 버튼은 지금 누르면 적용될 모드가 아니라, 방금
+ * 누른 결과 다음 클릭에 적용될 "다른" 모드를 보여준다(참고한 PDF 뷰어와 동일한 동작). */
+let zoomFitMode = 'width'; // 'width' | 'page'
+
 function setupZoomFit() {
   const btn = document.getElementById('zoom-fit-btn');
   if (!btn) return;
-  btn.addEventListener('click', () => {
-    const containerWidth = pagesContainer.clientWidth - 32; // 좌우 여백 감안
-    const pageWidthPt = (pageDimensions && pageDimensions[0]?.w) || 612;
-    const percent = Math.round((containerWidth / pageWidthPt) * 100);
+  const widthIcon = btn.querySelector('.zoom-fit-icon-width');
+  const pageIcon = btn.querySelector('.zoom-fit-icon-page');
+
+  function snapToNearestStep(percent) {
     const clamped = Math.min(Math.max(percent, ZOOM_STEPS[0]), ZOOM_STEPS[ZOOM_STEPS.length - 1]);
-    // 가장 가까운 줌 단계로 스냅한다 — applyZoom()이 ZOOM_STEPS[zoomIndex] 기준으로 동작하므로.
     let nearestIndex = 0;
     let nearestDiff = Infinity;
     ZOOM_STEPS.forEach((step, i) => {
@@ -662,8 +664,38 @@ function setupZoomFit() {
         nearestIndex = i;
       }
     });
-    zoomIndex = nearestIndex;
+    return nearestIndex;
+  }
+
+  function widthFitPercent() {
+    const containerWidth = pagesContainer.clientWidth - 32; // 좌우 여백 감안
+    const pageWidthPt = (pageDimensions && pageDimensions[0]?.w) || 612;
+    return (containerWidth / pageWidthPt) * 100;
+  }
+
+  function pageFitPercent() {
+    // 페이지 전체(가로+세로)가 스크롤 없이 한 화면에 들어오도록, 폭 기준과 높이 기준 중
+    // 더 빡빡한 쪽을 쓴다. 높이는 "고정 툴바를 뺀 나머지 창 높이" 기준 — 폭 계산이
+    // pagesContainer(여러 페이지가 이어지는 스크롤 영역)를 쓰는 것과 달리, 여기선 한 페이지만
+    // 보이게 하는 게 목적이라 창 높이에서 실측 툴바 높이를 뺀 값을 쓴다.
+    const toolbarEl = document.getElementById('toolbar');
+    const availableHeight = window.innerHeight - toolbarEl.offsetHeight - 32; // 위아래 여백 감안(폭 계산과 같은 관례)
+    const pageHeightPt = (pageDimensions && pageDimensions[0]?.h) || 792;
+    return Math.min(widthFitPercent(), (availableHeight / pageHeightPt) * 100);
+  }
+
+  btn.addEventListener('click', () => {
+    zoomIndex = snapToNearestStep(zoomFitMode === 'width' ? widthFitPercent() : pageFitPercent());
     applyZoom();
+
+    zoomFitMode = zoomFitMode === 'width' ? 'page' : 'width';
+    const showingPageMode = zoomFitMode === 'page';
+    widthIcon.hidden = showingPageMode;
+    pageIcon.hidden = !showingPageMode;
+    const label = showingPageMode ? '페이지에 맞추기' : '너비에 맞추기';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+
     btn.setAttribute('aria-pressed', 'true');
     setTimeout(() => btn.setAttribute('aria-pressed', 'false'), 400);
   });

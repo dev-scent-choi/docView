@@ -73,8 +73,12 @@
         <button id="zoom-in" class="icon-btn" title="확대" aria-label="확대">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6"/><path d="M8 11h6"/></svg>
         </button>
-        <button id="zoom-fit-btn" class="icon-btn" title="폭에 맞추기" aria-label="폭에 맞추기" aria-pressed="false">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18"/><path d="m8 8-4 4 4 4"/><path d="m16 8 4 4-4 4"/></svg>
+        <!-- 너비/페이지 맞춤 토글 버튼 — 지금 누르면 적용될 모드가 아니라, 방금 누른 결과 다음
+             클릭에 적용될 "다른" 모드를 보여준다(참고한 PDF 뷰어와 동일). 아이콘 두 개를 같이
+             두고 viewer.js가 hidden으로 전환한다. -->
+        <button id="zoom-fit-btn" class="icon-btn" title="너비에 맞추기" aria-label="너비에 맞추기" aria-pressed="false">
+          <svg class="zoom-fit-icon-width" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18"/><path d="m8 8-4 4 4 4"/><path d="m16 8 4 4-4 4"/></svg>
+          <svg class="zoom-fit-icon-page" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M3 8V4h4"/><path d="M17 4h4v4"/><path d="M21 16v4h-4"/><path d="M7 20H3v-4"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
         </button>
         <!-- 확대 비율(%) 표시는 참고한 PDF 뷰어의 가운데 버튼 줄엔 없었다 — 요소 자체는
              남겨서(zoom-level 텍스트 갱신 로직이 계속 안전하게 동작하도록) 기본 숨김만 처리했다. -->
