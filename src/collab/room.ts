@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { WebSocket } from 'ws';
+import { unzipSync } from 'fflate';
 import * as decoding from 'lib0/decoding';
 import * as encoding from 'lib0/encoding';
 import * as Y from 'yjs';
@@ -75,8 +76,15 @@ import {
   type PerSlideContentsMap,
   type ShapeContentMap,
 } from '../pptx/collab.js';
+import { parseSlideVisuals } from '../pptx/slideContent.js';
 import { buildStoreSheetNameIndex, computeGridCellDisplayAsync, formatComputedValueForStorage } from '../xlsx/formulas.js';
-import { PPTX_SLIDE_CONTENTS_MAP, PPTX_SLIDES_ARRAY, type SlideEntry } from './pptxShared.js';
+import {
+  PPTX_SLIDE_CONTENTS_MAP,
+  PPTX_SLIDE_VISUALS_MAP,
+  PPTX_SLIDES_ARRAY,
+  type SlideEntry,
+  type SlideVisual,
+} from './pptxShared.js';
 import {
   DOC_META_MAP,
   DOC_META_SAVED_AT_KEY,
@@ -1414,6 +1422,13 @@ async function flushToStore(room: Room): Promise<void> {
               slideContents.delete(key);
             }
           }
+          // slideVisuals도 slideContents와 정확히 같은 이유로 같은 트랜잭션에서 함께 정리한다 —
+          // 키 집합(survivingEntryIds)이 같고, 이 값은 재키잉이 필요 없는 plain 배열이라(Y.Map이
+          // 아님) 위 slideContents 루프처럼 타입 검증까지 할 필요는 없다.
+          const slideVisuals = ydoc.getMap<readonly SlideVisual[]>(PPTX_SLIDE_VISUALS_MAP);
+          for (const key of Array.from(slideVisuals.keys())) {
+            if (!survivingIdSet.has(key)) slideVisuals.delete(key);
+          }
         });
       } finally {
         room.suppressAutosaveReschedule = false;
@@ -1810,15 +1825,23 @@ async function doSeedSlideContent(room: Room, slideEntryId: string, duplicateOfI
   const entry = slidesArray.toArray().find((e) => e.id === slideEntryId);
   if (!entry) return; // 이미 삭제된 슬라이드를 늦게 요청한 경우 — 조용히 무시
 
+  // 이미지·단순 도형·표/차트/스마트아트(전부 편집 대상이 아닌 표시 전용) — slideContents와
+  // 별개 맵이라 실패해도(아래 catch) 텍스트박스 편집 자체는 막지 않는다.
+  const slideVisuals = room.ydoc.getMap<readonly SlideVisual[]>(PPTX_SLIDE_VISUALS_MAP);
+
   if (duplicateOfId) {
     // 바깥쪽 dedup 래퍼(seedSlideContentIfNeeded)를 통해 재귀한다 — 그래야 같은 소스 슬라이드를
     // 동시에 가리키는 여러 복제 요청도 소스 시딩 자체는 한 번만 돈다.
-    await seedSlideContentIfNeeded(room, duplicateOfId); // 소스 먼저 채운다
+    await seedSlideContentIfNeeded(room, duplicateOfId); // 소스 먼저 채운다(텍스트+표시용 둘 다)
     duplicateSlideContent(slideContents, duplicateOfId, slideEntryId);
+    if (!slideVisuals.has(slideEntryId)) {
+      slideVisuals.set(slideEntryId, slideVisuals.get(duplicateOfId) ?? []);
+    }
     return;
   }
   if (entry.kind === 'blank') {
     slideContents.set(slideEntryId, new Y.Map<ShapeContentMap>());
+    if (!slideVisuals.has(slideEntryId)) slideVisuals.set(slideEntryId, []);
     return;
   }
   if (!entry.sourceSlidePart) return;
@@ -1827,6 +1850,14 @@ async function doSeedSlideContent(room: Room, slideEntryId: string, duplicateOfI
   // 방식으로 읽는다).
   const bytes = await store.readOriginal(room.docId, 'pptx');
   seedSlideContentFromXml(slideContents, slideEntryId, bytes, entry.sourceSlidePart);
+  if (!slideVisuals.has(slideEntryId)) {
+    try {
+      slideVisuals.set(slideEntryId, parseSlideVisuals(unzipSync(bytes), entry.sourceSlidePart));
+    } catch (error) {
+      console.warn(`슬라이드 표시용 이미지/도형/표 파싱 실패(slideEntryId=${slideEntryId}):`, error);
+      slideVisuals.set(slideEntryId, []);
+    }
+  }
 }
 
 function handleMessage(room: Room, conn: WebSocket, message: Uint8Array): void {

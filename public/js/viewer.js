@@ -2441,10 +2441,36 @@ function setupDrawingTools() {
   });
 }
 
+/** 커서 위치를 고정한 채 확대/축소한다 — pages 뷰의 zoomAtPoint와 같은 목적이지만 svg-scroll
+ * 자체가 스크롤 컨테이너라(window가 아니라) scrollLeft/Top만 다루면 된다. */
+function svgZoomAtPoint(nextIndex, clientX, clientY) {
+  const bounded = Math.max(0, Math.min(ZOOM_STEPS.length - 1, nextIndex));
+  if (bounded === zoomIndex) return;
+  const ratio = ZOOM_STEPS[bounded] / ZOOM_STEPS[zoomIndex];
+  const rect = svgScroll.getBoundingClientRect();
+  const contentX = svgScroll.scrollLeft + (clientX - rect.left);
+  const contentY = svgScroll.scrollTop + (clientY - rect.top);
+  zoomIndex = bounded;
+  applySvgTransform();
+  svgScroll.scrollLeft = contentX * ratio - (clientX - rect.left);
+  svgScroll.scrollTop = contentY * ratio - (clientY - rect.top);
+}
+
 /** 드래그로 도면을 끌어서 이동 — pages 뷰의 setupDrawingTools() 패닝과 달리 svg-scroll 자체가
  * 스크롤 컨테이너라(pages는 window가 세로 스크롤을 맡는 구조라 서로 다르다) scrollLeft/Top만
  * 다루면 된다. */
 function setupSvgPan() {
+  // Ctrl+휠: 커서 기준 확대/축소 (pages 뷰와 같은 단축키)
+  svgScroll.addEventListener(
+    'wheel',
+    (event) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      svgZoomAtPoint(zoomIndex + (event.deltaY < 0 ? 1 : -1), event.clientX, event.clientY);
+    },
+    { passive: false },
+  );
+
   let pan = null;
   svgScroll.addEventListener('mousedown', (event) => {
     if (event.button !== 0 && event.button !== 1) return;

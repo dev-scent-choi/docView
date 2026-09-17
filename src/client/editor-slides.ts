@@ -9,11 +9,13 @@ import { ySyncPlugin, yCursorPlugin, yUndoPlugin, ySyncPluginKey, undo, redo } f
 import {
   PPTX_SLIDES_ARRAY,
   PPTX_SLIDE_CONTENTS_MAP,
+  PPTX_SLIDE_VISUALS_MAP,
   NEW_TEXTBOX_WIDTH_RATIO,
   NEW_TEXTBOX_HEIGHT_RATIO,
   shouldBlockAddTextbox,
   type SlideEntry,
   type SlideShapeMeta,
+  type SlideVisual,
 } from '../collab/pptxShared.js';
 import { DOC_META_MAP, DOC_META_SAVED_AT_KEY, DOC_META_SAVE_ERROR_AT_KEY } from '../collab/gridShared.js';
 import { pickPresenceColorForName, renderPresenceAvatars } from './presence.js';
@@ -72,6 +74,10 @@ let dragFromIndex: number | null = null;
 // 모듈 스코프 함수라 provider/slideContents도 모듈 스코프에 있어야 접근할 수 있다.
 let provider: WebsocketProvider;
 let slideContents: Y.Map<PerSlideContentsMap>;
+/** 이미지·단순 도형·표/차트/스마트아트(전부 표시 전용, 편집 불가) — slideContents와 별개 top-level
+ * 맵. room.ts가 slideContents와 같은 지연 시딩 트리거(MESSAGE_SLIDE_CONTENT_SUBSCRIBE)로 채우므로
+ * 클라이언트가 따로 구독을 보낼 필요는 없다(아래 observe로 도착을 감지해 다시 그리기만 한다). */
+let slideVisuals: Y.Map<readonly SlideVisual[]>;
 
 /**
  * 슬라이드 크기(EMU)를 캔버스 픽셀로 스케일한다. `/api/view/info`(ViewInfo)에는 슬라이드 크기
@@ -214,6 +220,40 @@ function showSlideUnavailablePlaceholder(): void {
   canvasEl.append(placeholder);
 }
 
+/** 이미지/단순 도형/표/차트·스마트아트 자리표시자 하나를 표시 전용 엘리먼트로 그린다 —
+ * 텍스트박스(.slide-textbox)와 달리 클릭해도 편집기가 뜨지 않는다(pointer-events는 CSS에서
+ * .slide-visual에 none으로 꺼둔다). */
+function renderSlideVisual(visual: SlideVisual): HTMLElement {
+  const el = document.createElement(visual.kind === 'table' ? 'table' : 'div');
+  el.className = `slide-visual slide-visual-${visual.kind}`;
+  el.style.left = `${emuToPx(visual.x ?? 0)}px`;
+  el.style.top = `${emuToPx(visual.y ?? 0)}px`;
+  el.style.width = `${emuToPx(visual.w ?? 0)}px`;
+  el.style.height = `${emuToPx(visual.h ?? 0)}px`;
+
+  if (visual.kind === 'image' && visual.dataUri) {
+    const img = document.createElement('img');
+    img.src = visual.dataUri;
+    img.alt = '';
+    el.append(img);
+  } else if (visual.kind === 'shape') {
+    if (visual.fill) el.style.background = visual.fill;
+  } else if (visual.kind === 'table' && visual.rows) {
+    for (const row of visual.rows) {
+      const tr = document.createElement('tr');
+      for (const cellText of row) {
+        const td = document.createElement('td');
+        td.textContent = cellText;
+        tr.append(td);
+      }
+      el.append(tr);
+    }
+  } else if (visual.kind === 'placeholder') {
+    el.textContent = visual.label ?? '콘텐츠';
+  }
+  return el;
+}
+
 /**
  * 오른쪽 캔버스에 activeSlideId 슬라이드의 텍스트박스를 실제 위치로 배치하고, 각 텍스트박스에
  * pptxTextSchema 기반 ProseMirror EditorView를 마운트한다(y-prosemirror 바인딩은 editor.ts의
@@ -259,6 +299,12 @@ function renderCanvasForSlide(entryId: string): void {
   canvasEl.style.width = `${emuToPx(SLIDE_W_EMU)}px`;
   canvasEl.style.height = `${emuToPx(SLIDE_H_EMU)}px`;
   canvasEl.replaceChildren();
+
+  // 이미지·단순 도형·표/차트·스마트아트 자리표시자 — 편집 대상이 아니라 텍스트박스보다 먼저
+  // 그려서(DOM 순서상 뒤에 오는 형제가 위에 쌓이므로) 항상 텍스트박스 아래에 깔리게 한다.
+  for (const visual of slideVisuals.get(entryId) ?? []) {
+    canvasEl.append(renderSlideVisual(visual));
+  }
 
   const perSlide = slideContents.get(entryId);
   if (!perSlide) {
@@ -602,6 +648,7 @@ async function main(): Promise<void> {
   const ydoc = new Y.Doc();
   slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
   slideContents = ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+  slideVisuals = ydoc.getMap<readonly SlideVisual[]>(PPTX_SLIDE_VISUALS_MAP);
   const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   provider = new WebsocketProvider(`${wsProtocol}//${location.host}/ws/edit`, info.docId, ydoc, {
     params: { token },
@@ -655,6 +702,11 @@ async function main(): Promise<void> {
       pendingSlideSubscriptions.delete(key);
       pendingDuplicateSources.delete(key);
     }
+    if (activeSlideId && event.keysChanged.has(activeSlideId)) renderCanvasForSlide(activeSlideId);
+  });
+  // slideVisuals는 slideContents와 별개 타이밍에(약간 늦게) 채워진다(room.ts 참고) — 텍스트박스가
+  // 먼저 보이고 이미지/도형/표가 조금 뒤에 나타나는 정도는 자연스러운 점진적 렌더링이라 괜찮다.
+  slideVisuals.observe((event) => {
     if (activeSlideId && event.keysChanged.has(activeSlideId)) renderCanvasForSlide(activeSlideId);
   });
   // Task 8이 남겨 둔 훅 — 슬라이드를 고를 때마다 오른쪽 캔버스를 그 슬라이드 내용으로 채운다.

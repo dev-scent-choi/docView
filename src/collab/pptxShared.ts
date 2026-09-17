@@ -40,6 +40,32 @@ export interface SlideShapeMeta {
   readonly h: number | null;
 }
 
+/**
+ * slideVisuals.get(slideEntryId) -> readonly SlideVisual[] (일반 배열 — Yjs 공유 타입이 아니라
+ * 항상 통째로 교체되는 순수 값이다). 이미지·단순 도형(색만 있고 글자 없음)·표·차트/스마트아트
+ * 자리표시자처럼 "편집 대상이 아니라 화면에 보여주기만 하는" 요소들 — slideContents(텍스트박스,
+ * 협업 편집 대상)와 별도 맵에 두는 이유는 duplicateSlideContent/exportPptxFromSlides가 이미
+ * "모든 항목은 {meta, content} 모양의 도형이다"를 전제로 짜여 있어서, 그 전제를 깨지 않고
+ * 완전히 병렬로 추가하기 위함이다. 내보낼 때 이 값을 쓰지 않는다 — 원본 XML을 그대로 복사하는
+ * 기존 export 경로가 이미 이 요소들을 바이트 그대로 보존한다. */
+export const PPTX_SLIDE_VISUALS_MAP = 'slideVisuals';
+
+export interface SlideVisual {
+  readonly kind: 'image' | 'shape' | 'table' | 'placeholder';
+  readonly x: number | null;
+  readonly y: number | null;
+  readonly w: number | null;
+  readonly h: number | null;
+  /** kind:'image' — data: URI(원본 미디어 바이트를 base64로 그대로 인라인) */
+  readonly dataUri?: string;
+  /** kind:'shape' — 단색 채우기(#RRGGBB), 없으면 채우기 없는 도형 */
+  readonly fill?: string;
+  /** kind:'table' — 행 단위 셀 텍스트(행렬, 서식 없이 텍스트만) */
+  readonly rows?: readonly (readonly string[])[];
+  /** kind:'placeholder' — 표시할 라벨(예: "차트", "스마트아트") */
+  readonly label?: string;
+}
+
 /** 새로 추가한(원본에 없던) 텍스트박스의 기본 위치/크기 — 슬라이드 중앙에 가로 60%, 세로 20%.
  * 표준 16:9 슬라이드 크기(12192000 x 6858000 EMU) 기준으로 잡되, 실제 슬라이드 크기가
  * 다르면 호출부가 비율로 다시 계산한다(이 상수는 "기본 비율"의 근거로만 쓴다). */

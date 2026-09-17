@@ -1,6 +1,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import type { Node as PMNode } from 'prosemirror-model';
 import { pptxTextSchema as schema } from './textSchema.js';
+import type { SlideVisual } from '../collab/pptxShared.js';
 
 export interface ParsedShape {
   readonly shapeId: string;
@@ -314,4 +315,160 @@ export function removeShape(slideXml: string, shapeId: string): string {
     throw new Error(`removeShape: shapeId ${shapeId}를 슬라이드 XML에서 찾지 못했습니다.`);
   }
   return result;
+}
+
+/* ==================== 표시 전용 요소(이미지·단순 도형·표/차트/스마트아트) ====================
+ * 아래 전부는 parseSlideShapes(편집 대상 텍스트박스)와 완전히 별개 경로다 — 결과가
+ * SlideVisual[]로 slideVisuals(협업 편집 상태와 무관한 표시 전용 맵)에만 쓰이고, 절대
+ * export되지 않는다(그 요소들이 있던 자리는 원본 XML 그대로 복사되므로 여기서 뭘 하든
+ * 저장되는 파일에는 영향이 없다). */
+
+/** .rels 파일에서 "rId → Target" 매핑만 뽑는다(src/pptx/collab.ts의 slideRelsMap과 같은 패턴,
+ * 이 파일은 그쪽을 import할 이유가 없을 만큼 단순해 그대로 복제했다). */
+function relsMap(relsXml: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const relRe = /<Relationship\b[^>]*\/>/g;
+  for (const relTag of relsXml.match(relRe) ?? []) {
+    const idMatch = /Id="(rId\d+)"/.exec(relTag);
+    const targetMatch = /Target="([^"]+)"/.exec(relTag);
+    if (idMatch && targetMatch) map.set(idMatch[1], targetMatch[1]);
+  }
+  return map;
+}
+
+/** .rels의 Target(예: "../media/image1.png")을 슬라이드 파트 기준 zip 내부 절대 경로로 푼다. */
+function resolveRelativePath(basePart: string, target: string): string {
+  if (target.startsWith('/')) return target.slice(1);
+  const stack = basePart.split('/').slice(0, -1);
+  for (const part of target.split('/')) {
+    if (part === '..') stack.pop();
+    else if (part !== '.') stack.push(part);
+  }
+  return stack.join('/');
+}
+
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  bmp: 'image/bmp',
+  svg: 'image/svg+xml',
+  webp: 'image/webp',
+  // emf/wmf/tiff 등은 의도적으로 뺐다 — 브라우저가 <img>로 직접 그릴 수 없는 포맷이라
+  // data URI를 만들어봐야 화면에 아무것도 안 나온다(깨진 이미지 아이콘보다는 그냥 생략이 낫다).
+};
+
+function fillColorFromSpPr(spPr: XmlNode | undefined): string | undefined {
+  const solidFill = spPr?.['a:solidFill'] as XmlNode | undefined;
+  const srgbClr = solidFill?.['a:srgbClr'] as XmlNode | undefined;
+  const val = srgbClr?.['@_val'] as string | undefined;
+  // a:schemeClr(테마 참조 색, 예: "accent1")는 테마 XML까지 읽어야 풀리므로 이번 범위에서는
+  // 생략한다 — 채우기 없이 위치만 정확한 도형으로 표시된다(완전히 안 보이는 것보다는 낫다).
+  return val ? `#${val}` : undefined;
+}
+
+function graphicFrameXfrm(gf: XmlNode) {
+  const xfrm = gf['p:xfrm'] as XmlNode | undefined; // 다른 도형과 달리 p:spPr 없이 바로 p:xfrm
+  const off = xfrm?.['a:off'] as XmlNode | undefined;
+  const ext = xfrm?.['a:ext'] as XmlNode | undefined;
+  return { x: emuAttr(off, '@_x'), y: emuAttr(off, '@_y'), w: emuAttr(ext, '@_cx'), h: emuAttr(ext, '@_cy') };
+}
+
+/** <a:tc>(표 셀) 하나의 텍스트만 뽑는다 — 서식은 버리고 문단은 줄바꿈으로 잇는다(표는 편집
+ * 대상이 아니라 화면 표시용이라 이 정도 단순화로 충분하다). */
+function tableCellText(tc: XmlNode): string {
+  const txBody = tc['a:txBody'] as XmlNode | undefined;
+  if (!txBody) return '';
+  return asArray<XmlNode>(txBody['a:p'] as XmlNode | XmlNode[] | undefined)
+    .map((p) =>
+      asArray<XmlNode>(p['a:r'] as XmlNode | XmlNode[] | undefined)
+        .map((r) => String((r['a:t'] as string | number | undefined) ?? ''))
+        .join(''),
+    )
+    .join('\n');
+}
+
+const TABLE_GRAPHIC_URI = 'http://schemas.openxmlformats.org/drawingml/2006/table';
+const CHART_GRAPHIC_URI = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+
+/** 슬라이드 XML 안의 이미지(p:pic)·글자 없는 단순 도형(p:sp)·표/차트/스마트아트
+ * (p:graphicFrame)를 화면 표시용으로 뽑는다. 표는 셀 텍스트까지 그리고, 차트·스마트아트는
+ * (렌더링 엔진 없이는 실제로 그릴 수 없어) 위치만 맞는 자리표시자로 남긴다. */
+export function parseSlideVisuals(zipEntries: Record<string, Uint8Array>, sourceSlidePart: string): SlideVisual[] {
+  const slideXmlBytes = zipEntries[`ppt/slides/${sourceSlidePart}`];
+  if (!slideXmlBytes) return [];
+  const slideXml = Buffer.from(slideXmlBytes).toString('utf-8');
+  const relsBytes = zipEntries[`ppt/slides/_rels/${sourceSlidePart}.rels`];
+  const rels = relsBytes ? relsMap(Buffer.from(relsBytes).toString('utf-8')) : new Map<string, string>();
+
+  function resolveImageDataUri(rId: string | undefined): string | undefined {
+    if (!rId) return undefined;
+    const target = rels.get(rId);
+    if (!target) return undefined;
+    const normalized = resolveRelativePath(`ppt/slides/${sourceSlidePart}`, target);
+    const mediaBytes = zipEntries[normalized];
+    if (!mediaBytes) return undefined;
+    const ext = normalized.split('.').pop()?.toLowerCase() ?? '';
+    const mime = IMAGE_MIME_BY_EXT[ext];
+    if (!mime) return undefined;
+    return `data:${mime};base64,${Buffer.from(mediaBytes).toString('base64')}`;
+  }
+
+  const parsed = parser.parse(slideXml) as XmlNode;
+  const sld = parsed['p:sld'] as XmlNode;
+  const spTree = (sld['p:cSld'] as XmlNode)['p:spTree'] as XmlNode;
+  const visuals: SlideVisual[] = [];
+
+  for (const pic of asArray<XmlNode>(spTree['p:pic'] as XmlNode | XmlNode[] | undefined)) {
+    const spPr = pic['p:spPr'] as XmlNode | undefined;
+    const xfrm = spPr?.['a:xfrm'] as XmlNode | undefined;
+    const off = xfrm?.['a:off'] as XmlNode | undefined;
+    const ext = xfrm?.['a:ext'] as XmlNode | undefined;
+    const blip = (pic['p:blipFill'] as XmlNode | undefined)?.['a:blip'] as XmlNode | undefined;
+    const dataUri = resolveImageDataUri(blip?.['@_r:embed'] as string | undefined);
+    if (!dataUri) continue; // 관계 유실 또는 브라우저가 못 그리는 포맷 — 자리표시자 없이 생략
+    visuals.push({
+      kind: 'image',
+      x: emuAttr(off, '@_x'),
+      y: emuAttr(off, '@_y'),
+      w: emuAttr(ext, '@_cx'),
+      h: emuAttr(ext, '@_cy'),
+      dataUri,
+    });
+  }
+
+  for (const sp of asArray<XmlNode>(spTree['p:sp'] as XmlNode | XmlNode[] | undefined)) {
+    if (sp['p:txBody']) continue; // 텍스트박스는 parseSlideShapes가 이미 편집 대상으로 다룬다
+    const spPr = sp['p:spPr'] as XmlNode | undefined;
+    const xfrm = spPr?.['a:xfrm'] as XmlNode | undefined;
+    const off = xfrm?.['a:off'] as XmlNode | undefined;
+    const ext = xfrm?.['a:ext'] as XmlNode | undefined;
+    visuals.push({
+      kind: 'shape',
+      x: emuAttr(off, '@_x'),
+      y: emuAttr(off, '@_y'),
+      w: emuAttr(ext, '@_cx'),
+      h: emuAttr(ext, '@_cy'),
+      fill: fillColorFromSpPr(spPr),
+    });
+  }
+
+  for (const gf of asArray<XmlNode>(spTree['p:graphicFrame'] as XmlNode | XmlNode[] | undefined)) {
+    const { x, y, w, h } = graphicFrameXfrm(gf);
+    const graphicData = (gf['a:graphic'] as XmlNode | undefined)?.['a:graphicData'] as XmlNode | undefined;
+    const uri = graphicData?.['@_uri'] as string | undefined;
+    if (uri === TABLE_GRAPHIC_URI) {
+      const tbl = graphicData?.['a:tbl'] as XmlNode | undefined;
+      const rows = asArray<XmlNode>(tbl?.['a:tr'] as XmlNode | XmlNode[] | undefined).map((tr) =>
+        asArray<XmlNode>(tr['a:tc'] as XmlNode | XmlNode[] | undefined).map(tableCellText),
+      );
+      visuals.push({ kind: 'table', x, y, w, h, rows });
+    } else {
+      const label = uri === CHART_GRAPHIC_URI ? '차트' : uri?.includes('/diagram') ? '스마트아트' : '콘텐츠';
+      visuals.push({ kind: 'placeholder', x, y, w, h, label });
+    }
+  }
+
+  return visuals;
 }

@@ -1400,6 +1400,47 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   min-height: 1em;
 }
 
+/* 이미지·단순 도형·표/차트·스마트아트 자리표시자 — 편집 대상이 아니라(x/y/w/h만 원본 그대로
+   표시) 클릭해도 아무 반응이 없어야 하므로 pointer-events를 꺼서 뒤에 겹칠 수 있는 텍스트박스
+   조작을 방해하지 않는다. slide-textbox보다 먼저 DOM에 붙어(renderCanvasForSlide) 항상 그 아래
+   깔린다. */
+.slide-visual {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.slide-visual-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill; /* 원본 도형의 w/h를 그대로 채운다(PowerPoint의 실제 배치와 같은 비율) */
+}
+.slide-visual-table {
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  color: var(--color-ink);
+  table-layout: fixed;
+}
+.slide-visual-table td {
+  border: 1px solid var(--color-line);
+  padding: 2px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.slide-visual-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--color-line);
+  background: rgba(0, 0, 0, 0.03);
+  color: var(--color-ink-soft);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
 /* 텍스트박스 우상단 삭제(×) 버튼 — 평소엔 숨겨져 있다가 텍스트박스에 마우스를 올리거나(호버)
    포커스가 안에 들어오면(예: 키보드로 탐색) 보인다. .slide-card-actions의 hover-reveal
    패턴(이 파일 위쪽)과 같은 의도이나, 텍스트박스는 상시 하나의 작은 원형 버튼만 필요해 opacity
