@@ -134,6 +134,16 @@
 
   <main id="pages" class="pages-container"></main>
 
+  <!-- 도면(dxf/dwg) 벡터 뷰 — svg-scroll이 스크롤/패닝을, 그 안의 svg-canvas가 확대·회전
+       transform을 각각 맡는다(pages-container처럼 컨테이너 자체를 확대하면 스크롤 위치 기준이
+       매번 바뀌어 다루기 번거롭다). 실제 <svg>는 viewer.js가 fetch해서 이 안에 그대로 주입한다
+       (인라인 svg라야 래스터화 없이 어떤 배율에서도 선명하다). -->
+  <div id="svg-view" class="svg-view" hidden>
+    <div id="svg-scroll" class="svg-scroll">
+      <div id="svg-canvas" class="svg-canvas"></div>
+    </div>
+  </div>
+
   <main id="grid" class="grid-container" hidden>
     <!-- 편집기(editor-grid.html)의 수식 입력줄(.formula-bar: 이름 상자 + fx + 셀 내용)과 같은 자리
          (툴바 바로 밑, 그리드 내용 바로 위)에 두는 읽기 전용 버전 — 선택한 칸의 실제 값을 폭 제한

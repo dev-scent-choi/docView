@@ -623,6 +623,26 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /** 도면(dxf/dwg) 벡터 뷰 — LibreOffice가 만든 SVG를 그대로 내려준다(래스터 재변환 없음). */
+  app.get<{ Querystring: TokenQuery }>(
+    '/api/view/svg',
+    { schema: { querystring: tokenQuerySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if ((view.meta.viewKind ?? 'pages') !== 'svg') {
+        return reply.code(400).send({ success: false, error: '도면 벡터 뷰 문서가 아닙니다.' });
+      }
+      try {
+        const svg = await store.readDerived(view.meta.id, 'svg');
+        return await reply.type('image/svg+xml').header('cache-control', 'private, no-store').send(svg);
+      } catch (error) {
+        request.log.error(error, 'svg view failed');
+        return reply.code(500).send({ success: false, error: 'SVG를 불러오지 못했습니다.' });
+      }
+    },
+  );
+
   /** 그리드 메타: 시트 목록·크기·병합·스타일 팔레트 (셀 데이터 제외) */
   app.get<{ Querystring: TokenQuery }>(
     '/api/view/grid/meta',

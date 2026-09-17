@@ -8,8 +8,9 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const EXT_PATTERN = /^[a-z0-9]{1,10}$/;
 
 /** 변환 산출물 종류: pdf(페이지 뷰·출력용) / grid(스프레드시트 그리드 뷰 JSON) / markup(리뷰 코멘트 JSON)
- * / pagesizes(PDF 페이지 크기 배열, 뷰어 첫 화면 속도용) / gridindex(그리드 JSONL 줄 오프셋, 동일 목적) */
-export type DerivedKind = 'pdf' | 'grid' | 'markup' | 'pagesizes' | 'gridindex';
+ * / pagesizes(PDF 페이지 크기 배열, 뷰어 첫 화면 속도용) / gridindex(그리드 JSONL 줄 오프셋, 동일 목적)
+ * / svg(도면 dxf/dwg의 벡터 뷰 — pdf와 별개로 열람 전용 부가 산출물, 실패해도 pdf가 그대로 폴백이다) */
+export type DerivedKind = 'pdf' | 'grid' | 'markup' | 'pagesizes' | 'gridindex' | 'svg';
 
 /** kind별 파일 확장자 매핑 — 한 곳에서만 관리해, 새 kind를 추가하고 여기 추가하지 않으면
  * (derivedPath의 옛 삼항 체인처럼 조용히 엉뚱한 파일에 매핑되는 대신) 타입 오류로 바로 드러난다. */
@@ -19,6 +20,7 @@ const DERIVED_SUFFIX: Record<DerivedKind, string> = {
   markup: 'markup.json',
   pagesizes: 'pagesizes.json',
   gridindex: 'gridindex.json',
+  svg: 'svg',
 };
 const DERIVED_KINDS = Object.keys(DERIVED_SUFFIX) as readonly DerivedKind[];
 

@@ -6,7 +6,9 @@ import { requireApiKey, type ApiKeyAuthenticatedRequest } from '../apiKeyAuth.js
 import { recordAudit } from '../audit.js';
 import { forceCloseRoom } from '../collab/room.js';
 import { config } from '../config.js';
+import { convertDwgToDxf } from '../converters/dwgConverter.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
+import { convertDxfToSvg } from '../converters/libreOffice.js';
 import { ConversionError, type Converter } from '../converters/types.js';
 import { getPdfPageInfo, invalidateRenderCache } from '../rendering.js';
 import { issueViewToken } from '../security.js';
@@ -117,12 +119,37 @@ export async function convertToPdf(
   }
 }
 
+/** 도면(dxf/dwg) 전용 부가 산출물 — 확대해도 흐려지지 않는 벡터 뷰를 위해 PDF와 별개로
+ * SVG도 만든다. PDF 변환은 이미 끝난 뒤라 이게 실패해도(LibreOffice DXF→SVG 필터가 특정
+ * 도면을 못 그리거나 등) 문서 열람 자체는 막히지 않는다 — 그냥 기존 pages(PDF) 뷰로 남는다. */
+const VECTOR_SVG_EXTS = new Set(['dxf', 'dwg']);
+
+async function tryGenerateVectorSvg(meta: DocumentMeta): Promise<boolean> {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docview-svg-'));
+  try {
+    const sourcePath = path.join(workDir, `source.${meta.ext}`);
+    await fs.writeFile(sourcePath, await store.readOriginal(meta.id, meta.ext));
+    const dxfPath = meta.ext === 'dwg' ? await convertDwgToDxf(sourcePath, workDir) : sourcePath;
+    const targetSvgPath = path.join(workDir, 'out.svg');
+    await convertDxfToSvg(dxfPath, targetSvgPath);
+    await store.saveDerived(meta.id, 'svg', await fs.readFile(targetSvgPath));
+    return true;
+  } catch (error) {
+    console.warn(`도면 SVG 생성 실패 (PDF 뷰로 폴백, docId=${meta.id}):`, error);
+    return false;
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
 async function runConversion(app: FastifyInstance, converter: Converter, meta: DocumentMeta): Promise<void> {
   try {
     await store.writeMeta({ ...meta, progress: PROGRESS_CONVERTING });
     const { pageCount } = await convertToPdf(meta, converter);
     await store.writeMeta({ ...meta, progress: PROGRESS_PDF_DONE });
-    await store.writeMeta({ ...meta, status: 'ready', viewKind: 'pages', pageCount, progress: 100 });
+    const viewKind =
+      VECTOR_SVG_EXTS.has(meta.ext) && (await tryGenerateVectorSvg(meta)) ? 'svg' : 'pages';
+    await store.writeMeta({ ...meta, status: 'ready', viewKind, pageCount, progress: 100 });
     await recordAudit({ type: 'converted', docId: meta.id, detail: `${pageCount} pages` });
   } catch (error) {
     app.log.error(error, 'document conversion failed');

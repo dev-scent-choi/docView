@@ -5,6 +5,16 @@ const DEFAULT_ZOOM_INDEX = 3;
 
 const token = new URLSearchParams(location.search).get('token');
 const pagesContainer = document.getElementById('pages');
+const svgView = document.getElementById('svg-view');
+const svgScroll = document.getElementById('svg-scroll');
+const svgCanvas = document.getElementById('svg-canvas');
+/** 'pages' | 'grid' | 'svg' — 줌/회전 버튼이 문서 종류에 따라 서로 다른 렌더링(래스터 페이지 vs
+ * 벡터 svg)에 적용돼야 해서 init()이 이르게 채워두고 여러 setup 함수가 같이 참조한다. */
+let currentViewKind = 'pages';
+/** svg-canvas에 처음 주입했을 때(확대 1배 상태)의 실제 렌더 크기(px) — 이후 확대/맞춤 계산의
+ * 기준이 된다. transform:scale()이 걸린 뒤엔 getBoundingClientRect()가 그 배율까지 반영해
+ * 버리므로, 주입 직후 딱 한 번만 재서 고정해 둔다. */
+let svgNaturalSize = null;
 const docTitle = document.getElementById('doc-title');
 const pageJumpInput = document.getElementById('page-jump-input');
 const pageJumpTotal = document.getElementById('page-jump-total');
@@ -130,6 +140,16 @@ function applyZoom() {
   document.getElementById('zoom-out').disabled = zoomIndex === 0;
   document.getElementById('zoom-in').disabled = zoomIndex === ZOOM_STEPS.length - 1;
   scheduleQualityReload();
+}
+
+/** 도면(svg) 뷰 전용 — 래스터 재요청이 필요한 applyZoom()과 달리 인라인 svg는 그냥 CSS
+ * transform으로 확대/회전한다(항상 벡터라 어떤 배율에서도 흐려지지 않는다). */
+function applySvgTransform() {
+  const percent = ZOOM_STEPS[zoomIndex];
+  svgCanvas.style.transform = `scale(${percent / 100}) rotate(${rotateDeg}deg)`;
+  zoomLevelLabel.textContent = `${percent}%`;
+  document.getElementById('zoom-out').disabled = zoomIndex === 0;
+  document.getElementById('zoom-in').disabled = zoomIndex === ZOOM_STEPS.length - 1;
 }
 
 const tokenQuery = `token=${encodeURIComponent(token)}`;
@@ -398,11 +418,11 @@ function setupToolbar() {
 
   document.getElementById('zoom-in').addEventListener('click', () => {
     zoomIndex = Math.min(zoomIndex + 1, ZOOM_STEPS.length - 1);
-    applyZoom();
+    if (currentViewKind === 'svg') applySvgTransform(); else applyZoom();
   });
   document.getElementById('zoom-out').addEventListener('click', () => {
     zoomIndex = Math.max(zoomIndex - 1, 0);
-    applyZoom();
+    if (currentViewKind === 'svg') applySvgTransform(); else applyZoom();
   });
 
   const invertBtn = document.getElementById('invert-btn');
@@ -681,12 +701,33 @@ function setupZoomFit() {
     return (availableHeight / frameHeightAt100) * 100;
   }
 
+  // svg-canvas는 (pages와 달리) 자기 콘텐츠 크기로 자연스럽게 커지는 요소라 "100%=컨테이너 폭"
+  // 지름길이 없다 — svgNaturalSize(줌 1배일 때 실측한 실제 렌더 크기)를 기준으로 직접 비율을 잰다.
+  function svgWidthFitPercent() {
+    const availableWidth = svgScroll.clientWidth - 32;
+    const naturalWidth = svgNaturalSize?.w || availableWidth;
+    return (availableWidth / naturalWidth) * 100;
+  }
+  function svgPageFitPercent() {
+    const availableWidth = svgScroll.clientWidth - 32;
+    const availableHeight = svgScroll.clientHeight - 32;
+    const naturalWidth = svgNaturalSize?.w || availableWidth;
+    const naturalHeight = svgNaturalSize?.h || availableHeight;
+    return Math.min((availableWidth / naturalWidth) * 100, (availableHeight / naturalHeight) * 100);
+  }
+
   btn.addEventListener('click', () => {
-    // 이 컨테이너의 1120px 읽기용 폭 제한을 없애 브라우저 창 끝까지 채운다 — 폭/페이지
-    // 맞춤 둘 다 이 넓어진 폭을 기준으로 계산해야 "화면 끝까지"라는 의도가 맞는다.
-    pagesContainer.classList.add('pages-edge-to-edge');
-    zoomIndex = snapToNearestStep(zoomFitMode === 'width' ? 100 : pageFitPercent());
-    applyZoom();
+    let percent;
+    if (currentViewKind === 'svg') {
+      percent = zoomFitMode === 'width' ? svgWidthFitPercent() : svgPageFitPercent();
+    } else {
+      // 이 컨테이너의 1120px 읽기용 폭 제한을 없애 브라우저 창 끝까지 채운다 — 폭/페이지
+      // 맞춤 둘 다 이 넓어진 폭을 기준으로 계산해야 "화면 끝까지"라는 의도가 맞는다.
+      pagesContainer.classList.add('pages-edge-to-edge');
+      percent = zoomFitMode === 'width' ? 100 : pageFitPercent();
+    }
+    zoomIndex = snapToNearestStep(percent);
+    if (currentViewKind === 'svg') applySvgTransform(); else applyZoom();
 
     zoomFitMode = zoomFitMode === 'width' ? 'page' : 'width';
     const showingPageMode = zoomFitMode === 'page';
@@ -710,8 +751,12 @@ function setupRotate() {
   if (!btn) return;
   btn.addEventListener('click', () => {
     rotateDeg = (rotateDeg + 90) % 360;
-    pagesContainer.style.setProperty('--page-rotate', `${rotateDeg}deg`);
-    pagesContainer.classList.toggle('pages-rotated', rotateDeg !== 0);
+    if (currentViewKind === 'svg') {
+      applySvgTransform();
+    } else {
+      pagesContainer.style.setProperty('--page-rotate', `${rotateDeg}deg`);
+      pagesContainer.classList.toggle('pages-rotated', rotateDeg !== 0);
+    }
   });
 }
 
@@ -2396,6 +2441,60 @@ function setupDrawingTools() {
   });
 }
 
+/** 드래그로 도면을 끌어서 이동 — pages 뷰의 setupDrawingTools() 패닝과 달리 svg-scroll 자체가
+ * 스크롤 컨테이너라(pages는 window가 세로 스크롤을 맡는 구조라 서로 다르다) scrollLeft/Top만
+ * 다루면 된다. */
+function setupSvgPan() {
+  let pan = null;
+  svgScroll.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 && event.button !== 1) return;
+    pan = { x: event.clientX, y: event.clientY, left: svgScroll.scrollLeft, top: svgScroll.scrollTop };
+    svgScroll.classList.add('panning');
+    event.preventDefault();
+  });
+  document.addEventListener('mousemove', (event) => {
+    if (!pan) return;
+    svgScroll.scrollLeft = pan.left - (event.clientX - pan.x);
+    svgScroll.scrollTop = pan.top - (event.clientY - pan.y);
+  });
+  document.addEventListener('mouseup', () => {
+    pan = null;
+    svgScroll.classList.remove('panning');
+  });
+}
+
+/** 도면(dxf/dwg) 벡터 뷰 — LibreOffice가 만든 SVG를 그대로 주입해 보여준다. 페이지 개념이 없는
+ * 단일 도면이라 페이지 이동 컨트롤은 숨기고, 확대/축소/회전은 pages 뷰와 같은 버튼을 그대로
+ * 쓰되 svg-canvas에 transform을 걸어 처리한다(applySvgTransform). */
+async function initSvgView() {
+  document.getElementById('pages').hidden = true;
+  svgView.hidden = false;
+  document.getElementById('page-jump-input').hidden = true;
+  pageJumpTotal.hidden = true;
+  document.getElementById('page-view-btn').hidden = true;
+  // 마크업(리뷰 코멘트)은 pages 뷰의 .page-frame 좌표계에 얹는 구조라 svg 뷰엔 아직 없다.
+  document.getElementById('markup-add-btn').hidden = true;
+  document.getElementById('text-tool-btn').hidden = true;
+  document.getElementById('markup-include-wrap').hidden = true;
+
+  const svgRes = await fetch(`/api/view/svg?${tokenQuery}`);
+  if (!svgRes.ok) {
+    const body = await svgRes.json().catch(() => null);
+    throw new Error(body?.error || '도면을 불러오지 못했습니다.');
+  }
+  svgCanvas.innerHTML = await svgRes.text();
+
+  // 확대 1배 상태의 실제 렌더 크기를 기준값으로 고정해 둔다(이후 fit 계산에 사용).
+  const rect = svgCanvas.getBoundingClientRect();
+  svgNaturalSize = { w: rect.width, h: rect.height };
+
+  applySvgTransform();
+  setupZoomFit();
+  setupRotate();
+  setupFullscreen();
+  setupSvgPan();
+}
+
 async function init() {
   if (!token) {
     showError('열람 토큰이 없습니다. 발급받은 링크로 접속해 주세요.');
@@ -2420,6 +2519,7 @@ async function init() {
   pageCount = json.data.pageCount;
   pageDimensions = json.data.pages || null;
   permissions = json.data.permissions;
+  currentViewKind = json.data.viewKind || 'pages';
   applyWatermark(json.data.viewer);
 
   // 측정/도면 모드는 도면·PDF 도구다 — word 등 다른 문서 종류를 pages 뷰로 볼 때는 의미가 없으므로
@@ -2439,6 +2539,15 @@ async function init() {
       await initGridView();
     } catch (error) {
       showError(error.message || '스프레드시트를 불러오지 못했습니다.');
+    }
+    return;
+  }
+
+  if (json.data.viewKind === 'svg') {
+    try {
+      await initSvgView();
+    } catch (error) {
+      showError(error.message || '도면을 불러오지 못했습니다.');
     }
     return;
   }

@@ -303,6 +303,45 @@ async function convertWithSoffice(
   }
 }
 
+/** DXF → SVG (도면 열람 전용 부가 산출물). convertWithSoffice와 달리 산출 확장자가 .pdf가
+ * 아니라 이 함수만 따로 둔다 — 실패해도 PDF 변환은 이미 끝난 뒤라 문서 자체는 정상 열람된다
+ * (호출자인 dwgConverter/documents.ts가 실패를 잡아 viewKind를 그냥 'pages'로 둔다). */
+export async function convertDxfToSvg(dxfPath: string, targetSvgPath: string): Promise<void> {
+  if (!sofficePath) {
+    throw new Error('LibreOffice(soffice)를 찾을 수 없습니다.');
+  }
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docview-dxfsvg-'));
+  try {
+    const stagedSource = path.join(workDir, 'drawing.dxf');
+    await fs.copyFile(dxfPath, stagedSource);
+    await withProfileSlot(async (profileDir) => {
+      await execFileAsync(
+        sofficePath,
+        [
+          '--headless',
+          '--norestore',
+          `-env:UserInstallation=${pathToFileURL(profileDir).href}`,
+          '--infilter=DXF',
+          '--convert-to',
+          'svg:draw_svg_Export',
+          '--outdir',
+          workDir,
+          stagedSource,
+        ],
+        { timeout: CONVERT_TIMEOUT_MS },
+      );
+    });
+    const produced = path.join(workDir, 'drawing.svg');
+    const stat = await fs.stat(produced).catch(() => null);
+    if (!stat || stat.size === 0) {
+      throw new Error('LibreOffice가 SVG를 생성하지 못했습니다.');
+    }
+    await fs.copyFile(produced, targetSvgPath);
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
 /**
  * 서버 시작 시 프로필 풀을 미리 웜업해 첫 변환의 콜드 스타트(수 초)를 없앤다.
  * 각 슬롯에서 초소형 문서를 한 번씩 변환해 LibreOffice 프로필을 생성해 둔다.

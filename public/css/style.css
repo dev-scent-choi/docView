@@ -583,6 +583,49 @@ h2 {
    전체"이므로, 컨테이너 자체를 창 폭까지 넓히는 게 유일하게 필요한 조치다. */
 .pages-container.pages-edge-to-edge { max-width: none; }
 
+/* 도면(dxf/dwg) 벡터 뷰 — pages-container처럼 컨테이너 자체를 확대하는 대신, svg-canvas 하나에만
+   transform(scale+rotate)을 걸어 svg-scroll이 스크롤 기준을 그대로 유지하게 한다. */
+.svg-view {
+  position: fixed;
+  inset: 0;
+}
+.svg-scroll {
+  width: 100%;
+  height: 100%;
+  padding: 6.2rem 1rem 5rem;
+  overflow: auto;
+  cursor: grab;
+  /* svg-canvas를 항상 가운데 두고 그 자리에서 회전/확대하게 한다 — transform-origin:top left로
+     두면 90/270도 회전 시 도형 일부가 음수 좌표로 밀려나 스크롤로도 닿지 않는 문제가 있었다. */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.svg-scroll.panning { cursor: grabbing; }
+.svg-canvas {
+  position: relative;
+  transform-origin: center center;
+  flex: none;
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+/* pages 뷰의 .page-frame::before와 같은 열람용 워터마크 — viewer.js의 applyWatermark가 채우는
+   같은 --watermark-bg를 그대로 쓴다. */
+.svg-canvas::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background-image: var(--watermark-bg, none);
+  background-repeat: repeat;
+}
+/* 주입된 svg는 자기 자신의 width/height(mm 단위, LibreOffice가 실측 도면 크기로 내보냄)를 그대로
+   쓴다 — svg-canvas는 그 실제 렌더링 크기만큼 자연스럽게 감싸고(display:inline-block), 확대/축소는
+   svg 자체가 아니라 이 svg-canvas에 transform:scale()을 걸어서 처리한다(아래 applySvgTransform). */
+.svg-canvas svg { display: block; }
+
 .page-frame {
   position: relative;
   width: var(--page-width);

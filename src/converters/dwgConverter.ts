@@ -115,37 +115,42 @@ async function dwgToDxfWithLibredwg(sourcePath: string, workDir: string): Promis
   return dxfPath;
 }
 
+/** DWG → DXF만 떼어낸 버전 — dwgConverter.convert()(→PDF)와 dxfSvg.ts(→SVG) 둘 다 이 하나의
+ * ODA/LibreDWG 우선순위·재시도 로직을 공유한다. workDir는 호출자가 만들고 치운다. */
+export async function convertDwgToDxf(sourcePath: string, workDir: string): Promise<string> {
+  if (!dwg2dxfPath && !odaConverterPath) {
+    throw new ConversionError('DWG 변환기(LibreDWG 또는 ODA File Converter)가 설치되어 있지 않습니다.');
+  }
+  const version = await readDwgVersion(sourcePath).catch(() => '알 수 없음');
+  const attempts: Array<() => Promise<string>> = [];
+  if (odaConverterPath) attempts.push(() => dwgToDxfWithOda(sourcePath, workDir));
+  if (dwg2dxfPath) attempts.push(() => dwgToDxfWithLibredwg(sourcePath, workDir));
+
+  let lastError: unknown;
+  for (const attempt of attempts) {
+    try {
+      return await attempt();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  const hint = odaConverterPath
+    ? '도면 파일이 손상되었거나 지원되지 않는 형식입니다.'
+    : 'ODA File Converter(무료, opendesign.com)를 설치하면 이 형식도 지원됩니다.';
+  throw new ConversionError(`DWG 변환에 실패했습니다 (AutoCAD ${version} 형식). ${hint}`, {
+    cause: lastError,
+  });
+}
+
 export const dwgConverter: Converter = {
   name: 'dwg',
   extensions: ['dwg'],
   async convert(sourcePath, targetPdfPath, sourceName) {
-    if (!dwg2dxfPath && !odaConverterPath) {
-      throw new ConversionError('DWG 변환기(LibreDWG 또는 ODA File Converter)가 설치되어 있지 않습니다.');
-    }
-    const version = await readDwgVersion(sourcePath).catch(() => '알 수 없음');
     const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docview-dwg-'));
     try {
       const displayName = (sourceName ?? 'drawing.dwg').replace(/\.dwg$/i, '.dxf');
-      const attempts: Array<() => Promise<string>> = [];
-      if (odaConverterPath) attempts.push(() => dwgToDxfWithOda(sourcePath, workDir));
-      if (dwg2dxfPath) attempts.push(() => dwgToDxfWithLibredwg(sourcePath, workDir));
-
-      let lastError: unknown;
-      for (const attempt of attempts) {
-        try {
-          const dxfPath = await attempt();
-          await dxfConverter.convert(dxfPath, targetPdfPath, displayName);
-          return;
-        } catch (error) {
-          lastError = error;
-        }
-      }
-      const hint = odaConverterPath
-        ? '도면 파일이 손상되었거나 지원되지 않는 형식입니다.'
-        : 'ODA File Converter(무료, opendesign.com)를 설치하면 이 형식도 지원됩니다.';
-      throw new ConversionError(`DWG 변환에 실패했습니다 (AutoCAD ${version} 형식). ${hint}`, {
-        cause: lastError,
-      });
+      const dxfPath = await convertDwgToDxf(sourcePath, workDir);
+      await dxfConverter.convert(dxfPath, targetPdfPath, displayName);
     } finally {
       // Windows에서 백신 등이 방금 만든 임시 파일을 잠깐 스캔하는 동안 삭제가 EBUSY로 실패하는
       // 경우가 있어, 짧게 재시도한다.
