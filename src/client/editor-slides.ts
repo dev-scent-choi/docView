@@ -231,9 +231,9 @@ function renderSlideVisual(visual: SlideVisual): HTMLElement {
   el.style.width = `${emuToPx(visual.w ?? 0)}px`;
   el.style.height = `${emuToPx(visual.h ?? 0)}px`;
 
-  if (visual.kind === 'image' && visual.dataUri) {
+  if (visual.kind === 'image' && visual.mediaPath) {
     const img = document.createElement('img');
-    img.src = visual.dataUri;
+    img.src = `/api/view/slide-media?token=${encodeURIComponent(token ?? '')}&path=${encodeURIComponent(visual.mediaPath)}`;
     img.alt = '';
     el.append(img);
   } else if (visual.kind === 'shape') {

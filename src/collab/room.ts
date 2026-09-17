@@ -1849,10 +1849,15 @@ async function doSeedSlideContent(room: Room, slideEntryId: string, duplicateOfI
   // 캐시 필드가 없다 — 매번 store에서 다시 읽는다(flushToStore의 pptx 분기도 매 저장마다 같은
   // 방식으로 읽는다).
   const bytes = await store.readOriginal(room.docId, 'pptx');
-  seedSlideContentFromXml(slideContents, slideEntryId, bytes, entry.sourceSlidePart);
+  // unzip은 여기서 딱 한 번만 한다 — 큰 pptx(수십 MB급, 이미지가 많으면 압축 해제 자체가
+  // 무겁다)에서 텍스트 시딩과 표시용 시딩이 각자 다시 unzip하면 슬라이드 하나 열 때마다 같은
+  // 무거운 작업을 두 번 하게 되어(FINAL REVIEW: 실사용 21MB/49슬라이드 파일에서 콘텐츠 영역
+  // 표시가 눈에 띄게 느렸던 원인 중 하나) 체감 지연이 커진다.
+  const zipEntries = unzipSync(bytes);
+  seedSlideContentFromXml(slideContents, slideEntryId, zipEntries, entry.sourceSlidePart);
   if (!slideVisuals.has(slideEntryId)) {
     try {
-      slideVisuals.set(slideEntryId, parseSlideVisuals(unzipSync(bytes), entry.sourceSlidePart));
+      slideVisuals.set(slideEntryId, parseSlideVisuals(zipEntries, entry.sourceSlidePart));
     } catch (error) {
       console.warn(`슬라이드 표시용 이미지/도형/표 파싱 실패(slideEntryId=${slideEntryId}):`, error);
       slideVisuals.set(slideEntryId, []);

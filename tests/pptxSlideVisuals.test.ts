@@ -19,7 +19,7 @@ function zip(entries: Record<string, string | Uint8Array>): Record<string, Uint8
 }
 
 describe('parseSlideVisuals', () => {
-  test('extracts an image with its position and a resolved data URI', () => {
+  test('extracts an image with its position and its resolved zip media path', () => {
     const slideXml =
       XML_HEAD +
       '<p:pic><p:nvPicPr><p:cNvPr id="4" name="Picture"/></p:nvPicPr>' +
@@ -31,19 +31,17 @@ describe('parseSlideVisuals', () => {
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
       '<Relationship Id="rId2" Type=".../image" Target="../media/image1.png"/>' +
       '</Relationships>';
-    const pngBytes = new Uint8Array([137, 80, 78, 71]); // 진짜 PNG일 필요는 없다 — base64 인코딩 경로만 검증
-
     const entries = zip({
       'ppt/slides/slide1.xml': slideXml,
       'ppt/slides/_rels/slide1.xml.rels': relsXml,
-      'ppt/media/image1.png': pngBytes,
+      'ppt/media/image1.png': new Uint8Array([137, 80, 78, 71]), // 진짜 PNG일 필요는 없다 — 경로 해석 경로만 검증
     });
 
     const visuals = parseSlideVisuals(entries, 'slide1.xml');
 
-    expect(visuals).toHaveLength(1);
-    expect(visuals[0]).toMatchObject({ kind: 'image', x: 1000, y: 2000, w: 3000, h: 4000 });
-    expect(visuals[0].dataUri).toBe(`data:image/png;base64,${Buffer.from(pngBytes).toString('base64')}`);
+    expect(visuals).toEqual([
+      { kind: 'image', x: 1000, y: 2000, w: 3000, h: 4000, mediaPath: 'ppt/media/image1.png' },
+    ]);
   });
 
   test('skips an image whose media format the browser cannot render (emf)', () => {
@@ -62,6 +60,27 @@ describe('parseSlideVisuals', () => {
       'ppt/slides/slide1.xml': slideXml,
       'ppt/slides/_rels/slide1.xml.rels': relsXml,
       'ppt/media/image1.emf': new Uint8Array([1, 2, 3]),
+    });
+
+    expect(parseSlideVisuals(entries, 'slide1.xml')).toHaveLength(0);
+  });
+
+  test('skips an image whose relationship points at a media part missing from the zip', () => {
+    const slideXml =
+      XML_HEAD +
+      '<p:pic><p:nvPicPr><p:cNvPr id="4" name="Picture"/></p:nvPicPr>' +
+      '<p:blipFill><a:blip r:embed="rId2"/></p:blipFill>' +
+      '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1" cy="1"/></a:xfrm></p:spPr></p:pic>' +
+      XML_TAIL;
+    const relsXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId2" Type=".../image" Target="../media/missing.png"/>' +
+      '</Relationships>';
+    const entries = zip({
+      'ppt/slides/slide1.xml': slideXml,
+      'ppt/slides/_rels/slide1.xml.rels': relsXml,
+      // ppt/media/missing.png는 의도적으로 없다.
     });
 
     expect(parseSlideVisuals(entries, 'slide1.xml')).toHaveLength(0);

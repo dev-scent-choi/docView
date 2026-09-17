@@ -216,11 +216,10 @@ export type SlideContentsMap = Y.Map<PerSlideContentsMap>;
 export function seedSlideContentFromXml(
   slideContents: SlideContentsMap,
   slideEntryId: string,
-  pptxBytes: Uint8Array,
+  zipEntries: Record<string, Uint8Array>,
   sourceSlidePart: string,
 ): void {
   if (slideContents.has(slideEntryId)) return;
-  const zipEntries = unzipSync(pptxBytes);
   const slideXml = strFromU8(zipEntries[`ppt/slides/${sourceSlidePart}`]);
   const shapes = parseSlideShapes(slideXml);
 

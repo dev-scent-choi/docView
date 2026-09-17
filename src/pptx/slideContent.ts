@@ -347,7 +347,9 @@ function resolveRelativePath(basePart: string, target: string): string {
   return stack.join('/');
 }
 
-const IMAGE_MIME_BY_EXT: Record<string, string> = {
+/** src/routes/viewer.ts의 /api/view/slide-media도 Content-Type 헤더를 정하는 데 그대로
+ * 재사용한다 — 여기서 "지원 포맷"으로 판단한 것과 실제로 내려주는 헤더가 어긋나지 않게. */
+export const IMAGE_MIME_BY_EXT: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
@@ -402,17 +404,15 @@ export function parseSlideVisuals(zipEntries: Record<string, Uint8Array>, source
   const relsBytes = zipEntries[`ppt/slides/_rels/${sourceSlidePart}.rels`];
   const rels = relsBytes ? relsMap(Buffer.from(relsBytes).toString('utf-8')) : new Map<string, string>();
 
-  function resolveImageDataUri(rId: string | undefined): string | undefined {
+  function resolveImageMediaPath(rId: string | undefined): string | undefined {
     if (!rId) return undefined;
     const target = rels.get(rId);
     if (!target) return undefined;
     const normalized = resolveRelativePath(`ppt/slides/${sourceSlidePart}`, target);
-    const mediaBytes = zipEntries[normalized];
-    if (!mediaBytes) return undefined;
+    if (!zipEntries[normalized]) return undefined; // 관계는 있는데 실제 미디어 파트가 없음(손상)
     const ext = normalized.split('.').pop()?.toLowerCase() ?? '';
-    const mime = IMAGE_MIME_BY_EXT[ext];
-    if (!mime) return undefined;
-    return `data:${mime};base64,${Buffer.from(mediaBytes).toString('base64')}`;
+    if (!IMAGE_MIME_BY_EXT[ext]) return undefined; // 브라우저가 못 그리는 포맷(emf/wmf 등)
+    return normalized;
   }
 
   const parsed = parser.parse(slideXml) as XmlNode;
@@ -426,15 +426,15 @@ export function parseSlideVisuals(zipEntries: Record<string, Uint8Array>, source
     const off = xfrm?.['a:off'] as XmlNode | undefined;
     const ext = xfrm?.['a:ext'] as XmlNode | undefined;
     const blip = (pic['p:blipFill'] as XmlNode | undefined)?.['a:blip'] as XmlNode | undefined;
-    const dataUri = resolveImageDataUri(blip?.['@_r:embed'] as string | undefined);
-    if (!dataUri) continue; // 관계 유실 또는 브라우저가 못 그리는 포맷 — 자리표시자 없이 생략
+    const mediaPath = resolveImageMediaPath(blip?.['@_r:embed'] as string | undefined);
+    if (!mediaPath) continue; // 관계 유실 또는 브라우저가 못 그리는 포맷 — 자리표시자 없이 생략
     visuals.push({
       kind: 'image',
       x: emuAttr(off, '@_x'),
       y: emuAttr(off, '@_y'),
       w: emuAttr(ext, '@_cx'),
       h: emuAttr(ext, '@_cy'),
-      dataUri,
+      mediaPath,
     });
   }
 

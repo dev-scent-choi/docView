@@ -309,7 +309,7 @@ describe('exportPptxFromSlides — seeding a slide without editing it never chan
     seedSlidesFromPptx(original, slidesArrayB);
     const slideContentsB = ydocB.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
     const firstEntry = slidesArrayB.get(0);
-    seedSlideContentFromXml(slideContentsB, firstEntry.id, original, firstEntry.sourceSlidePart!);
+    seedSlideContentFromXml(slideContentsB, firstEntry.id, unzipSync(original), firstEntry.sourceSlidePart!);
     expect(slideContentsB.has(firstEntry.id)).toBe(true); // 정말로 시딩됐는지 먼저 확인(공허한 통과 방지)
 
     const afterSeedButUnedited = exportPptxFromSlides(original, slidesArrayB, slideContentsB);
@@ -336,8 +336,9 @@ describe('exportPptxFromSlides — seeding a slide without editing it never chan
     const slidesArrayB = ydocB.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
     seedSlidesFromPptx(original, slidesArrayB);
     const slideContentsB = ydocB.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP);
+    const originalZipEntries = unzipSync(original);
     for (const entry of slidesArrayB.toArray()) {
-      seedSlideContentFromXml(slideContentsB, entry.id, original, entry.sourceSlidePart!);
+      seedSlideContentFromXml(slideContentsB, entry.id, originalZipEntries, entry.sourceSlidePart!);
     }
     const allSeeded = exportPptxFromSlides(original, slidesArrayB, slideContentsB);
 

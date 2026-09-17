@@ -56,8 +56,14 @@ export interface SlideVisual {
   readonly y: number | null;
   readonly w: number | null;
   readonly h: number | null;
-  /** kind:'image' — data: URI(원본 미디어 바이트를 base64로 그대로 인라인) */
-  readonly dataUri?: string;
+  /** kind:'image' — 원본 zip 안 미디어 파트 경로(예: "ppt/media/image3.png"). 클라이언트는 이
+   * 경로를 그대로 /api/view/slide-media에 실어 <img src>로 요청한다 — 바이트를 base64로 Yjs
+   * 문서에 인라인하지 않는다: 실사용 파일(스크린샷이 많은 매뉴얼 등)에는 수 MB짜리 이미지가
+   * 흔한데, base64 인라인은 그 크기 그대로(오히려 33% 더 크게) 하나의 Yjs 업데이트에 실려
+   * WebSocket으로 나가 텍스트박스보다 몇 초씩 늦게 나타나는 원인이었다(실측: 6MB급 이미지가
+   * 여럿인 슬라이드에서 텍스트는 50ms, 이미지는 3초 이상). 경로만 보내면 그 부담이 브라우저의
+   * 평범한 HTTP 이미지 요청(캐시·병렬 로딩 전부 브라우저가 알아서 처리)으로 옮겨간다. */
+  readonly mediaPath?: string;
   /** kind:'shape' — 단색 채우기(#RRGGBB), 없으면 채우기 없는 도형 */
   readonly fill?: string;
   /** kind:'table' — 행 단위 셀 텍스트(행렬, 서식 없이 텍스트만) */

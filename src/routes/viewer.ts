@@ -2,10 +2,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { unzipSync } from 'fflate';
 import { recordAudit } from '../audit.js';
 import { SizedLruCache } from '../cache.js';
 import { config } from '../config.js';
 import { findConverter } from '../converters/index.js';
+import { IMAGE_MIME_BY_EXT } from '../pptx/slideContent.js';
 import {
   PageOutOfRangeError,
   buildPrintPdf,
@@ -494,6 +496,21 @@ interface SearchQuery extends TokenQuery {
   readonly limit: number;
 }
 
+const slideMediaQuerySchema = {
+  type: 'object',
+  required: ['path'],
+  properties: {
+    token: { type: 'string' },
+    // ppt/media/ 바로 아래(하위 폴더 없음) 파일만 — 경로 순회나 zip의 다른 파트(슬라이드 XML 등)
+    // 접근을 막는다. parseSlideVisuals가 만들어내는 mediaPath 형태와 정확히 일치해야 한다.
+    path: { type: 'string', pattern: '^ppt/media/[^/]+$', maxLength: 300 },
+  },
+} as const;
+
+interface SlideMediaQuery extends TokenQuery {
+  readonly path: string;
+}
+
 export async function viewerRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Querystring: TokenQuery }>(
     '/api/view/info',
@@ -639,6 +656,41 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
       } catch (error) {
         request.log.error(error, 'svg view failed');
         return reply.code(500).send({ success: false, error: 'SVG를 불러오지 못했습니다.' });
+      }
+    },
+  );
+
+  /** pptx 슬라이드 안 이미지(p:pic) 원본 바이트를 그대로 내려준다 — editor-slides.ts가
+   * slideVisuals의 mediaPath로 이 라우트를 <img src>에 직접 건다. 수 MB짜리 이미지를 base64로
+   * Yjs 문서에 인라인하던 예전 방식은 그 크기 그대로 WebSocket 업데이트에 실려 텍스트박스보다
+   * 몇 초씩 늦게 나타나는 원인이었다 — 평범한 HTTP 이미지 요청으로 바꿔 브라우저가 캐시·병렬
+   * 로딩을 알아서 하게 한다. */
+  app.get<{ Querystring: SlideMediaQuery }>(
+    '/api/view/slide-media',
+    { schema: { querystring: slideMediaQuerySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if (view.meta.ext !== 'pptx') {
+        return reply.code(400).send({ success: false, error: 'pptx 문서가 아닙니다.' });
+      }
+      const mediaPath = request.query.path;
+      const ext = mediaPath.split('.').pop()?.toLowerCase() ?? '';
+      const mime = IMAGE_MIME_BY_EXT[ext];
+      if (!mime) {
+        return reply.code(400).send({ success: false, error: '지원하지 않는 이미지 형식입니다.' });
+      }
+      try {
+        const bytes = await store.readOriginal(view.meta.id, 'pptx');
+        const zipEntries = unzipSync(bytes);
+        const mediaBytes = zipEntries[mediaPath];
+        if (!mediaBytes) {
+          return reply.code(404).send({ success: false, error: '이미지를 찾을 수 없습니다.' });
+        }
+        return await reply.type(mime).header('cache-control', 'private, no-store').send(Buffer.from(mediaBytes));
+      } catch (error) {
+        request.log.error(error, 'slide media fetch failed');
+        return reply.code(500).send({ success: false, error: '이미지를 불러오지 못했습니다.' });
       }
     },
   );
