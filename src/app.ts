@@ -5,6 +5,7 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { config } from './config.js';
+import { adminRoutes } from './routes/admin.js';
 import { editRoutes } from './routes/edit.js';
 import { documentRoutes } from './routes/documents.js';
 import { viewerRoutes } from './routes/viewer.js';
@@ -50,6 +51,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(documentRoutes);
   await app.register(viewerRoutes);
   await app.register(editRoutes);
+  await app.register(adminRoutes);
 
   return app;
 }

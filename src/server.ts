@@ -29,6 +29,11 @@ async function main(): Promise<void> {
   if (!sofficePath) {
     app.log.warn('LibreOffice가 없어 Office/DXF 변환이 비활성화되었습니다. (DOCVIEW_SOFFICE로 경로 지정 가능)');
   }
+  app.log.info(
+    config.adminPassword
+      ? `관리자 페이지(/admin) 켜짐 — 허용 IP: ${[...config.adminAllowedIps].join(', ')}`
+      : '관리자 페이지(/admin) 꺼짐 (DOCVIEW_ADMIN_PASSWORD 미설정)',
+  );
   app.log.info(`저장 모드: ${config.storageMode} / 지원 포맷: ${supportedExtensions.join(', ')}`);
   await app.listen({ port: config.port, host: config.host });
   // 첫 변환의 콜드 스타트를 없애기 위해 백그라운드로 프로필을 웜업한다

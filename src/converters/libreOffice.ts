@@ -32,6 +32,34 @@ function detectSoffice(): string | null {
 /** null이면 LibreOffice 미설치 → Office/DXF 변환기가 등록되지 않는다. */
 export const sofficePath = detectSoffice();
 
+/** soffice.exe 경로에서 LibreOffice 설치 루트를 역산한다(…/program/soffice.exe -> 그 두 단계 위). */
+function libreOfficeInstallRoot(): string | null {
+  if (!sofficePath) return null;
+  return path.dirname(path.dirname(sofficePath));
+}
+
+/** H2Orestart(HWP 5.0/HWPX 임포트 필터) 확장이 설치돼 있는지 — 딱 정해진 API가 없어 설치된
+ * 확장 캐시 폴더(share/uno_packages/cache/uno_packages/)를 얕게(2단계) 뒤져 이름에 "h2orestart"가
+ * 들어간 항목이 있는지로 판단한다(실제로 이 저장소 개발 중 설치해 확인한 경로 구조와 일치).
+ * 관리자 페이지의 "참고용" 표시라 확정적 보장은 아니다 — LibreOffice가 없거나 폴더 구조가 다른
+ * 배포판/버전이면 그냥 null(확인 불가)을 돌려주고, 상태 텍스트에서 그렇게 표시한다. */
+export async function detectH2Orestart(): Promise<boolean | null> {
+  const root = libreOfficeInstallRoot();
+  if (!root) return null;
+  const cacheDir = path.join(root, 'share', 'uno_packages', 'cache', 'uno_packages');
+  try {
+    const entries = await fs.readdir(cacheDir);
+    for (const entry of entries) {
+      if (entry.toLowerCase().includes('h2orestart')) return true;
+      const sub = await fs.readdir(path.join(cacheDir, entry)).catch(() => [] as string[]);
+      if (sub.some((name) => name.toLowerCase().includes('h2orestart'))) return true;
+    }
+    return false;
+  } catch {
+    return null; // 캐시 폴더 자체가 없는 등 — "확인 불가"로 취급(설치 안 됐다고 단정하지 않는다)
+  }
+}
+
 /** 머리글 등에 노출되는 표시용 파일명 — 경로 구분자와 예약 문자를 제거한다. */
 function toSafeDisplayName(sourceName: string | undefined, ext: string): string {
   const base = (sourceName ?? '').replace(/\.[^.]+$/, '');

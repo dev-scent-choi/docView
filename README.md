@@ -74,6 +74,8 @@ npm run build:editor && npm start
 | `DOCVIEW_SOFFICE` | (자동 탐지) | LibreOffice(`soffice`) 실행 파일 경로를 직접 지정할 때 |
 | `DOCVIEW_API_KEYS` | (미설정 시 인증 없음) | 업로드·토큰 발급 API를 호출할 수 있는 프로젝트별 키. `이름:키` 쌍을 콤마로 나열 (예: `maintenance-management:abc123,other-project:def456`). **운영 환경에서는 반드시 설정하세요** — 미설정 시 이 두 API는 누구나 호출할 수 있습니다. |
 | `DOCVIEW_ALLOWED_ORIGINS` | (미설정 시 제한 없음) | 이 화면(뷰어/편집기)을 iframe으로 띄울 수 있는 출처 목록, 콤마로 나열 (예: `https://maintenance.example.com`). **운영 환경에서는 반드시 설정하세요** — 미설정 시 아무 사이트에서나 이 화면을 임베드할 수 있습니다. |
+| `DOCVIEW_ADMIN_PASSWORD` | (미설정 시 관리자 페이지 자체가 꺼짐) | `/admin` 페이지 접근 비밀번호. 아래 "관리자 페이지" 절 참고. |
+| `DOCVIEW_ADMIN_ALLOWED_IPS` | (로컬만 허용) | `/admin`에 접근할 수 있는 IP 목록, 콤마로 나열. `127.0.0.1`/`::1`은 설정 여부와 무관하게 항상 허용된다. |
 
 예시(Windows, Git Bash):
 
@@ -83,6 +85,39 @@ export DOCVIEW_DATA_DIR="/c/path/to/persistent/data"
 export DOCVIEW_SECRET="운영용-고정-시크릿-여기에"
 npm start
 ```
+
+## 관리자 페이지 (`/admin`)
+
+지금 이 서비스가 실제로 어떤 설정으로 떠 있는지(포트, 저장 모드, 변환기 감지 여부, 보안 설정 켜짐/꺼짐,
+문서 수·디스크 사용량 등) 브라우저에서 바로 확인할 수 있는 읽기 전용 페이지다. 값을 바꾸는 화면은
+아니다 — 설정을 바꾸려면 환경변수를 고치고 서버를 재시작해야 한다.
+
+**켜는 방법**: `DOCVIEW_ADMIN_PASSWORD`를 설정하면 그 즉시 켜진다(빈 값이면 페이지 자체가 없는 것처럼
+404를 돌려준다 — 보호 없이 실수로 열리는 걸 막기 위함). 예:
+
+```bash
+export DOCVIEW_ADMIN_PASSWORD="관리자-비밀번호-여기에"
+# 로컬(127.0.0.1)이 아닌 곳에서도 접속하려면 IP를 추가로 허용해야 한다:
+export DOCVIEW_ADMIN_ALLOWED_IPS="10.0.0.5,10.0.0.6"
+npm start
+```
+
+**접속 방법**: 브라우저로 `http://<서버주소>:<포트>/admin`에 접속하면 브라우저 기본 로그인 팝업이
+뜬다 — 아이디는 아무거나 입력해도 되고(검사 안 함), 비밀번호에 `DOCVIEW_ADMIN_PASSWORD`로 설정한
+값을 입력하면 된다.
+
+**허용되지 않은 IP에서 접속하면**: 로그인 팝업조차 없이 404가 뜬다(그 페이지가 존재한다는 사실
+자체를 안 알려주기 위함 — "권한 없음(403)"보다 안전하다).
+
+**화면에서 확인할 수 있는 것**:
+- 서버: 바인딩 주소, 저장 모드(disk/memory), 데이터 폴더, 토큰 유효기간
+- 보안: API 키 인증 켜짐/꺼짐(켜져 있으면 등록된 프로젝트 이름까지), iframe 임베드 출처 제한
+  켜짐/꺼짐, 관리자 페이지 자체의 허용 IP 목록
+- 문서 변환기: LibreOffice 감지 여부와 경로, H2Orestart(hwp 임포트 필터) 설치 여부, DWG→DXF
+  변환기(LibreDWG/ODA) 감지 여부
+- 저장 용량: 업로드된 문서 수, 원본/변환본 디스크 사용량
+
+시크릿·API 키의 **실제 값은 화면에 절대 표시되지 않는다** — 항상 "설정됨/미설정"으로만 보여준다.
 
 ## 검증
 

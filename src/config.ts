@@ -36,6 +36,17 @@ function parseAllowedOrigins(raw: string | undefined): readonly string[] {
     .filter(Boolean);
 }
 
+/** 로컬(127.0.0.1/::1)은 항상 허용 목록에 자동으로 포함된다 — 서버에 직접 로그인해 확인하는
+ * 가장 흔한 사용 경로를 매번 환경변수에 적지 않아도 되게 한다. */
+function parseAdminAllowedIps(raw: string | undefined): ReadonlySet<string> {
+  const set = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+  for (const ip of (raw ?? '').split(',')) {
+    const trimmed = ip.trim();
+    if (trimmed) set.add(trimmed);
+  }
+  return set;
+}
+
 export const config = {
   port: Number(process.env.DOCVIEW_PORT ?? DEFAULT_PORT),
   host: process.env.DOCVIEW_HOST ?? '127.0.0.1',
@@ -61,4 +72,11 @@ export const config = {
   /** 이 뷰어 화면을 iframe으로 띄워도 되는 출처 목록. 비어 있으면 프레임 제한을 걸지 않는다
    * (개발 편의 — 운영 환경에서는 반드시 실제로 이 화면을 임베드할 사이트 출처로 설정해야 한다). */
   allowedOrigins: parseAllowedOrigins(process.env.DOCVIEW_ALLOWED_ORIGINS),
+  /** 관리자 상태 페이지(/admin) 보호 — DOCVIEW_ADMIN_PASSWORD가 비어 있으면 페이지 자체를
+   * 404로 감춘다(admin.ts 참고, 실수로 아무 보호 없이 배포되는 상황 방지). 비밀번호만 설정하면
+   * 로컬(127.0.0.1/::1, 항상 허용 목록에 포함됨)에서는 바로 접근 가능하고, 그 밖의 IP는
+   * DOCVIEW_ADMIN_ALLOWED_IPS에 명시적으로 추가해야만 접근 가능하다 — "비밀번호만 설정" 실수로
+   * 외부에 그대로 노출되는 일이 없도록 IP 제한은 항상 기본이 로컬 전용이다. */
+  adminPassword: process.env.DOCVIEW_ADMIN_PASSWORD || null,
+  adminAllowedIps: parseAdminAllowedIps(process.env.DOCVIEW_ADMIN_ALLOWED_IPS),
 } as const;
