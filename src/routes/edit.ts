@@ -94,7 +94,7 @@ export async function editRoutes(app: FastifyInstance): Promise<void> {
         viewer: claims.viewer,
       });
       socket.off('message', queueEarly);
-      await joinEditSession(socket, request.raw, claims.docId, meta.ext, earlyMessages, readOnly);
+      await joinEditSession(socket, request.raw, claims.docId, meta.ext, earlyMessages, readOnly, claims.viewer);
     },
   );
 }

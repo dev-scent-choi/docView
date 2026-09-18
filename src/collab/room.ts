@@ -153,6 +153,22 @@ function kindOfExt(ext: string): DocKind {
   return 'docx';
 }
 
+/** 셀 하나의 누적 변경 기록 — 룸이 열린 뒤(원본 업로드 기준) 처음 바뀐 시점의 값을 `before`로
+ * 한 번만 남기고, 그 뒤 같은 칸이 또 바뀌면 `after`/`viewer`/`at`만 최신값으로 갱신한다. 저장
+ * 시점마다 초기화하지 않는다 — "지금까지 누적된 변경 내역"을 조회하는 용도라, 여러 번 자동저장이
+ * 일어나도 계속 쌓인다(외부에서 이 정보를 가져가는 쪽이 스스로 중복을 걸러내는 걸 전제로 한다 —
+ * README/연동 문서에 명시할 부분).
+ */
+interface CellChangeEntry {
+  readonly sheetIdx: number;
+  readonly row: number;
+  readonly col: number;
+  readonly before: GridCell | 0;
+  after: GridCell | 0;
+  viewer: string | null;
+  at: number;
+}
+
 interface Room {
   readonly docId: string;
   readonly kind: DocKind;
@@ -160,6 +176,14 @@ interface Room {
   readonly awareness: Awareness;
   /** 연결 → 그 연결이 소유한(생성한) awareness clientId 집합 */
   readonly conns: Map<WebSocket, Set<number>>;
+  /** 연결 → 그 연결의 열람자 이름(joinEditSession이 채움). Yjs 트랜잭션의 origin이 그 변경을
+   * 일으킨 연결 자체이므로(y-protocols의 readUpdate가 origin으로 넘긴다), 이 맵과 조합하면
+   * "이 편집을 누가 했는지"를 알 수 있다 — cellChangeLog가 그 용도로 쓴다. */
+  readonly viewerByConn: Map<WebSocket, string>;
+  /** xlsx 룸에서만 쓰인다 — "어디가·언제·누가·무엇을 바꿨는지" 조회용 누적 로그(dirtyOverlay와는
+   * 별개 — dirtyOverlay는 "지금 저장해야 할 값"만 알고 누가/언제는 모른다). CellChangeEntry
+   * 문서 주석 참고. */
+  readonly cellChangeLog: Map<string, CellChangeEntry>;
   /** 읽기 전용(canEdit:false)으로 참여한 연결 — 이 연결이 보낸 syncStep2/update는 무시한다.
    *  syncStep1(자기 상태 벡터를 보내고 서버 diff를 요청하는 것뿐)은 그대로 응답해야 문서 내용을
    *  받을 수 있으므로 막지 않는다 — 실제 "쓰기"에 해당하는 메시지만 서버에서 직접 걸러낸다
@@ -412,7 +436,31 @@ function isWithinCanonicalBounds(row: number, col: number): boolean {
  * 먼저 넓어지기를 기다린다"는 설계는 항상 한 박자 늦어 그 편집을 통째로 놓친다. 그래서 순서에
  * 기대지 않고 셀·서식 관찰자가 각자 필요한 만큼(`growSheet`) 직접 넓힌다.
  */
+/** 셀 하나가 바뀔 때 room.cellChangeLog를 갱신한다 — 이 칸이 이번 룸 수명 동안 처음 바뀐 거면
+ * `before`를 지금 값으로 고정하고, 이미 기록이 있으면 `before`는 그대로 두고 `after`/`viewer`/
+ * `at`만 최신화한다("원본 대비 지금까지 누적된 변경"이 되도록). */
+function recordCellChange(
+  room: Room,
+  sheetIdx: number,
+  row: number,
+  col: number,
+  before: GridCell | 0,
+  after: GridCell | 0,
+  viewer: string | null,
+): void {
+  const key = gridCellKey(sheetIdx, row, col);
+  const existing = room.cellChangeLog.get(key);
+  if (existing) {
+    existing.after = after;
+    existing.viewer = viewer;
+    existing.at = Date.now();
+  } else {
+    room.cellChangeLog.set(key, { sheetIdx, row, col, before, after, viewer, at: Date.now() });
+  }
+}
+
 async function applyCellsChangeToCanonical(
+  room: Room,
   store: LazyGridStore,
   cells: Y.Map<string>,
   event: Y.YMapEvent<string>,
@@ -435,6 +483,12 @@ async function applyCellsChangeToCanonical(
   }
   if (changes.length === 0) return;
 
+  // 이 배치를 일으킨 연결(트랜잭션 origin)을 열람자 이름으로 바꿔 둔다 — y-protocols의 readUpdate가
+  // 소켓 연결 자체를 origin으로 넘기므로(room.ts의 handleMessage), joinEditSession이 심어 둔
+  // viewerByConn과 조합하면 "이 배치를 누가 보냈는지" 알 수 있다. 알 수 없으면(서버 자신의 쓰기 등,
+  // 이미 위에서 GRID_WINDOW_SEED_ORIGIN은 걸러졌다) null로 남긴다.
+  const viewer = room.viewerByConn.get(event.transaction.origin as WebSocket) ?? null;
+
   // 값 쓰기(삭제 아님)만 시트를 넓힌다 — 삭제는 절대 시트를 넓히지 않는다(원래 없던 칸이
   // 지워졌다는 건 아무 일도 아니다). Map(dirtyOverlay)은 미리 크기를 맞출 필요가 없으므로,
   // 여기서 늘리는 건 오직 sheetMeta.rowCount/colCount(와 그에 딸린 매핑 배열 길이)뿐이다.
@@ -442,30 +496,28 @@ async function applyCellsChangeToCanonical(
     if (!c.deleted) growSheet(store, c.sheetIdx, c.row + 1, c.col + 1);
   }
 
-  // 지금 그 칸의 값을 먼저 읽어 둔다 — 텍스트만 바꾸는 편집이 기존 서식(.s)을 지우지 않기
-  // 위함이다. 삭제는 이 값을 쓰지 않으므로 굳이 읽지 않는다(0으로 채워 Promise.all 모양만 맞춘다).
+  // 지금 그 칸의 값을 먼저 읽어 둔다 — 텍스트만 바꾸는 편집이 기존 서식(.s)을 지우지 않기 위함이고
+  // (원래 취지), 이제는 cellChangeLog의 "이 편집 전 값"으로도 쓴다 — 그래서 삭제도 더 이상 읽기를
+  // 건너뛰지 않는다(무엇이 지워졌는지 알아야 하므로).
   const currentCells = await Promise.all(
-    changes.map((c) => (c.deleted ? Promise.resolve<GridCell | 0>(0) : getCell(store, c.sheetIdx, c.row, c.col))),
+    changes.map((c) => getCell(store, c.sheetIdx, c.row, c.col)),
   );
 
   for (let i = 0; i < changes.length; i += 1) {
     const c = changes[i];
+    const before = currentCells[i];
     if (c.deleted) {
       const meta = store.sheetMeta[c.sheetIdx];
       if (c.row >= meta.rowCount || c.col >= meta.colCount) continue; // 원래 있던 칸이 아니면 할 일 없음
       setDirtyCell(store, c.sheetIdx, c.row, c.col, 0);
+      recordCellChange(room, c.sheetIdx, c.row, c.col, before, 0, viewer);
       continue;
     }
     const value = cells.get(c.key) ?? '';
-    const current = currentCells[i];
-    const keptStyle = current !== 0 && current !== undefined ? current.s : undefined;
-    setDirtyCell(
-      store,
-      c.sheetIdx,
-      c.row,
-      c.col,
-      value === '' ? 0 : { v: value, ...(keptStyle !== undefined ? { s: keptStyle } : {}) },
-    );
+    const keptStyle = before !== 0 && before !== undefined ? before.s : undefined;
+    const after: GridCell | 0 = value === '' ? 0 : { v: value, ...(keptStyle !== undefined ? { s: keptStyle } : {}) };
+    setDirtyCell(store, c.sheetIdx, c.row, c.col, after);
+    recordCellChange(room, c.sheetIdx, c.row, c.col, before, after, viewer);
   }
 }
 
@@ -1238,7 +1290,7 @@ async function seedRoom(room: Room): Promise<void> {
         // applyCellsChangeToCanonical은 이제 async다(LazyGridStore.getCell이 디스크를 읽어야 할
         // 수도 있어서) — Yjs observe 콜백 자체는 동기여야 하므로 흘려보내고, 재계산은 그 완료를
         // 기다린 뒤 잇는다(재계산이 더티 오버레이가 아직 안 채워진 값을 볼 수 없도록).
-        trackBackgroundWork(room, applyCellsChangeToCanonical(lazyStore, cells, event)
+        trackBackgroundWork(room, applyCellsChangeToCanonical(room, lazyStore, cells, event)
           .then(() => {
             // 이번 배치에서 실제로 바뀐 셀이 속한 시트만 재계산한다 — event.changes.keys가
             // "시트:행:열" 키별로 add/update/delete를 알려주므로 거기서 시트 인덱스를 뽑아낸다.
@@ -1590,6 +1642,8 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     ydoc,
     awareness,
     conns,
+    viewerByConn: new Map<WebSocket, string>(),
+    cellChangeLog: new Map<string, CellChangeEntry>(),
     readOnlyConns: new Set<WebSocket>(),
     autosaveTimer: null,
     ready: Promise.resolve(), // 아래에서 즉시 덮어씀 — seedRoom(room)이 room 자신을 참조해야 해서
@@ -1671,6 +1725,7 @@ function closeConn(room: Room, conn: WebSocket): void {
     room.readOnlyConns.delete(conn);
     room.pageSubscriptions.delete(conn);
     room.connSlideSeedsInFlight.delete(conn);
+    room.viewerByConn.delete(conn);
     removeAwarenessStates(room.awareness, [...controlled], null);
     if (room.conns.size === 0) {
       if (room.autosaveTimer) {
@@ -2063,11 +2118,16 @@ export async function joinEditSession(
   docExt: string,
   earlyMessages: ReadonlyArray<ArrayBuffer | Buffer> = [],
   readOnly = false,
+  // 맨 뒤에 덧붙인다 — 기존 호출부(테스트 14곳)가 전부 위치 인자로 earlyMessages/readOnly까지만
+  // 넘기므로, 중간에 끼워 넣으면 배열을 문자열 자리에 넘기게 되어 전부 타입 에러가 난다.
+  // 알 수 없으면 null(테스트처럼 누가 편집했는지 중요하지 않은 호출부는 그냥 생략).
+  viewer: string | null = null,
 ): Promise<void> {
   const room = getOrCreateRoom(docId, docExt);
 
   socket.binaryType = 'arraybuffer';
   room.conns.set(socket, new Set());
+  if (viewer !== null) room.viewerByConn.set(socket, viewer);
   if (readOnly) room.readOnlyConns.add(socket);
 
   let seeded = false;
@@ -2130,6 +2190,40 @@ export async function joinEditSession(
 /** 현재 메모리에 열려 있는 협업 룸 수 (진단·테스트용) */
 export function activeRoomCount(): number {
   return rooms.size;
+}
+
+/** GET /api/documents/:id가 그대로 응답에 실을 수 있는 모양 — CellChangeEntry의 GridCell(서식
+ * 팔레트 참조 등 내부 표현)을 외부에는 의미 없는 텍스트값(v)만 뽑아 노출한다. row/col은
+ * 1-based로 바꾼다(viewer.ts의 그리드 검색 API가 이미 쓰는 관례와 맞춘다). */
+export interface CellChangeSummary {
+  readonly sheet: number;
+  readonly row: number;
+  readonly col: number;
+  readonly before: string;
+  readonly after: string;
+  readonly viewer: string | null;
+  readonly at: string;
+}
+
+function cellTextOf(cell: GridCell | 0): string {
+  return cell === 0 ? '' : cell.v;
+}
+
+/** 문서에 현재 열려 있는 동시편집 룸(xlsx만)의 누적 셀 변경 로그를 돌려준다. 룸이 없으면(모두
+ * 나가서 이미 파일로 flush됐거나, 애초에 xlsx가 아니면) null — "룸이 없다"와 "룸은 있는데 편집이
+ * 하나도 없었다"(빈 배열)를 구분해야 호출부가 상황을 정확히 알 수 있다. */
+export function getCellChangeLog(docId: string): readonly CellChangeSummary[] | null {
+  const room = rooms.get(docId);
+  if (!room || room.kind !== 'xlsx') return null;
+  return [...room.cellChangeLog.values()].map((entry) => ({
+    sheet: entry.sheetIdx,
+    row: entry.row + 1,
+    col: entry.col + 1,
+    before: cellTextOf(entry.before),
+    after: cellTextOf(entry.after),
+    viewer: entry.viewer,
+    at: new Date(entry.at).toISOString(),
+  }));
 }
 
 /**
