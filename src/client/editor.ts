@@ -621,7 +621,14 @@ async function main(): Promise<void> {
     else closeSearch();
   });
   document.getElementById('search-close')?.addEventListener('click', closeSearch);
-  searchInput.addEventListener('input', () => applySearch(0));
+  // applySearch가 매번 findMatches로 문서 전체를 다시 훑으므로(문서가 크면 체감되는 비용), 입력
+  // 중에는 짧게 모아서(디바운스) 실행한다 — Enter/이전·다음 버튼 등 명시적 액션은 즉시 반응해야
+  // 하므로 이 디바운스를 적용하지 않는다.
+  let searchInputDebounce: ReturnType<typeof setTimeout> | undefined;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchInputDebounce);
+    searchInputDebounce = setTimeout(() => applySearch(0), 150);
+  });
   searchInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') applySearch(searchCurrent + (event.shiftKey ? -1 : 1));
     if (event.key === 'Escape') closeSearch();

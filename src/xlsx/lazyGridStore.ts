@@ -20,7 +20,7 @@ import {
   type GridMerge,
   type GridStyle,
 } from '../spreadsheet.js';
-import { extractThemeColorsFromZip } from './themeExtract.js';
+import { extractThemeColorsFromLoadedZip } from './themeExtract.js';
 import { gridCellKey, parseGridCellKey } from '../collab/gridShared.js';
 
 export interface LazyGridSheetMeta {
@@ -230,8 +230,10 @@ function computeColWidthsPx(colSpecs: readonly RawColSpec[], colCount: number): 
 }
 
 export async function ingestXlsxLazily(docId: string, xlsxBytes: Buffer): Promise<LazyGridStore> {
-  const themeColors = await extractThemeColorsFromZip(xlsxBytes);
+  // zip은 한 번만 로드한다(JSZip.loadAsync가 central directory를 통째로 다시 훑으므로, 테마 색과
+  // 워크시트 XML을 각자 따로 loadAsync하면 같은 파일을 두 번 파싱하게 된다).
   const zip = await JSZip.loadAsync(xlsxBytes);
+  const themeColors = await extractThemeColorsFromLoadedZip(zip);
   const worksheetXmlsByPath = await loadWorksheetXmlsByPath(zip);
   const rowStorePath = path.join(os.tmpdir(), `docview-lazygrid-${docId}-${randomUUID()}.jsonl`);
   const writeHandle = await fs.open(rowStorePath, 'w');
@@ -627,6 +629,33 @@ export async function getCell(
 
   const row = await getRow(store, sheetIdx, logicalRow);
   return row[originalCol] ?? 0;
+}
+
+/** getCell을 한 행의 열 개수만큼 반복 호출하면(예: 페이지 재계산 패스가 행×열을 모두 훑을 때)
+ * 매번 같은 행에 대해 getRow → readCache 조회/touchCache(LRU 재정렬용 Map delete+set)를 열
+ * 개수만큼 다시 한다 — 디스크 읽기 자체는 배치 레이어(readRowFromDisk의 inFlight 공유)가
+ * 중복을 막아주지만, 캐시 조회·LRU 갱신 오버헤드는 그대로 colCount배가 된다. 행 전체를 한 번에
+ * 훑어야 하는 호출부는 getRow를 한 번만 부르는 이 함수를 대신 쓴다 — dirtyOverlay 우선순위는
+ * getCell과 동일하게 유지한다(편집된 칸을 디스크 원본으로 덮어쓰지 않도록). */
+export async function getRowCells(
+  store: LazyGridStore,
+  sheetIdx: number,
+  logicalRow: number,
+  colCount: number,
+): Promise<ReadonlyArray<GridCell | 0>> {
+  const row = await getRow(store, sheetIdx, logicalRow);
+  const result: Array<GridCell | 0> = new Array(colCount);
+  for (let c = 0; c < colCount; c += 1) {
+    const key = gridCellKey(sheetIdx, logicalRow, c);
+    const dirty = store.dirtyOverlay.get(key);
+    if (dirty !== undefined) {
+      result[c] = dirty;
+      continue;
+    }
+    const originalCol = store.logicalToOriginalCol[sheetIdx]?.[c];
+    result[c] = originalCol === undefined || originalCol < 0 ? 0 : row[originalCol] ?? 0;
+  }
+  return result;
 }
 
 export function setDirtyCell(

@@ -87,11 +87,30 @@ interface NamedStyleInfo {
  * jc=center + w:b를 지정하는 경우 — 에서 이 정도로 충분했다). 문단 자신의 직접 서식이
  * 여전히 이 값보다 우선한다(호출부에서 ?? 로 처리).
  */
-function namedStyleInfoOf(styleId: string, stylesChildren: readonly XmlNode[]): NamedStyleInfo | null {
-  const style = findAll(stylesChildren, 'w:style').find((s) => {
+// namedStyleInfoOf는 문단마다(표 안이면 셀마다) 호출되므로, 매번 findAll(...).find(...)로 전체
+// 스타일 목록을 다시 훑으면 O(문단 수 × 스타일 수)가 된다 — 큰 표가 있는 문서에서 체감되는 비용.
+// stylesChildren은 importDocx 한 번의 호출 동안 항상 같은 배열 인스턴스이므로, 그 인스턴스를
+// 키로 한 번만 styleId→노드 Map을 만들어 WeakMap에 캐시해두면 이후 조회가 전부 O(1)이 된다.
+const paragraphStyleMapCache = new WeakMap<readonly XmlNode[], ReadonlyMap<string, XmlNode>>();
+
+function paragraphStyleMapOf(stylesChildren: readonly XmlNode[]): ReadonlyMap<string, XmlNode> {
+  const cached = paragraphStyleMapCache.get(stylesChildren);
+  if (cached) return cached;
+  const map = new Map<string, XmlNode>();
+  for (const s of findAll(stylesChildren, 'w:style')) {
     const attrs = attrsOf(s);
-    return attrs['@_w:type'] === 'paragraph' && attrs['@_w:styleId'] === styleId;
-  });
+    const id = attrs['@_w:styleId'];
+    // .find()의 "첫 매치 우선" 순서를 그대로 보존한다 — 이미 있는 styleId는 덮어쓰지 않는다.
+    if (attrs['@_w:type'] === 'paragraph' && typeof id === 'string' && !map.has(id)) {
+      map.set(id, s);
+    }
+  }
+  paragraphStyleMapCache.set(stylesChildren, map);
+  return map;
+}
+
+function namedStyleInfoOf(styleId: string, stylesChildren: readonly XmlNode[]): NamedStyleInfo | null {
+  const style = paragraphStyleMapOf(stylesChildren).get(styleId);
   if (!style) return null;
   const styleChildren = childrenOf(style);
   const pPr = findFirst(styleChildren, 'w:pPr');

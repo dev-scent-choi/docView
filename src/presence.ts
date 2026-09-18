@@ -49,3 +49,10 @@ export function touchPresence(docId: string, sessionId: string, viewer: string):
   sessions.set(sessionId, { viewer, lastSeen: Date.now() });
   return listPresence(docId);
 }
+
+/** 문서가 삭제될 때 부른다 — pruneExpired는 그 문서를 다음에 다시 조회할 때만 정리하는데, 삭제된
+ * 문서는 다시 조회될 일이 없어(뷰어를 열 수 없으므로) 만료된 세션 Map이 서버가 살아있는 동안
+ * 영원히 byDoc에 남는다(항목 자체는 작지만, 오래 켜둔 서버에서 조금씩 쌓이는 누수). */
+export function clearPresence(docId: string): void {
+  byDoc.delete(docId);
+}

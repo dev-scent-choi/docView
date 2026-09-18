@@ -24,6 +24,9 @@ public/js/editor-slides.bundle.js
 public/js/editor-slides.bundle.js.map
 public/js/editor-hwp.bundle.js
 public/js/editor-hwp.bundle.js.map
+# splitting:true가 뽑아내는 공유 chunk(prosemirror/yjs 등 여러 편집기가 겹쳐 쓰는 코드) — 파일명이
+# 빌드마다 content-hash로 바뀌어 소스가 아니다.
+public/js/chunks/
 
 # 외부 프로젝트(@rhwp/editor의 rhwp-studio) 미러 — tools/와 같은 이유로 커밋하지 않는다.
 # node scripts/mirror-rhwp-studio.mjs로 받는다(README "한글(hwp/hwpx) 편집" 참고).

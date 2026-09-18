@@ -69,4 +69,13 @@ describe('presence', () => {
     vi.advanceTimersByTime(10_000); // session-a는 25초 경과(만료), session-b는 10초 경과(생존)
     expect(listPresence('doc-1')).toEqual(['검토자A']);
   });
+
+  test('clearPresence immediately empties a document even with active (non-expired) sessions, and does not affect other documents', async () => {
+    const { touchPresence, listPresence, clearPresence } = await freshPresenceModule();
+    touchPresence('doc-1', 'session-a', '검토자A');
+    touchPresence('doc-2', 'session-b', '검토자B');
+    clearPresence('doc-1');
+    expect(listPresence('doc-1')).toEqual([]);
+    expect(listPresence('doc-2')).toEqual(['검토자B']);
+  });
 });

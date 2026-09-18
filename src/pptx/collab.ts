@@ -461,8 +461,15 @@ export function exportPptxFromSlides(
   contentTypesXml = contentTypesXml.replace(overrideRe, (whole, part: string) =>
     finalParts.includes(part) ? whole : '',
   );
+  // finalParts.filter(part => contentTypesXml.includes(...))는 슬라이드마다 Content_Types.xml
+  // 전체를 다시 훑는 O(슬라이드 수 × 파일 길이) 스캔이었다 — 슬라이드가 많은 덱일수록 느려진다.
+  // 기존 Override를 한 번의 정규식 순회로 Set에 모아두면 이후 조회가 전부 O(1)이 된다.
+  const existingSlideParts = new Set<string>();
+  for (const m of contentTypesXml.matchAll(/<Override PartName="\/ppt\/slides\/(slide\d+\.xml)"[^>]*\/>/g)) {
+    existingSlideParts.add(m[1]);
+  }
   const missingOverrides = finalParts
-    .filter((part) => !contentTypesXml.includes(`/ppt/slides/${part}"`))
+    .filter((part) => !existingSlideParts.has(part))
     .map((part) => `<Override PartName="/ppt/slides/${part}" ContentType="${SLIDE_CONTENT_TYPE}"/>`);
   contentTypesXml = contentTypesXml.replace('</Types>', `${missingOverrides.join('')}</Types>`);
   zipEntries['[Content_Types].xml'] = strToU8(contentTypesXml);

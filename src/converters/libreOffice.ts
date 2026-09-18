@@ -151,7 +151,11 @@ export function applyFitToWidthAndStrip(xlsxBytes: Uint8Array): Uint8Array {
 
 /** 시트별 최대 행 번호를 dimension 참조로 가볍게 추정한다 (전체 파싱 없이). */
 export function maxSheetRows(xlsxBytes: Uint8Array): number {
-  const entries = unzipSync(xlsxBytes);
+  // 워크시트 XML만 있으면 되는데(임베드 이미지 등 xl/media/*가 큰 파일일수록 체감), 필터 없이
+  // unzipSync를 부르면 zip 안의 모든 항목을 다 압축 해제한다. filter로 미리 걸러 그 항목들의
+  // 압축 해제 자체를 건너뛴다 — transformWorksheets/literalizeDocxThemeFonts와 달리 이 함수는
+  // 다른 항목을 다시 묶어 새 zip을 만들 필요가 없어(값 하나만 반환) 안전하게 걸러도 된다.
+  const entries = unzipSync(xlsxBytes, { filter: (file) => /^xl\/worksheets\/[^/]+\.xml$/.test(file.name) });
   let max = 0;
   for (const [name, bytes] of Object.entries(entries)) {
     if (!/^xl\/worksheets\/[^/]+\.xml$/.test(name)) continue;

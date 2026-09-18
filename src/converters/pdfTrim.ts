@@ -18,7 +18,11 @@ const TRIM_THRESHOLD = 10;
 export async function trimPdfMargins(pdfPath: string): Promise<void> {
   const bytes = await fs.readFile(pdfPath);
   const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
-  const rendered = await pdf(pdfPath, { scale: TRIM_RENDER_SCALE });
+  // pdf-to-img에 경로를 넘기면 내부에서 같은 파일을 다시 읽는다 — 위에서 이미 읽어둔 바이트를
+  // 그대로 넘긴다(rendering.ts의 openDocument와 같은 패턴). Uint8Array로 복사해서 넘기는 이유도
+  // 같다 — Node Buffer는 풀링된 공유 ArrayBuffer의 일부일 수 있어, pdf-to-img/pdfjs가 그 참조를
+  // 오래 들고 있으면 예상치 못한 공유가 생길 수 있다.
+  const rendered = await pdf(new Uint8Array(bytes), { scale: TRIM_RENDER_SCALE });
   let changed = false;
 
   for (let index = 0; index < doc.getPageCount(); index += 1) {

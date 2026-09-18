@@ -10,6 +10,7 @@ import { convertDwgToDxf } from '../converters/dwgConverter.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
 import { convertDxfToSvg, convertLegacySpreadsheetToXlsx } from '../converters/libreOffice.js';
 import { ConversionError, type Converter } from '../converters/types.js';
+import { clearPresence } from '../presence.js';
 import { getPdfPageInfo, invalidateRenderCache } from '../rendering.js';
 import { issueViewToken } from '../security.js';
 import { buildGridFromOriginal, saveGridDerived, type GridDocument } from '../spreadsheet.js';
@@ -345,6 +346,9 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
       forceCloseRoom(meta.id);
       invalidateRenderCache(meta.id);
       invalidateViewCaches(meta.id);
+      // 삭제된 문서는 다시 열릴 수 없어(뷰어를 열 방법이 없음) presence가 스스로 정리될 기회가
+      // 없다 — 명시적으로 지운다(presence.ts의 clearPresence 문서 주석 참고).
+      clearPresence(meta.id);
       await recordAudit({ type: 'deleted', docId: meta.id, detail: meta.name });
       return { success: true, data: { id: meta.id } };
     },

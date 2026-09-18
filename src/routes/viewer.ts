@@ -531,38 +531,33 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
               pageSizePersistence(view.meta.id),
             ).catch(() => undefined)
           : undefined;
-      // 편집기가 열리기 전 "저장하면 이미지가 사라집니다" 경고를 띄우기 위한 사전 검사
-      // (canEdit 토큰 + docx일 때만 — 원본을 다시 읽는 비용이 있으므로 불필요하면 건너뛴다)
-      const editHasUnsupportedContent =
-        view.claims.perms.canEdit && view.meta.ext === 'docx'
-          ? await store
-              .readOriginal(view.meta.id, view.meta.ext)
-              .then(docxHasUnsupportedContent)
+      // 아래 네 값 모두 docx일 때만 필요하고 전부 같은 원본 파일을 본다 — 예전에는 각자
+      // store.readOriginal을 따로 불러 같은(수 MB일 수 있는) 파일을 최대 4번 읽고 4번 다시
+      // zip/XML 파싱했다. 한 번만 읽어 네 파서에 그대로 넘기고, 서로 독립적으로 실패할 수 있게
+      // (한 파서가 손상된 문서 때문에 던져도 나머지는 자기 값을 그대로 쓰게) 각각 개별
+      // catch로 감싼 채 병렬로 돌린다.
+      const docxBytes =
+        view.meta.ext === 'docx' ? await store.readOriginal(view.meta.id, view.meta.ext).catch(() => null) : null;
+      const [editHasUnsupportedContent, pageSetup, defaultFontSizePt, defaultFontFamily] = await Promise.all([
+        // "저장하면 이미지가 사라집니다" 경고를 띄우기 위한 사전 검사 — canEdit 토큰일 때만 계산한다
+        // (파일은 이미 읽었지만, 이 함수 자체를 돌리는 CPU 비용은 필요할 때만 쓴다).
+        docxBytes && view.claims.perms.canEdit
+          ? Promise.resolve()
+              .then(() => docxHasUnsupportedContent(docxBytes))
               .catch(() => false)
-          : false;
-      // docx 에디터가 실제 Word 페이지 크기·여백 비율로 화면을 그리기 위한 값(src/client/editor.ts).
-      // 원본을 다시 읽어야 해서(canEdit 여부와 무관하게) docx일 때만 계산한다.
-      const pageSetup =
-        view.meta.ext === 'docx'
-          ? await store.readOriginal(view.meta.id, view.meta.ext).then(getDocxPageSetup).catch(() => null)
-          : null;
-      // 직접 서식도 스타일도 없는 실행문이 상속받는 문서 기본 폰트 크기(w:docDefaults) —
-      // 없으면 브라우저 기본값(16px)이 적용되어 Word가 실제로 보여주는 크기와 달라진다.
-      const defaultFontSizePt =
-        view.meta.ext === 'docx'
-          ? await store
-              .readOriginal(view.meta.id, view.meta.ext)
-              .then(getDocxDefaultFontSizePt)
-              .catch(() => null)
-          : null;
-      // 문서 기본 서체(word/theme/theme1.xml로 해석) — 없으면 null(에디터가 기존 폰트를 그대로 씀).
-      const defaultFontFamily =
-        view.meta.ext === 'docx'
-          ? await store
-              .readOriginal(view.meta.id, view.meta.ext)
-              .then(getDocxDefaultFontFamily)
-              .catch(() => null)
-          : null;
+          : Promise.resolve(false),
+        // docx 에디터가 실제 Word 페이지 크기·여백 비율로 화면을 그리기 위한 값(src/client/editor.ts).
+        docxBytes ? Promise.resolve().then(() => getDocxPageSetup(docxBytes)).catch(() => null) : Promise.resolve(null),
+        // 직접 서식도 스타일도 없는 실행문이 상속받는 문서 기본 폰트 크기(w:docDefaults) —
+        // 없으면 브라우저 기본값(16px)이 적용되어 Word가 실제로 보여주는 크기와 달라진다.
+        docxBytes
+          ? Promise.resolve().then(() => getDocxDefaultFontSizePt(docxBytes)).catch(() => null)
+          : Promise.resolve(null),
+        // 문서 기본 서체(word/theme/theme1.xml로 해석) — 없으면 null(에디터가 기존 폰트를 그대로 씀).
+        docxBytes
+          ? Promise.resolve().then(() => getDocxDefaultFontFamily(docxBytes)).catch(() => null)
+          : Promise.resolve(null),
+      ]);
       return {
         success: true,
         data: {

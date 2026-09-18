@@ -62,6 +62,7 @@ import {
   closeLazyGridStore,
   getCell,
   getRow,
+  getRowCells,
   growSheet,
   ingestXlsxLazily,
   setDirtyCell,
@@ -890,26 +891,31 @@ async function recomputeFormulasForPage(room: Room, sheetIdx: number, page: numb
   const sheetNameIndex = buildStoreSheetNameIndex(store);
   for (let start = pageStart; start < pageEnd; start += RECOMPUTE_YIELD_EVERY_N_ROWS) {
     const end = Math.min(start + RECOMPUTE_YIELD_EVERY_N_ROWS, pageEnd);
-    // "이 칸이 수식인가"를 판정하려면 원본 텍스트가 필요하다 — getCell은 더티 오버레이를 먼저
-    // 보고 없으면 디스크/캐시에서 읽으므로, 편집된 칸이든 원본 그대로인 칸이든 항상 정확한
+    // "이 칸이 수식인가"를 판정하려면 원본 텍스트가 필요하다 — getRowCells는 더티 오버레이를
+    // 먼저 보고 없으면 디스크/캐시에서 읽으므로, 편집된 칸이든 원본 그대로인 칸이든 항상 정확한
     // "지금" 텍스트를 준다(seedGridPageFromXlsx의 resolveGridCell과 같은 규칙, xlsx/collab.ts 참고).
-    // 청크 안의 모든 좌표를 한 번에 Promise.all로 흘려보내 디스크 왕복을 겹치게 한다.
-    const coords: Array<{ r: number; c: number }> = [];
-    for (let r = start; r < end; r += 1) {
-      for (let c = 0; c < meta.colCount; c += 1) coords.push({ r, c });
-    }
-    const cellsAtCoords = await Promise.all(coords.map(({ r, c }) => getCell(store, sheetIdx, r, c)));
+    // 행 단위로 한 번에 Promise.all로 흘려보내 디스크 왕복을 겹치게 한다 — getCell을 칸마다 부르면
+    // 같은 행을 열 개수만큼 다시 캐시 조회(LRU 재정렬 포함)하게 되므로 행 하나당 한 번만 읽는다
+    // (getRowCells 문서 주석 참고).
+    const rowsInChunk: number[] = [];
+    for (let r = start; r < end; r += 1) rowsInChunk.push(r);
+    const rowCellsList = await Promise.all(
+      rowsInChunk.map((r) => getRowCells(store, sheetIdx, r, meta.colCount)),
+    );
 
     const nonFormulaKeys: string[] = [];
     const formulaCells: Array<{ r: number; c: number; key: string }> = [];
-    for (let i = 0; i < coords.length; i += 1) {
-      const { r, c } = coords[i];
-      const cell = cellsAtCoords[i];
-      const key = gridCellKey(sheetIdx, r, c);
-      if (cell === 0 || cell === undefined || !cell.v.startsWith('=')) {
-        nonFormulaKeys.push(key);
-      } else {
-        formulaCells.push({ r, c, key });
+    for (let ri = 0; ri < rowsInChunk.length; ri += 1) {
+      const r = rowsInChunk[ri];
+      const rowCells = rowCellsList[ri];
+      for (let c = 0; c < meta.colCount; c += 1) {
+        const cell = rowCells[c];
+        const key = gridCellKey(sheetIdx, r, c);
+        if (cell === 0 || cell === undefined || !cell.v.startsWith('=')) {
+          nonFormulaKeys.push(key);
+        } else {
+          formulaCells.push({ r, c, key });
+        }
       }
     }
     // Yjs의 transact() 콜백은 반드시 동기여야 한다(비동기 콜백을 넘기면 첫 await에서 콜백이

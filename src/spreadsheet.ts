@@ -739,32 +739,19 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
     // 남은 "유령 행"이 맨 끝에 더 포함되는 과다 계산 걱정은 없다 — 아래 lastWithValue 트리밍이
     // 어차피 그런 꼬리 행을 실제 데이터 기준으로 다시 잘라낸다.
     const rowCount = Math.min(sheet.rowCount || 0, MAX_ROWS);
-    // actualColumnCount는 맨 오른쪽 열이 수식 셀만 있을 때 그 열을 세지 않는 경우가 있다(ExcelJS
-    // 자체 버그로 보임 — 값이 아니라 수식만 있는 열은 "dimensions" 추적에서 빠지는 듯하다). 이 값만
-    // 믿으면 예: 맨 오른쪽 합계(=SUM) 열이 통째로 누락되고, 그 결과 동시편집 저장 시
-    // exportXlsxFromGrid의 "구조 밖 열 잘라내기" 로직이 그 열을 실제로 지워버린다. 그래서 전체
-    // 행을 훑어 실제로 쓰인 최대 열 번호도 함께 구해 더 큰 쪽을 쓴다. (이 스캔 범위도 위와 같은
-    // 이유로 actualRowCount가 아니라 이미 고쳐진 rowCount를 그대로 재사용해야, 성긴 시트에서
-    // 뒤쪽 열 스캔 자체가 일찍 끊기는 일이 없다.)
-    let maxColUsed = 0;
-    const scanRowCount = rowCount;
-    for (let r = 1; r <= scanRowCount; r += 1) {
-      sheet.getRow(r).eachCell({ includeEmpty: false }, (_cell, colNumber) => {
-        if (colNumber > maxColUsed) maxColUsed = colNumber;
-      });
-      if (r % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
-    }
-    const colCount = Math.min(Math.max(sheet.actualColumnCount || 0, maxColUsed), MAX_COLS);
-    if (rowCount === 0 || colCount === 0) continue;
+    if (rowCount === 0) continue;
     // exceljs 타입 선언에는 없지만 런타임에는 시트 보호 시 채워진다(themes와 동일한 이유로 캐스팅)
     const sheetProtected = Boolean((sheet as unknown as { sheetProtection?: unknown }).sheetProtection);
 
-    const colWidths: number[] = [];
-    for (let c = 1; c <= colCount; c += 1) {
-      const width = sheet.getColumn(c).width;
-      colWidths.push(width ? Math.round(width * CHAR_TO_PX) : DEFAULT_COL_WIDTH_PX);
-    }
-
+    // actualColumnCount는 맨 오른쪽 열이 수식 셀만 있을 때 그 열을 세지 않는 경우가 있다(ExcelJS
+    // 자체 버그로 보임 — 값이 아니라 수식만 있는 열은 "dimensions" 추적에서 빠지는 듯하다). 이 값만
+    // 믿으면 예: 맨 오른쪽 합계(=SUM) 열이 통째로 누락되고, 그 결과 동시편집 저장 시
+    // exportXlsxFromGrid의 "구조 밖 열 잘라내기" 로직이 그 열을 실제로 지워버린다. 그래서 아래
+    // 본문 루프에서 실제로 쓰인 최대 열 번호(maxColUsed)도 함께 구해 더 큰 쪽을 쓴다 — 예전에는
+    // 이걸 위해 전체 행을 한 번 더 훑는 별도 사전 스캔이 있었지만, 각 행의 칸 배열을 고정 폭이
+    // 아니라 필요할 때마다 늘려가며 채우면(streaming 경로 ingestXlsxLazily와 같은 기법) 본문
+    // 루프 한 번으로 maxColUsed까지 같이 구할 수 있어 ExcelJS 행/셀 순회를 두 번 하지 않는다.
+    let maxColUsed = 0;
     const rows: Array<Array<GridCell | 0>> = [];
     // 이 시트가 sheets 배열에서 갖게 될 인덱스 — 아래 sheets.push가 이 반복의 마지막이고, 여기까지
     // 왔으면 더 이상 continue로 건너뛰지 않으므로 지금 값이 곧 최종 인덱스다(숨김/빈 시트가
@@ -772,13 +759,15 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
     const sheetIdx = sheets.length;
     for (let r = 1; r <= rowCount; r += 1) {
       const row = sheet.getRow(r);
-      const cells: Array<GridCell | 0> = new Array(colCount).fill(0);
+      const cells: Array<GridCell | 0> = [];
       // includeEmpty:true여야 한다 — 값은 없지만 스타일(잠금·숫자 전용 유효성 검사·테두리 등)만
       // 있는 칸도 빠짐없이 읽는다. false로 두면 "값이 없는 칸"은 아예 순회 대상에서 빠져, 예를 들어
       // 아직 아무도 입력하지 않은 숫자 전용 칸이 잠금·유효성 검사 정보 없이 렌더링되어 아무 텍스트나
       // 입력·붙여넣기해도 막히지 않는 문제가 있었다(실제로 재현된 버그).
       row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-        if (colNumber > colCount) return;
+        if (colNumber > MAX_COLS) return;
+        if (colNumber > maxColUsed) maxColUsed = colNumber;
+        while (cells.length < colNumber) cells.push(0);
         const text = displayValue(cell);
         const styleRef = extractStyle(cell, palette, themeColors, sheetProtected);
         if (text === '' && styleRef === undefined) return;
@@ -791,6 +780,20 @@ export async function parseXlsxToGrid(xlsxBytes: Buffer): Promise<GridDocument> 
       });
       rows.push(cells);
       if (r % YIELD_EVERY_N_ROWS === 0) await yieldToEventLoop();
+    }
+    const colCount = Math.min(Math.max(sheet.actualColumnCount || 0, maxColUsed), MAX_COLS);
+    if (colCount === 0) continue;
+    // 위 루프는 각 행을 그 행에서 실제로 마주친 마지막 칸까지만 채우므로(동적 성장), 시트 전체의
+    // colCount보다 짧게 끝난 행이 있을 수 있다 — 고정 폭 배열이었던 예전 방식과 동일한 모양으로
+    // 맞추기 위해 0으로 패딩한다.
+    for (const cells of rows) {
+      while (cells.length < colCount) cells.push(0);
+    }
+
+    const colWidths: number[] = [];
+    for (let c = 1; c <= colCount; c += 1) {
+      const width = sheet.getColumn(c).width;
+      colWidths.push(width ? Math.round(width * CHAR_TO_PX) : DEFAULT_COL_WIDTH_PX);
     }
 
     // 서식만 남은 유령 행(값 없는 꼬리 행)을 잘라내 행 수를 실제 데이터 기준으로 맞춘다
