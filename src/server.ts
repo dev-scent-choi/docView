@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isApiKeyAuthEnabled } from './apiKeyAuth.js';
 import { buildApp } from './app.js';
 import { config } from './config.js';
@@ -6,6 +9,13 @@ import { sofficePath, warmUpProfiles } from './converters/libreOffice.js';
 import { isEphemeralSecret } from './security.js';
 import { ensureDataDirs } from './storage.js';
 import { sweepOrphanedLazyGridFiles } from './xlsx/lazyGridStore.js';
+
+/** public/rhwp/는 git에 커밋하지 않고 scripts/mirror-rhwp-studio.mjs로 받는다(tools/의 DWG
+ * 변환기 바이너리와 같은 이유 — README "한글(hwp/hwpx) 편집" 참고). 없으면 hwp/hwpx의 PDF
+ * 전용 열람(LibreOffice 경로)은 그대로 동작하지만 편집기(editor-hwp.html)는 로드에 실패한다. */
+const rhwpStudioMirrored = existsSync(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'rhwp', 'index.html'),
+);
 
 async function main(): Promise<void> {
   await ensureDataDirs();
@@ -28,6 +38,11 @@ async function main(): Promise<void> {
   }
   if (!sofficePath) {
     app.log.warn('LibreOffice가 없어 Office/DXF 변환이 비활성화되었습니다. (DOCVIEW_SOFFICE로 경로 지정 가능)');
+  }
+  if (!rhwpStudioMirrored) {
+    app.log.warn(
+      'public/rhwp/가 없어 한글(hwp/hwpx) 편집기가 열리지 않습니다. node scripts/mirror-rhwp-studio.mjs로 받으세요.',
+    );
   }
   app.log.info(
     config.adminPassword

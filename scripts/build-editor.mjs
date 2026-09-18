@@ -32,3 +32,9 @@ await build({
   entryPoints: ['src/client/editor-slides.ts'],
   outfile: 'public/js/editor-slides.bundle.js',
 });
+
+await build({
+  ...shared,
+  entryPoints: ['src/client/editor-hwp.ts'],
+  outfile: 'public/js/editor-hwp.bundle.js',
+});

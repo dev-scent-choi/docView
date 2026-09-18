@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DocView — 한글 편집</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='3' width='19' height='26' rx='3' fill='%231f4d47'/%3E%3Cpath d='M18 3v6a2 2 0 0 0 2 2h6z' fill='%234fd6c4'/%3E%3Crect x='9' y='16' width='11' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3Crect x='9' y='21' width='8' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/css/style.css" />
+  <style>
+    /* rhwp-studio는 자체 메뉴·툴바·상태줄을 iframe 안에 통째로 그린다 — 이 화면의 헤더는
+       "문서 목록으로/제목/저장 상태"만 담당하는 얇은 바 하나면 된다. */
+    body { margin: 0; height: 100vh; display: flex; flex-direction: column; }
+    #hwp-toolbar { flex: none; }
+    #hwp-frame-host { flex: 1 1 auto; min-height: 0; position: relative; }
+    /* rhwp-studio가 자기 안에서 이미 완결된 "종이" 레이아웃을 그리므로, 이 화면 쪽 컨테이너는
+       docx 에디터용 .editor-surface(고정 max-width·padding·중앙정렬 카드 모양)를 쓰지 않고
+       그냥 남은 공간 전체를 iframe에 그대로 내준다. */
+    #hwp-editor-container { width: 100%; height: 100%; }
+    #hwp-frame-host iframe { width: 100%; height: 100%; border: 0; display: block; }
+    #save-status { font-size: 0.8rem; color: var(--muted, #8a8f98); margin-left: 0.5rem; }
+    #save-btn { margin-left: 0.75rem; }
+  </style>
+</head>
+<body class="editor-body">
+  <header class="editor-toolbar" id="toolbar">
+    <div class="toolbar-top-row" id="hwp-toolbar">
+      <div class="toolbar-group toolbar-left">
+        <a href="/" class="icon-btn" title="문서 목록으로" aria-label="문서 목록으로 돌아가기">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+        </a>
+        <span id="doc-title" class="doc-title">문서 불러오는 중…</span>
+        <span id="readonly-badge" class="readonly-badge" hidden>읽기 전용</span>
+        <button id="save-btn" class="btn-pill btn-pill-primary" hidden>저장</button>
+        <span id="save-status"></span>
+      </div>
+    </div>
+  </header>
+
+  <div id="hwp-frame-host">
+    <main id="hwp-editor-container"></main>
+  </div>
+
+  <div id="error-screen" class="error-screen" hidden>
+    <div class="error-card">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+      <p id="error-message"></p>
+      <a href="/" class="btn-pill btn-pill-primary">문서 목록으로</a>
+    </div>
+  </div>
+
+  <script type="module" src="/js/editor-hwp.bundle.js"></script>
+</body>
+</html>

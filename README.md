@@ -20,12 +20,9 @@
     않는다). 정규화에 성공하면 파일명·다운로드도 그 시점부터 `.xlsx`로 바뀐다(원본 바이너리는
     보존하지 않는다). LibreOffice가 없거나 변환이 실패하면 기존처럼 PDF 전용 열람(편집 불가)으로
     남는다.
-  - hwp/hwpx(한글)도 xls/ods와 같은 이유·같은 방식으로 업로드 시점에 LibreOffice로 docx로 자동
-    정규화된다(그래야 문서 동시편집기가 켜진다 — 별도의 한글 전용 파싱 엔진은 없다). 정규화에
-    성공하면 파일명·다운로드도 그 시점부터 `.docx`로 바뀐다(원본 한글 바이너리는 보존하지 않는다).
-    LibreOffice가 없거나 변환이 실패하면 기존처럼 PDF 전용 열람(편집 불가)으로 남는다. 변환 품질은
-    LibreOffice의 HWP 임포트 필터(H2Orestart 확장, 아래 관리자 페이지 참고)에 좌우되며 표/도형/
-    특수 한글 서식은 100% 그대로 옮겨지지 않을 수 있다.
+  - hwp/hwpx(한글) PDF 전용 열람(변환·보기용 pages 뷰)은 지금까지처럼 LibreOffice의 HWP
+    임포트 필터(H2Orestart 확장, 아래 관리자 페이지 참고)로 처리한다 — 여기엔 xls/ods 같은
+    자동 정규화가 없다(그럴 필요가 없어졌다, 바로 아래 문단 참고).
 - (선택) DWG 열람 — dwg는 먼저 DXF로 변환한 뒤 LibreOffice로 PDF화한다(위 LibreOffice도 필요).
   DWG→DXF 변환기는 아래 둘 중 하나가 있으면 자동 감지된다:
   - **LibreDWG (권장, 로그인 불필요)** — [공식 릴리스](https://github.com/LibreDWG/libredwg/releases)의
@@ -37,6 +34,39 @@
     없으면 LibreDWG 쪽을 씀 — 변환 정확도는 ODA가 더 높지만 무인/스크립트 설치가 안 된다.
   - 둘 다 표준 경로가 아닌 곳에 있다면 `DOCVIEW_DWG2DXF`(LibreDWG 실행 파일 경로) 또는
     `DOCVIEW_ODA_CONVERTER`(ODAFileConverter.exe 경로) 환경 변수로 직접 지정할 수 있다.
+
+## 한글(hwp/hwpx) 편집
+
+docx/xlsx/pptx와 달리 hwp/hwpx는 **[@rhwp/editor](https://github.com/edwardkim/rhwp)** (오픈소스,
+Rust+WebAssembly로 구현된 HWP 리더/라이터) 기반의 **전용 편집기**(`/editor-hwp.html`)로 연다 —
+LibreOffice로 다른 포맷으로 변환하지 않고 원본 `.hwp`/`.hwpx` 바이트를 그대로 읽고 그대로 다시
+써낸다(확장자·바이너리 포맷 보존). 실제 운영 hwp 샘플로 업로드→편집→저장→재다운로드까지
+왕복 검증해 원본과 픽셀 단위로 동일하게 복원됨을 확인했다.
+
+- **동시편집이 아니다.** docx/xlsx/pptx는 Yjs CRDT로 여러 명이 같은 문서를 실시간으로 같이
+  고칠 수 있지만, rhwp는 이 방식의 실시간 동시편집을 지원하지 않는다(2026-09 기준). hwp/hwpx는
+  단일 사용자가 열어서 고치고 명시적으로 "저장" 버튼을 눌러야 서버에 반영되는 모델이다.
+- **완전히 자체 호스팅한다.** `@rhwp/editor`는 기본적으로 `edwardkim.github.io`에 있는 편집기
+  화면을 iframe으로 불러오지만, 이 저장소는 그 빌드 산출물을 `scripts/mirror-rhwp-studio.mjs`로
+  통째로 미러링해 `public/rhwp/`에 두고 우리 서버 자신의 origin(`/rhwp/...`)에서 서빙한다 —
+  문서 내용이 외부 사이트로 전달되지 않는다(Rust/wasm-pack 툴체인이 로컬에 없어 소스 재빌드
+  대신 이미 배포된 정적 산출물을 그대로 미러링하는 방식을 택했다).
+  `public/rhwp/`는 `tools/`(DWG 변환기)와 같은 이유로 git에 커밋하지 않는다 — **처음
+  체크아웃했거나 rhwp가 새 버전을 낼 때마다** 아래 명령으로 받아야 한글 편집기가 열린다
+  (없어도 서버는 정상 기동하며, hwp/hwpx의 PDF 전용 열람은 영향받지 않는다 — 부팅 로그에
+  경고만 남는다):
+  ```bash
+  node scripts/mirror-rhwp-studio.mjs
+  ```
+  - 예외: 폰트 대체를 위해 흔치 않은 일부 폰트(KoPub 계열 등)는 자체 미러링 대상에 없어
+    `cdn.jsdelivr.net`에서 그때그때 받아온다 — 문서 내용이 아니라 폰트 파일만 나가는
+    낮은 수준의 잔여 아웃바운드다. 완전히 없애려면 Rust 툴체인으로 rhwp-studio를
+    `RHWP_DISABLE_EXTERNAL_WEBFONTS=1`로 직접 빌드해야 한다(README 참고, 이 저장소는 아직
+    이 방식을 쓰지 않는다).
+- **원본 폰트가 없으면 오픈소스 폰트로 자동 대체된다**(한컴바탕→Noto Serif KR, 함초롬돋움→
+  Pretendard 등). 글자 간격이 원본과 미세하게 다를 수 있지만 내용 열람·편집에는 지장이 없다.
+- 이 저장소는 한글과컴퓨터와 제휴·후원·승인 관계가 없는 독립 오픈소스 프로젝트를 쓴다 —
+  트레이드마크("한글"/"한컴"/"HWP"/"HWPX")는 ㈜한글과컴퓨터의 등록 상표다.
 
 ## 설치
 

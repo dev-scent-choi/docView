@@ -8,11 +8,13 @@ import { SizedLruCache } from '../cache.js';
 import { config } from '../config.js';
 import { findConverter } from '../converters/index.js';
 import { IMAGE_MIME_BY_EXT } from '../pptx/slideContent.js';
+import { convertToPdf } from './documents.js';
 import {
   PageOutOfRangeError,
   buildPrintPdf,
   burnMarkupIntoPdf,
   getPageDimensions,
+  invalidateRenderCache,
   renderPage,
   type PageSize,
   type PersistedPageSizes,
@@ -988,6 +990,64 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
         .type('application/octet-stream')
         .header('content-disposition', `attachment; filename*=UTF-8''${encodedName}`)
         .send(data);
+    },
+  );
+
+  // 한글(hwp/hwpx) 전용 편집기(public/editor-hwp.html, @rhwp/editor iframe)가 문서를 로드할 때
+  // 쓴다. canDownload가 아니라 유효한 열람 토큰만 요구한다 — docx 에디터가 canEdit=false 토큰도
+  // "읽기 전용 모드"로 받아 원본을 로드하는 것과 같은 성격(759214c). 실제 쓰기 차단은
+  // /api/view/hwp-save의 canEdit 검사가 담당한다.
+  app.get<{ Querystring: TokenQuery }>(
+    '/api/view/hwp-source',
+    { schema: { querystring: tokenQuerySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if (view.meta.ext !== 'hwp' && view.meta.ext !== 'hwpx') {
+        return reply.code(400).send({ success: false, error: 'hwp/hwpx 문서가 아닙니다.' });
+      }
+      const data = await store.readOriginal(view.meta.id, view.meta.ext);
+      return reply.type('application/octet-stream').send(data);
+    },
+  );
+
+  // rhwp 에디터(iframe)가 브라우저에서 편집 후 exportHwp()/exportHwpx()로 내보낸 바이트를
+  // 그대로 받아 원본을 덮어쓴다. docx/xlsx/pptx의 Yjs 자동저장과 달리 여기는 단일 사용자
+  // 편집 모델이라(rhwp가 실시간 동시편집 CRDT를 지원하지 않음) 클라이언트가 명시적으로
+  // 호출하는 "저장" 한 번이 곧 전체 문서 교체다.
+  app.post<{ Querystring: TokenQuery }>(
+    '/api/view/hwp-save',
+    { schema: { querystring: tokenQuerySchema } },
+    async (request, reply) => {
+      const view = await resolveView(request.query.token, reply);
+      if (!view) return reply;
+      if (view.meta.ext !== 'hwp' && view.meta.ext !== 'hwpx') {
+        return reply.code(400).send({ success: false, error: 'hwp/hwpx 문서가 아닙니다.' });
+      }
+      if (!view.claims.perms.canEdit) {
+        return reply.code(403).send({ success: false, error: '편집 권한이 없습니다.' });
+      }
+      const data = request.body as Buffer;
+      if (!data || data.length === 0) {
+        return reply.code(400).send({ success: false, error: '저장할 문서 내용이 없습니다.' });
+      }
+      await store.saveOriginal(view.meta.id, view.meta.ext, data);
+
+      let pageCount = view.meta.pageCount;
+      const converter = findConverter(view.meta.ext);
+      if (converter) {
+        try {
+          const converted = await convertToPdf({ ...view.meta }, converter);
+          pageCount = converted.pageCount;
+          await store.writeMeta({ ...view.meta, pageCount, status: 'ready', viewKind: 'pages', progress: 100 });
+        } catch (error) {
+          request.log.error(error, 'hwp 저장 후 PDF 재변환 실패');
+        }
+      }
+      invalidateRenderCache(view.meta.id);
+      invalidateViewCaches(view.meta.id);
+      await recordAudit({ type: 'edit_saved', docId: view.meta.id, viewer: view.claims.viewer });
+      return { success: true, data: { pageCount } };
     },
   );
 }

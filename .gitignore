@@ -22,6 +22,12 @@ public/js/grid-editor.bundle.js
 public/js/grid-editor.bundle.js.map
 public/js/editor-slides.bundle.js
 public/js/editor-slides.bundle.js.map
+public/js/editor-hwp.bundle.js
+public/js/editor-hwp.bundle.js.map
+
+# 외부 프로젝트(@rhwp/editor의 rhwp-studio) 미러 — tools/와 같은 이유로 커밋하지 않는다.
+# node scripts/mirror-rhwp-studio.mjs로 받는다(README "한글(hwp/hwpx) 편집" 참고).
+public/rhwp/
 
 # 브라우저 회귀 테스트 산출물(스크린샷·샘플 업로드 파일) — 실행할 때마다 재생성됨
 scripts/.screenshots/

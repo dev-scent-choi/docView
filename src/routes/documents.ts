@@ -8,7 +8,7 @@ import { forceCloseRoom } from '../collab/room.js';
 import { config } from '../config.js';
 import { convertDwgToDxf } from '../converters/dwgConverter.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
-import { convertDxfToSvg, convertHwpToDocx, convertLegacySpreadsheetToXlsx } from '../converters/libreOffice.js';
+import { convertDxfToSvg, convertLegacySpreadsheetToXlsx } from '../converters/libreOffice.js';
 import { ConversionError, type Converter } from '../converters/types.js';
 import { getPdfPageInfo, invalidateRenderCache } from '../rendering.js';
 import { issueViewToken } from '../security.js';
@@ -46,11 +46,14 @@ const PROGRESS_PDF_DONE = 85;
 const GRID_VIEW_EXTS = new Set(['xlsx', 'csv']);
 
 /** 실시간 동시편집(에디터)을 지원하는 확장자 — docx는 문서 편집기, xlsx는 그리드 편집기,
- * pptx는 슬라이드 구성 편집기로 연결된다 */
-export const EDITABLE_EXTS = new Set(['docx', 'xlsx', 'pptx']);
+ * pptx는 슬라이드 구성 편집기로 연결된다. hwp/hwpx는 다른 셋과 달리 Yjs 동시편집이 아니라
+ * @rhwp/editor(단일 사용자 편집, 명시적 저장) 기반 전용 편집기로 연결된다 — 원본 .hwp/.hwpx
+ * 확장자·바이트를 그대로 유지한 채 편집하기 위해서다(README 참고). */
+export const EDITABLE_EXTS = new Set(['docx', 'xlsx', 'pptx', 'hwp', 'hwpx']);
 export function editorPathFor(ext: string): string {
   if (ext === 'xlsx') return '/editor-grid.html';
   if (ext === 'pptx') return '/editor-slides.html';
+  if (ext === 'hwp' || ext === 'hwpx') return '/editor-hwp.html';
   return '/editor.html';
 }
 
@@ -166,27 +169,6 @@ async function tryNormalizeLegacySpreadsheetToXlsx(
   }
 }
 
-/** 위와 완전히 같은 이유·같은 방식 — hwp/hwpx 업로드를 docx가 올라온 것과 동일하게 취급해(ext까지
- * 바꿔치기) 문서 동시편집기가 그대로 켜지게 한다. 실패하면(LibreOffice 미설치, 손상된 파일 등)
- * null을 돌려주고 호출부가 원래 ext로 계속 진행한다 — hwp/hwpx는 여전히 officeConverter(PDF 전용
- * 열람)로 폴백 가능하다(그 경로도 LibreOffice가 필요해, LibreOffice가 아예 없으면 거기서도 결국
- * 415로 거부된다 — 일관된 결과). */
-async function tryNormalizeHwpToDocx(data: Buffer, ext: 'hwp' | 'hwpx'): Promise<Buffer | null> {
-  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docview-hwpdocx-'));
-  try {
-    const sourcePath = path.join(workDir, `source.${ext}`);
-    await fs.writeFile(sourcePath, data);
-    const targetDocxPath = path.join(workDir, 'out.docx');
-    await convertHwpToDocx(sourcePath, ext, targetDocxPath);
-    return await fs.readFile(targetDocxPath);
-  } catch (error) {
-    console.warn(`.${ext} → docx 정규화 실패 (PDF 전용 열람으로 폴백):`, error);
-    return null;
-  } finally {
-    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  }
-}
-
 async function runConversion(app: FastifyInstance, converter: Converter, meta: DocumentMeta): Promise<void> {
   try {
     await store.writeMeta({ ...meta, progress: PROGRESS_CONVERTING });
@@ -213,7 +195,7 @@ interface UploadResult {
 }
 
 /** 업로드 진입점 두 곳(multipart 폼 필드 / 원시 바이트 스트림)이 공유하는 실제 처리 로직 —
- * 파일명과 바이트만 받으면 나머지(확장자 판별, xls/ods/hwp/hwpx 정규화, 변환기 조회, 저장,
+ * 파일명과 바이트만 받으면 나머지(확장자 판별, xls/ods 정규화, 변환기 조회, 저장,
  * 백그라운드 변환 착수)는 완전히 동일하다. 반환값을 라우트 핸들러가 그대로 reply.code(...).send(...)에
  * 싣는다. */
 async function ingestUpload(
@@ -239,15 +221,6 @@ async function ingestUpload(
       // Content-Disposition 파일명으로 쓴다).
       displayName = `${displayName.replace(/\.[^./]+$/, '')}.xlsx`;
       ext = 'xlsx';
-    }
-  } else if (ext === 'hwp' || ext === 'hwpx') {
-    // 한글(hwp/hwpx)도 위 xls/ods와 같은 이유로 docx로 정규화한다 — 이 서비스의 문서
-    // 동시편집기는 docx 구조를 전제로 하므로, hwp를 실제로 "편집"하려면 이 방법뿐이다.
-    const converted = await tryNormalizeHwpToDocx(data, ext);
-    if (converted) {
-      data = converted;
-      displayName = `${displayName.replace(/\.[^./]+$/, '')}.docx`;
-      ext = 'docx';
     }
   }
   const converter = findConverter(ext);
