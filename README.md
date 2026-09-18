@@ -20,7 +20,12 @@
     않는다). 정규화에 성공하면 파일명·다운로드도 그 시점부터 `.xlsx`로 바뀐다(원본 바이너리는
     보존하지 않는다). LibreOffice가 없거나 변환이 실패하면 기존처럼 PDF 전용 열람(편집 불가)으로
     남는다.
-  - hwp/hwpx도 같은 LibreOffice 경로로 PDF 변환만 한다 — 별도의 한글 전용 파싱 엔진은 없다.
+  - hwp/hwpx(한글)도 xls/ods와 같은 이유·같은 방식으로 업로드 시점에 LibreOffice로 docx로 자동
+    정규화된다(그래야 문서 동시편집기가 켜진다 — 별도의 한글 전용 파싱 엔진은 없다). 정규화에
+    성공하면 파일명·다운로드도 그 시점부터 `.docx`로 바뀐다(원본 한글 바이너리는 보존하지 않는다).
+    LibreOffice가 없거나 변환이 실패하면 기존처럼 PDF 전용 열람(편집 불가)으로 남는다. 변환 품질은
+    LibreOffice의 HWP 임포트 필터(H2Orestart 확장, 아래 관리자 페이지 참고)에 좌우되며 표/도형/
+    특수 한글 서식은 100% 그대로 옮겨지지 않을 수 있다.
 - (선택) DWG 열람 — dwg는 먼저 DXF로 변환한 뒤 LibreOffice로 PDF화한다(위 LibreOffice도 필요).
   DWG→DXF 변환기는 아래 둘 중 하나가 있으면 자동 감지된다:
   - **LibreDWG (권장, 로그인 불필요)** — [공식 릴리스](https://github.com/LibreDWG/libredwg/releases)의

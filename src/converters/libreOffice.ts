@@ -420,6 +420,55 @@ export async function convertLegacySpreadsheetToXlsx(
 }
 
 /**
+ * 한글(hwp/hwpx) → docx. 위 xls/ods → xlsx와 완전히 같은 이유·같은 방식이다: 이 서비스의 문서
+ * 동시편집기는 docx(zip+XML) 구조를 전제로 짜여 있어(docx/import.ts·export.ts 어디에도 HWP
+ * 파서가 없다) hwp를 실제로 "편집"하려면 업로드 시점에 docx로 정규화하는 것 외에 다른 방법이
+ * 없다. documents.ts의 업로드 핸들러가 findConverter를 부르기 전, ext/데이터를 아예 docx로
+ * 바꿔치기해 호출한다 — 그 뒤로는 시스템 전체가 원래부터 docx가 올라온 것처럼 동작한다(문서
+ * 동시편집기가 자동으로 켜짐). 변환 후로는 다운로드도 docx로 내려간다(원본 .hwp 바이트는
+ * 보존하지 않는다) — 편집 자체가 docx 모델을 통해서만 가능하므로 "편집됐을 수도 있는 문서"를
+ * 원본 한글 바이너리로 되돌릴 방법이 애초에 없다.
+ */
+export async function convertHwpToDocx(
+  sourcePath: string,
+  sourceExt: 'hwp' | 'hwpx',
+  targetDocxPath: string,
+): Promise<void> {
+  if (!sofficePath) {
+    throw new Error('LibreOffice(soffice)를 찾을 수 없습니다.');
+  }
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docview-hwpdocx-'));
+  try {
+    const stagedSource = path.join(workDir, `source.${sourceExt}`);
+    await fs.copyFile(sourcePath, stagedSource);
+    await withProfileSlot(async (profileDir) => {
+      await execFileAsync(
+        sofficePath,
+        [
+          '--headless',
+          '--norestore',
+          `-env:UserInstallation=${pathToFileURL(profileDir).href}`,
+          '--convert-to',
+          'docx',
+          '--outdir',
+          workDir,
+          stagedSource,
+        ],
+        { timeout: CONVERT_TIMEOUT_MS },
+      );
+    });
+    const produced = path.join(workDir, 'source.docx');
+    const stat = await fs.stat(produced).catch(() => null);
+    if (!stat || stat.size === 0) {
+      throw new Error('LibreOffice가 DOCX를 생성하지 못했습니다.');
+    }
+    await fs.copyFile(produced, targetDocxPath);
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+/**
  * 서버 시작 시 프로필 풀을 미리 웜업해 첫 변환의 콜드 스타트(수 초)를 없앤다.
  * 각 슬롯에서 초소형 문서를 한 번씩 변환해 LibreOffice 프로필을 생성해 둔다.
  */
