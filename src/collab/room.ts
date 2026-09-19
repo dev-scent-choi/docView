@@ -24,6 +24,7 @@ import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from 'y-
 import { recordAudit } from '../audit.js';
 import { findConverter } from '../converters/index.js';
 import { docxSchema } from '../docx/schema.js';
+import { DocxChangeTracker, type ParagraphChangeSummary } from './docxChangeLog.js';
 import { exportDocx } from '../docx/export.js';
 import { importDocx } from '../docx/import.js';
 import { invalidateRenderCache } from '../rendering.js';
@@ -184,6 +185,9 @@ interface Room {
    * 별개 — dirtyOverlay는 "지금 저장해야 할 값"만 알고 누가/언제는 모른다). CellChangeEntry
    * 문서 주석 참고. */
   readonly cellChangeLog: Map<string, CellChangeEntry>;
+  /** docx 룸에서만 쓰인다 — 문단 단위 누적 변경 추적기(docxChangeLog.ts 문서 주석 참고). 시딩이
+   * 끝난 직후에야 만들 수 있어(기준선이 "시딩 직후의 문단 텍스트"이므로) seedRoom이 채운다. */
+  docxChangeTracker: DocxChangeTracker | null;
   /** 읽기 전용(canEdit:false)으로 참여한 연결 — 이 연결이 보낸 syncStep2/update는 무시한다.
    *  syncStep1(자기 상태 벡터를 보내고 서버 diff를 요청하는 것뿐)은 그대로 응답해야 문서 내용을
    *  받을 수 있으므로 막지 않는다 — 실제 "쓰기"에 해당하는 메시지만 서버에서 직접 걸러낸다
@@ -1344,7 +1348,14 @@ async function seedRoom(room: Room): Promise<void> {
       seedSlidesFromPptx(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
     } else {
       const { doc } = importDocx(original);
-      prosemirrorToYXmlFragment(doc, ydoc.getXmlFragment(XML_FRAGMENT_NAME));
+      const fragment = ydoc.getXmlFragment(XML_FRAGMENT_NAME);
+      prosemirrorToYXmlFragment(doc, fragment);
+      // 시딩 자체는 사용자 편집이 아니므로 이 다음에 추적기를 만든다 — 기준선이 곧 "룸이 열린
+      // 시점의 원본"이 된다.
+      room.docxChangeTracker = new DocxChangeTracker(
+        fragment,
+        (origin) => room.viewerByConn.get(origin as WebSocket) ?? null,
+      );
     }
   } catch (error) {
     console.error(`동시편집 세션 초기화 실패 (문서 ${docId}):`, error);
@@ -1644,6 +1655,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     conns,
     viewerByConn: new Map<WebSocket, string>(),
     cellChangeLog: new Map<string, CellChangeEntry>(),
+    docxChangeTracker: null,
     readOnlyConns: new Set<WebSocket>(),
     autosaveTimer: null,
     ready: Promise.resolve(), // 아래에서 즉시 덮어씀 — seedRoom(room)이 room 자신을 참조해야 해서
@@ -2203,6 +2215,16 @@ export interface CellChangeSummary {
   readonly after: string;
   readonly viewer: string | null;
   readonly at: string;
+}
+
+export type { ParagraphChangeSummary };
+
+/** 문서에 현재 열려 있는 동시편집 룸(docx만)의 누적 문단 변경 로그 — getCellChangeLog와 같은 계약
+ * (룸이 없거나 docx가 아니면 null, 룸은 있는데 편집이 없었으면 빈 배열). */
+export function getParagraphChangeLog(docId: string): readonly ParagraphChangeSummary[] | null {
+  const room = rooms.get(docId);
+  if (!room || room.kind !== 'docx' || !room.docxChangeTracker) return null;
+  return room.docxChangeTracker.list();
 }
 
 function cellTextOf(cell: GridCell | 0): string {

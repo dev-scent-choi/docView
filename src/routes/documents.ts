@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { requireApiKey, type ApiKeyAuthenticatedRequest } from '../apiKeyAuth.js';
 import { recordAudit } from '../audit.js';
-import { forceCloseRoom, getCellChangeLog } from '../collab/room.js';
+import { forceCloseRoom, getCellChangeLog, getParagraphChangeLog } from '../collab/room.js';
 import { config } from '../config.js';
 import { convertDwgToDxf } from '../converters/dwgConverter.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
@@ -327,7 +327,7 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
     // 외부 시스템이 이미 주기적으로 부르는 이 API에 얹는 방식(새 엔드포인트·웹훅 없이). 룸이
     // 없으면(편집자가 전부 나가 이미 저장 완료됐거나, xlsx가 아니면) changes는 빈 배열이다 — "변경
     // 없음"과 "지금은 조회할 수 없음"을 구분하지 않는다(단순화, README에 명시할 부분).
-    const changes = getCellChangeLog(meta.id) ?? [];
+    const changes = getCellChangeLog(meta.id) ?? getParagraphChangeLog(meta.id) ?? [];
     return { success: true, data: { ...meta, changes } };
   });
 

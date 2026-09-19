@@ -191,19 +191,31 @@ node scripts/formula-check.mjs            # xlsx 수식 엔진(VLOOKUP/MATCH/SUM
      ```
      Node에서는 `fetch(url, { method: 'POST', body: fs.createReadStream(path), duplex: 'half', headers: {...} })`
      처럼 파일 스트림을 body에 그대로 넘기면 된다(버퍼로 먼저 전부 읽을 필요 없음).
-2. `GET /api/documents/:id` — 변환 상태 폴링, `status: 'ready'`가 될 때까지. **xlsx이고 지금
-   동시편집 룸이 열려 있으면** 응답에 `changes` 배열이 함께 실린다 — 룸이 열린 뒤로 누적된
-   셀 단위 변경 내역이다:
-   ```json
-   { "sheet": 0, "row": 2, "col": 1, "before": "Alice", "after": "Bob", "viewer": "김철수", "at": "2026-09-18T12:42:59.249Z" }
-   ```
-   `row`/`col`은 1-based(엑셀 A1 표기와 맞춤 — 그리드 검색 API와 같은 관례). **DB 없이 메모리에만
-   있는 값이라 다음 제약이 있다**: (1) 룸이 닫히면(모든 편집자가 나가서 파일로 flush되면) 그 즉시
-   사라진다 — "지금 아무도 안 보고 있다"와 "변경이 없었다"를 구분하지 않고 둘 다 빈 배열이다.
-   (2) 저장 시점마다 초기화하지 않고 룸이 열린 뒤로 계속 누적되므로, 같은 문서를 여러 번 poll하면
-   이미 받은 항목을 다시 받을 수 있다 — 호출하는 쪽이 자기 DB에 넣을 때 (docId, sheet, row, col)
-   조합으로 upsert하는 방식을 권장한다(중복 수신을 전제로 설계). (3) 지금은 xlsx만 지원한다(docx/
-   pptx/hwp는 항상 빈 배열).
+2. `GET /api/documents/:id` — 변환 상태 폴링, `status: 'ready'`가 될 때까지. **xlsx/docx이고 지금
+   동시편집 룸이 열려 있으면** 응답에 `changes` 배열이 함께 실린다 — 룸이 열린 시점 대비 누적된
+   변경 내역이다. 항목 모양은 문서 형식(`ext`)마다 다르다:
+   - **xlsx — 셀 단위**:
+     ```json
+     { "sheet": 0, "row": 2, "col": 1, "before": "Alice", "after": "Bob", "viewer": "김철수", "at": "2026-09-18T12:42:59.249Z" }
+     ```
+     `row`/`col`은 1-based(엑셀 A1 표기와 맞춤 — 그리드 검색 API와 같은 관례).
+   - **docx — 문단 단위**:
+     ```json
+     { "paragraph": 4, "before": "구분", "after": "구분[수정]", "viewer": "이영희", "at": "2026-09-19T00:10:36.637Z" }
+     ```
+     `paragraph`는 현재 문서 순서 기준 1-based 문단 번호(표 셀·목록 항목 안의 문단도 똑같이
+     센다). **삭제된 문단은 `paragraph: null`, `after: ""`**, 새로 추가된 문단은 `before: ""`이다.
+     글자 서식(굵게 등)만 바뀌고 텍스트가 같은 편집, 그리고 빈 채로 새로 생긴 문단은 변경으로
+     보고하지 않는다. 문단이 삽입/삭제되면 번호가 밀리므로 **`paragraph`는 그 시점의 위치일 뿐
+     안정적인 식별자가 아니다** — 이력을 쌓는 쪽은 `before` 텍스트와 `at`을 함께 기록해 두는 것을
+     권장한다.
+
+   **DB 없이 메모리에만 있는 값이라 다음 제약이 있다**: (1) 룸이 닫히면(모든 편집자가 나가서 파일로
+   flush되면) 그 즉시 사라진다 — "지금 아무도 안 보고 있다"와 "변경이 없었다"를 구분하지 않고 둘 다
+   빈 배열이다. (2) 저장 시점마다 초기화하지 않고 룸이 열린 뒤로 계속 누적되므로, 같은 문서를 여러 번
+   poll하면 이미 받은 항목을 다시 받을 수 있다 — 호출하는 쪽이 자기 DB에 넣을 때 upsert하는
+   방식(xlsx는 `sheet,row,col`, docx는 `before`+`at` 조합)을 권장한다(중복 수신을 전제로 설계).
+   (3) pptx/hwp는 아직 지원하지 않는다(항상 빈 배열).
 3. `POST /api/documents/:id/tokens` `{viewer, canEdit, canDownload, canPrint, canCopy}`
    (**API 키 필요**) — 토큰 발급, `{data.token, data.editorUrl 또는 data.viewerUrl}` 반환.
    `editorUrl`/`viewerUrl`은 이
