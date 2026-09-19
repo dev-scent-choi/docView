@@ -25,6 +25,7 @@ import { recordAudit } from '../audit.js';
 import { findConverter } from '../converters/index.js';
 import { docxSchema } from '../docx/schema.js';
 import { DocxChangeTracker, type ParagraphChangeSummary } from './docxChangeLog.js';
+import { PptxChangeTracker, type PptxChangeSummary } from './pptxChangeLog.js';
 import { exportDocx } from '../docx/export.js';
 import { importDocx } from '../docx/import.js';
 import { invalidateRenderCache } from '../rendering.js';
@@ -188,6 +189,9 @@ interface Room {
   /** docx 룸에서만 쓰인다 — 문단 단위 누적 변경 추적기(docxChangeLog.ts 문서 주석 참고). 시딩이
    * 끝난 직후에야 만들 수 있어(기준선이 "시딩 직후의 문단 텍스트"이므로) seedRoom이 채운다. */
   docxChangeTracker: DocxChangeTracker | null;
+  /** pptx 룸에서만 쓰인다 — 슬라이드/텍스트박스 단위 누적 변경 추적기(pptxChangeLog.ts 문서 주석
+   * 참고). 슬라이드 목록 시딩 직후 seedRoom이 만들고, 슬라이드별 기준선은 doSeedSlideContent가 남긴다. */
+  pptxChangeTracker: PptxChangeTracker | null;
   /** 읽기 전용(canEdit:false)으로 참여한 연결 — 이 연결이 보낸 syncStep2/update는 무시한다.
    *  syncStep1(자기 상태 벡터를 보내고 서버 diff를 요청하는 것뿐)은 그대로 응답해야 문서 내용을
    *  받을 수 있으므로 막지 않는다 — 실제 "쓰기"에 해당하는 메시지만 서버에서 직접 걸러낸다
@@ -1345,7 +1349,16 @@ async function seedRoom(room: Room): Promise<void> {
       // 원본 파일에 이미 있던 수식의 최초 계산값은 그 페이지가 처음 구독되는 순간
       // reconcilePageSubscriptions가 셀 데이터와 함께 채운다.
     } else if (kind === 'pptx') {
-      seedSlidesFromPptx(original, ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY));
+      const slidesArray = ydoc.getArray<SlideEntry>(PPTX_SLIDES_ARRAY);
+      seedSlidesFromPptx(original, slidesArray);
+      // 슬라이드 목록이 채워진 직후에 만든다 — 그 시점의 슬라이드 id·순서가 "룸이 열린 시점"이다.
+      // 도형 내용은 슬라이드를 처음 열 때 지연 시딩되므로 그 슬라이드의 기준선은 doSeedSlideContent가
+      // 시딩 직후 captureBaseline으로 남긴다.
+      room.pptxChangeTracker = new PptxChangeTracker(
+        slidesArray,
+        ydoc.getMap<PerSlideContentsMap>(PPTX_SLIDE_CONTENTS_MAP),
+        (origin) => room.viewerByConn.get(origin as WebSocket) ?? null,
+      );
     } else {
       const { doc } = importDocx(original);
       const fragment = ydoc.getXmlFragment(XML_FRAGMENT_NAME);
@@ -1656,6 +1669,7 @@ function getOrCreateRoom(docId: string, ext: string): Room {
     viewerByConn: new Map<WebSocket, string>(),
     cellChangeLog: new Map<string, CellChangeEntry>(),
     docxChangeTracker: null,
+    pptxChangeTracker: null,
     readOnlyConns: new Set<WebSocket>(),
     autosaveTimer: null,
     ready: Promise.resolve(), // 아래에서 즉시 덮어씀 — seedRoom(room)이 room 자신을 참조해야 해서
@@ -1907,12 +1921,14 @@ async function doSeedSlideContent(room: Room, slideEntryId: string, duplicateOfI
     // 동시에 가리키는 여러 복제 요청도 소스 시딩 자체는 한 번만 돈다.
     await seedSlideContentIfNeeded(room, duplicateOfId); // 소스 먼저 채운다(텍스트+표시용 둘 다)
     duplicateSlideContent(slideContents, duplicateOfId, slideEntryId);
+    room.pptxChangeTracker?.captureBaseline(slideEntryId);
     if (!slideVisuals.has(slideEntryId)) {
       slideVisuals.set(slideEntryId, slideVisuals.get(duplicateOfId) ?? []);
     }
     return;
   }
   if (entry.kind === 'blank') {
+    // 빈 슬라이드는 기준선이 없다 — 안에 생기는 텍스트박스는 전부 새로 추가된 것으로 보고된다.
     slideContents.set(slideEntryId, new Y.Map<ShapeContentMap>());
     if (!slideVisuals.has(slideEntryId)) slideVisuals.set(slideEntryId, []);
     return;
@@ -1928,6 +1944,7 @@ async function doSeedSlideContent(room: Room, slideEntryId: string, duplicateOfI
   // 표시가 눈에 띄게 느렸던 원인 중 하나) 체감 지연이 커진다.
   const zipEntries = unzipSync(bytes);
   seedSlideContentFromXml(slideContents, slideEntryId, zipEntries, entry.sourceSlidePart);
+  room.pptxChangeTracker?.captureBaseline(slideEntryId);
   if (!slideVisuals.has(slideEntryId)) {
     try {
       slideVisuals.set(slideEntryId, parseSlideVisuals(zipEntries, entry.sourceSlidePart));
@@ -2217,7 +2234,7 @@ export interface CellChangeSummary {
   readonly at: string;
 }
 
-export type { ParagraphChangeSummary };
+export type { ParagraphChangeSummary, PptxChangeSummary };
 
 /** 문서에 현재 열려 있는 동시편집 룸(docx만)의 누적 문단 변경 로그 — getCellChangeLog와 같은 계약
  * (룸이 없거나 docx가 아니면 null, 룸은 있는데 편집이 없었으면 빈 배열). */
@@ -2225,6 +2242,20 @@ export function getParagraphChangeLog(docId: string): readonly ParagraphChangeSu
   const room = rooms.get(docId);
   if (!room || room.kind !== 'docx' || !room.docxChangeTracker) return null;
   return room.docxChangeTracker.list();
+}
+
+/** 문서에 현재 열려 있는 동시편집 룸(pptx만)의 누적 슬라이드/텍스트박스 변경 로그 — 위 두 함수와
+ * 같은 계약(룸이 없거나 pptx가 아니면 null, 룸은 있는데 변경이 없었으면 빈 배열). */
+export function getPptxChangeLog(docId: string): readonly PptxChangeSummary[] | null {
+  const room = rooms.get(docId);
+  if (!room || room.kind !== 'pptx' || !room.pptxChangeTracker) return null;
+  return room.pptxChangeTracker.list();
+}
+
+/** GET /api/documents/:id의 `changes` 필드 — 형식별 추적기 중 이 문서에 해당하는 것의 로그. 열린
+ * 룸이 없거나 아직 지원하지 않는 형식(hwp 등)이면 빈 배열. 형식마다 항목 모양이 다르다(README 참고). */
+export function getChangeLog(docId: string): readonly unknown[] {
+  return getCellChangeLog(docId) ?? getParagraphChangeLog(docId) ?? getPptxChangeLog(docId) ?? [];
 }
 
 function cellTextOf(cell: GridCell | 0): string {

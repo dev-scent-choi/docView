@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { requireApiKey, type ApiKeyAuthenticatedRequest } from '../apiKeyAuth.js';
 import { recordAudit } from '../audit.js';
-import { forceCloseRoom, getCellChangeLog, getParagraphChangeLog } from '../collab/room.js';
+import { forceCloseRoom, getChangeLog } from '../collab/room.js';
 import { config } from '../config.js';
 import { convertDwgToDxf } from '../converters/dwgConverter.js';
 import { findConverter, supportedExtensions } from '../converters/index.js';
@@ -322,13 +322,13 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
     if (!meta) {
       return reply.code(404).send({ success: false, error: '문서를 찾을 수 없습니다.' });
     }
-    // xlsx이고 지금 동시편집 룸이 열려 있으면(=아직 아무도 안 나가서 디스크로 flush되지 않았을 수
-    // 있는 상태) 그 룸이 룸이 열린 뒤로 누적한 셀 단위 변경 내역을 함께 실어 보낸다 — 연동하는
-    // 외부 시스템이 이미 주기적으로 부르는 이 API에 얹는 방식(새 엔드포인트·웹훅 없이). 룸이
-    // 없으면(편집자가 전부 나가 이미 저장 완료됐거나, xlsx가 아니면) changes는 빈 배열이다 — "변경
-    // 없음"과 "지금은 조회할 수 없음"을 구분하지 않는다(단순화, README에 명시할 부분).
-    const changes = getCellChangeLog(meta.id) ?? getParagraphChangeLog(meta.id) ?? [];
-    return { success: true, data: { ...meta, changes } };
+    // xlsx/docx/pptx이고 지금 동시편집 룸이 열려 있으면(=아직 아무도 안 나가서 디스크로 flush되지
+    // 않았을 수 있는 상태) 그 룸이 룸이 열린 뒤로 누적한 변경 내역(xlsx 셀 / docx 문단 / pptx
+    // 슬라이드·텍스트박스)을 함께 실어 보낸다 — 연동하는 외부 시스템이 이미 주기적으로 부르는 이
+    // API에 얹는 방식(새 엔드포인트·웹훅 없이). 룸이 없거나(편집자가 전부 나가 이미 저장 완료됐거나)
+    // 지원하지 않는 형식이면 changes는 빈 배열이다 — "변경 없음"과 "지금은 조회할 수 없음"을
+    // 구분하지 않는다(단순화, README에 명시).
+    return { success: true, data: { ...meta, changes: getChangeLog(meta.id) } };
   });
 
   app.get('/api/documents', async () => {

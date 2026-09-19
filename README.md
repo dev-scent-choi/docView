@@ -191,8 +191,8 @@ node scripts/formula-check.mjs            # xlsx 수식 엔진(VLOOKUP/MATCH/SUM
      ```
      Node에서는 `fetch(url, { method: 'POST', body: fs.createReadStream(path), duplex: 'half', headers: {...} })`
      처럼 파일 스트림을 body에 그대로 넘기면 된다(버퍼로 먼저 전부 읽을 필요 없음).
-2. `GET /api/documents/:id` — 변환 상태 폴링, `status: 'ready'`가 될 때까지. **xlsx/docx이고 지금
-   동시편집 룸이 열려 있으면** 응답에 `changes` 배열이 함께 실린다 — 룸이 열린 시점 대비 누적된
+2. `GET /api/documents/:id` — 변환 상태 폴링, `status: 'ready'`가 될 때까지. **xlsx/docx/pptx이고
+   지금 동시편집 룸이 열려 있으면** 응답에 `changes` 배열이 함께 실린다 — 룸이 열린 시점 대비 누적된
    변경 내역이다. 항목 모양은 문서 형식(`ext`)마다 다르다:
    - **xlsx — 셀 단위**:
      ```json
@@ -209,13 +209,30 @@ node scripts/formula-check.mjs            # xlsx 수식 엔진(VLOOKUP/MATCH/SUM
      보고하지 않는다. 문단이 삽입/삭제되면 번호가 밀리므로 **`paragraph`는 그 시점의 위치일 뿐
      안정적인 식별자가 아니다** — 이력을 쌓는 쪽은 `before` 텍스트와 `at`을 함께 기록해 두는 것을
      권장한다.
+   - **pptx — 슬라이드/텍스트박스 단위**: `kind`가 세 가지다.
+     ```json
+     { "kind": "text", "slideId": "9f1c…", "slide": 3, "originalSlide": null, "shape": "2", "before": "제목", "after": "제목(수정)", "viewer": "박민수", "at": "2026-09-19T01:02:03.456Z" }
+     { "kind": "slide_added", "slideId": "c07a…", "slide": 5, "originalSlide": null, "shape": null, "before": "", "after": "", "viewer": "박민수", "at": "…" }
+     { "kind": "slide_removed", "slideId": "51de…", "slide": null, "originalSlide": 2, "shape": null, "before": "", "after": "", "viewer": "박민수", "at": "…" }
+     ```
+     `text`는 텍스트박스 하나의 전체 텍스트(문단은 `\n`으로 이음)가 룸이 열린 뒤 바뀐 것이다 —
+     수정, 새 텍스트박스(`before: ""`), 삭제된 텍스트박스(`after: ""`) 모두 이 종류다. `shape`는
+     그 슬라이드 안의 텍스트박스 id. `slide`는 **조회 시점의 현재 덱 순서 기준 1-based 슬라이드
+     번호**이고(슬라이드가 삭제·추가되면 밀린다), 삭제된 슬라이드(`slide_removed`)는 `slide: null`
+     대신 룸이 열릴 때 몇 번째였는지를 `originalSlide`로 준다(그 안의 텍스트박스 변경은 개별
+     보고하지 않는다). `slide_added`는 빈 슬라이드·복제 슬라이드 둘 다이며, 복제본 안의 텍스트는
+     복제 시점 내용이 기준선이라 그 뒤에 고친 것만 `text`로 나온다. **`slideId`는 룸이 열려 있는
+     동안 순서가 바뀌거나 다른 슬라이드가 지워져도 그대로인 식별자**다(룸이 닫혔다 다시 열리면
+     새로 발급된다). 슬라이드 순서만 바꾼 것, 글자 서식만 바뀐 편집, 이미지·도형·표(표시 전용)의
+     변경은 보고하지 않는다. 슬라이드의 텍스트는 그 슬라이드를 처음 연 순간의 원본이 기준선이라,
+     아무도 열지 않은 슬라이드는 절대 나타나지 않는다.
 
    **DB 없이 메모리에만 있는 값이라 다음 제약이 있다**: (1) 룸이 닫히면(모든 편집자가 나가서 파일로
    flush되면) 그 즉시 사라진다 — "지금 아무도 안 보고 있다"와 "변경이 없었다"를 구분하지 않고 둘 다
    빈 배열이다. (2) 저장 시점마다 초기화하지 않고 룸이 열린 뒤로 계속 누적되므로, 같은 문서를 여러 번
    poll하면 이미 받은 항목을 다시 받을 수 있다 — 호출하는 쪽이 자기 DB에 넣을 때 upsert하는
-   방식(xlsx는 `sheet,row,col`, docx는 `before`+`at` 조합)을 권장한다(중복 수신을 전제로 설계).
-   (3) pptx/hwp는 아직 지원하지 않는다(항상 빈 배열).
+   방식(xlsx는 `sheet,row,col`, docx는 `before`+`at` 조합, pptx는 `slideId`+`shape`+`kind`)을
+   권장한다(중복 수신을 전제로 설계). (3) hwp는 아직 지원하지 않는다(항상 빈 배열).
 3. `POST /api/documents/:id/tokens` `{viewer, canEdit, canDownload, canPrint, canCopy}`
    (**API 키 필요**) — 토큰 발급, `{data.token, data.editorUrl 또는 data.viewerUrl}` 반환.
    `editorUrl`/`viewerUrl`은 이

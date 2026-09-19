@@ -1,4 +1,5 @@
 import * as Y from 'yjs';
+import { collectTextblocks, isTextblock, textOfBlock } from './ydocText.js';
 
 /**
  * docx 동시편집 룸의 "어느 문단이·누가·언제·무엇으로 바뀌었는지" 누적 추적기 — xlsx의
@@ -13,36 +14,6 @@ import * as Y from 'yjs';
  * 글자 서식(굵게 등)만 바뀐 편집은 텍스트가 같으므로 보고하지 않는다 — 텍스트 비교가 기준이라
  * 클라이언트 쪽 정규화(표 셀 보정 등)가 만드는 텍스트 무변화 쓰기도 걸러진다.
  */
-const TEXTBLOCK_NODE_NAMES: ReadonlySet<string> = new Set(['paragraph', 'heading']);
-
-function isTextblock(node: unknown): node is Y.XmlElement {
-  return node instanceof Y.XmlElement && TEXTBLOCK_NODE_NAMES.has(node.nodeName);
-}
-
-/** textblock 하나의 현재 텍스트. y-prosemirror는 연속된 글자 런을 Y.XmlText(서식은 delta
- * attributes)로, 그 외 inline 노드(hard_break)는 Y.XmlElement 자식으로 만든다. */
-export function textOfBlock(block: Y.XmlElement): string {
-  let text = '';
-  for (const child of block.toArray()) {
-    if (child instanceof Y.XmlText) {
-      for (const op of child.toDelta() as Array<{ insert?: unknown }>) {
-        if (typeof op.insert === 'string') text += op.insert;
-      }
-    } else if (child instanceof Y.XmlElement && child.nodeName === 'hard_break') {
-      text += '\n';
-    }
-  }
-  return text;
-}
-
-/** 문서 순서대로(표·목록 안쪽까지) 모든 textblock을 모은다. */
-function collectTextblocks(container: Y.XmlFragment | Y.XmlElement, out: Y.XmlElement[]): void {
-  for (const child of container.toArray()) {
-    if (!(child instanceof Y.XmlElement)) continue;
-    if (isTextblock(child)) out.push(child);
-    else collectTextblocks(child, out);
-  }
-}
 
 /** target에서 위로 올라가며 가장 가까운 textblock(자기 자신 포함) — 글자 편집의 target은
  * Y.XmlText이므로 그 부모 문단이 "건드려진 문단"이다. */
