@@ -293,7 +293,7 @@ export const store: DocumentStore =
   config.storageMode === 'memory' ? new MemoryStore() : new DiskStore();
 
 export async function ensureDataDirs(): Promise<void> {
-  const dirs = [config.auditDir];
+  const dirs = [config.auditDir, config.changeLogDir];
   if (config.storageMode === 'disk') {
     dirs.push(config.originalsDir, config.convertedDir, config.metaDir);
   }

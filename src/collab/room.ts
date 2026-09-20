@@ -22,6 +22,7 @@ import {
 } from 'y-protocols/sync';
 import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror';
 import { recordAudit } from '../audit.js';
+import { persistChangeLog } from './changeLogPersistence.js';
 import { findConverter } from '../converters/index.js';
 import { docxSchema } from '../docx/schema.js';
 import { DocxChangeTracker, type ParagraphChangeSummary } from './docxChangeLog.js';
@@ -1764,6 +1765,11 @@ function closeConn(room: Room, conn: WebSocket): void {
       cancelPendingUnseeds(room.docId);
       rooms.delete(room.docId);
       largeRoomDocIds.delete(room.docId);
+      // 이 룸의 메모리 전용 변경 이력(cellChangeLog/docxChangeTracker/pptxChangeTracker)이 사라지기
+      // 전 마지막 기회 — ydoc.destroy() 전에 지금 상태를 그대로 캡처해 디스크에 남긴다
+      // (changeLogPersistence.ts 문서 주석의 "왜"). rooms.delete 이후에도 room 참조는 그대로
+      // 살아있으므로 여기서 읽는 데 문제없다.
+      void persistChangeLog(room.docId, room.kind, changeLogOf(room));
       if (room.lazyGrid) void closeLazyGridStore(room.lazyGrid);
       void room.ready
         .then(() => queueFlush(room))
@@ -2254,20 +2260,19 @@ export function getPptxChangeLog(docId: string): readonly PptxChangeSummary[] | 
 
 /** GET /api/documents/:id의 `changes` 필드 — 형식별 추적기 중 이 문서에 해당하는 것의 로그. 열린
  * 룸이 없거나 아직 지원하지 않는 형식(hwp 등)이면 빈 배열. 형식마다 항목 모양이 다르다(README 참고). */
-export function getChangeLog(docId: string): readonly unknown[] {
-  return getCellChangeLog(docId) ?? getParagraphChangeLog(docId) ?? getPptxChangeLog(docId) ?? [];
+export function getChangeLog(docId: string): readonly object[] {
+  const room = rooms.get(docId);
+  return room ? changeLogOf(room) : [];
 }
 
 function cellTextOf(cell: GridCell | 0): string {
   return cell === 0 ? '' : cell.v;
 }
 
-/** 문서에 현재 열려 있는 동시편집 룸(xlsx만)의 누적 셀 변경 로그를 돌려준다. 룸이 없으면(모두
- * 나가서 이미 파일로 flush됐거나, 애초에 xlsx가 아니면) null — "룸이 없다"와 "룸은 있는데 편집이
- * 하나도 없었다"(빈 배열)를 구분해야 호출부가 상황을 정확히 알 수 있다. */
-export function getCellChangeLog(docId: string): readonly CellChangeSummary[] | null {
-  const room = rooms.get(docId);
-  if (!room || room.kind !== 'xlsx') return null;
+/** getCellChangeLog의 실제 계산부 — room 객체를 직접 받는다(rooms.get 조회 없이). closeConn이
+ * 룸을 닫는 바로 그 순간(아직 rooms 맵에서 지우기 전이든 후든) 영속화 대상 항목을 얻을 때도 같은
+ * 계산을 그대로 재사용한다. */
+function cellChangeLogOf(room: Room): CellChangeSummary[] {
   return [...room.cellChangeLog.values()].map((entry) => ({
     sheet: entry.sheetIdx,
     row: entry.row + 1,
@@ -2277,6 +2282,23 @@ export function getCellChangeLog(docId: string): readonly CellChangeSummary[] | 
     viewer: entry.viewer,
     at: new Date(entry.at).toISOString(),
   }));
+}
+
+/** 문서에 현재 열려 있는 동시편집 룸(xlsx만)의 누적 셀 변경 로그를 돌려준다. 룸이 없으면(모두
+ * 나가서 이미 파일로 flush됐거나, 애초에 xlsx가 아니면) null — "룸이 없다"와 "룸은 있는데 편집이
+ * 하나도 없었다"(빈 배열)를 구분해야 호출부가 상황을 정확히 알 수 있다. */
+export function getCellChangeLog(docId: string): readonly CellChangeSummary[] | null {
+  const room = rooms.get(docId);
+  if (!room || room.kind !== 'xlsx') return null;
+  return cellChangeLogOf(room);
+}
+
+/** changeLogOf(closeConn의 영속화 훅)와 getChangeLog(GET /api/documents/:id) 양쪽이 공유하는 계산 —
+ * 형식별 추적기 중 이 룸의 kind에 해당하는 것의 현재 누적 목록. */
+function changeLogOf(room: Room): readonly object[] {
+  if (room.kind === 'xlsx') return cellChangeLogOf(room);
+  if (room.kind === 'docx') return room.docxChangeTracker?.list() ?? [];
+  return room.pptxChangeTracker?.list() ?? [];
 }
 
 /**

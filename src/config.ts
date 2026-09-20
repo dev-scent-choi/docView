@@ -55,6 +55,7 @@ export const config = {
   convertedDir: path.join(dataRoot, 'converted'),
   metaDir: path.join(dataRoot, 'meta'),
   auditDir: path.join(dataRoot, 'audit'),
+  changeLogDir: path.join(dataRoot, 'changeLogs'),
   tokenTtlSeconds: Number(process.env.DOCVIEW_TOKEN_TTL ?? DEFAULT_TOKEN_TTL_SECONDS),
   maxUploadBytes: MAX_UPLOAD_BYTES,
   renderScale: RENDER_SCALE,
