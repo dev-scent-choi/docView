@@ -34,3 +34,8 @@ public/rhwp/
 
 # 브라우저 회귀 테스트 산출물(스크린샷·샘플 업로드 파일) — 실행할 때마다 재생성됨
 scripts/.screenshots/
+
+# 운영 비밀값(DOCVIEW_SECRET/DOCVIEW_API_KEYS) — start.bat이 존재하면 불러온다.
+# start.local.bat.example을 이 이름으로 복사해서 실제 값을 채운다(README "운영 실행" 참고).
+# 이 파일 자체가 없으면(로컬 개발 등) start.bat이 경고만 남기고 임시 시크릿으로 계속 동작한다.
+start.local.bat

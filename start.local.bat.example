@@ -1,0 +1,13 @@
+@echo off
+rem Copy this file to start.local.bat (gitignored - never commit that copy) and fill in
+rem real values. start.bat calls it automatically if it exists.
+rem
+rem Generate a secret with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+set DOCVIEW_SECRET=REPLACE_WITH_A_GENERATED_SECRET
+
+rem List of "name:key" pairs, comma-separated. Set the exact same key on every project
+rem that calls into this webviewer (e.g. maintenance-management's WEBVIEWER_API_KEY env var).
+rem Leaving this unset means the upload/token-issuance APIs accept calls from anyone who can
+rem reach this server - server.ts warns about this at boot, but it is easy to miss in logs.
+rem set DOCVIEW_API_KEYS=maintenance-management:REPLACE_WITH_A_REAL_KEY
