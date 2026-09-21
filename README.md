@@ -94,6 +94,12 @@ npm run build:editor && npm start
 — TypeScript를 tsx가 즉시 실행). 프로세스 관리자(pm2, systemd, Windows 서비스 등)로 감싸서 운영하면
 된다.
 
+Windows에서는 `start.bat`을 그대로 쓰면 된다. `DOCVIEW_SECRET`/`DOCVIEW_API_KEYS` 같은 실제
+비밀값은 `start.bat`에 직접 적지 않는다(git에 커밋되는 파일이라서) — `start.local.bat.example`을
+`start.local.bat`으로 복사해 값을 채우면(그 파일명은 `.gitignore`에 있어 커밋되지 않는다)
+`start.bat`이 있을 때만 자동으로 불러온다. 그 파일이 없으면 서버는 매 재시작마다 임시 시크릿으로
+경고와 함께 계속 동작한다(로컬 개발용 기본 동작, 아래 `DOCVIEW_SECRET` 설명과 동일).
+
 ## 환경 변수
 
 | 변수 | 기본값 | 설명 |
