@@ -6,9 +6,10 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { PDFDocument } from 'pdf-lib';
-import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { strFromU8, strToU8, zipSync } from 'fflate';
 import { trimPdfMargins } from './pdfTrim.js';
 import type { Converter } from './types.js';
+import { guardedUnzipSync } from '../zipGuard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -76,7 +77,7 @@ function transformWorksheets(
   xlsxBytes: Uint8Array,
   transform: (xml: string) => string,
 ): Uint8Array {
-  const entries = unzipSync(xlsxBytes);
+  const entries = guardedUnzipSync(xlsxBytes, 'transformWorksheets');
   const updated: Record<string, Uint8Array> = {};
   for (const [name, bytes] of Object.entries(entries)) {
     updated[name] = /^xl\/worksheets\/[^/]+\.xml$/.test(name)
@@ -155,7 +156,9 @@ export function maxSheetRows(xlsxBytes: Uint8Array): number {
   // unzipSync를 부르면 zip 안의 모든 항목을 다 압축 해제한다. filter로 미리 걸러 그 항목들의
   // 압축 해제 자체를 건너뛴다 — transformWorksheets/literalizeDocxThemeFonts와 달리 이 함수는
   // 다른 항목을 다시 묶어 새 zip을 만들 필요가 없어(값 하나만 반환) 안전하게 걸러도 된다.
-  const entries = unzipSync(xlsxBytes, { filter: (file) => /^xl\/worksheets\/[^/]+\.xml$/.test(file.name) });
+  const entries = guardedUnzipSync(xlsxBytes, 'maxSheetRows', {
+    filter: (file) => /^xl\/worksheets\/[^/]+\.xml$/.test(file.name),
+  });
   let max = 0;
   for (const [name, bytes] of Object.entries(entries)) {
     if (!/^xl\/worksheets\/[^/]+\.xml$/.test(name)) continue;
@@ -225,7 +228,7 @@ function literalizeThemeFontsXml(xml: string, themeXml: string): string {
  * 피할 수 있다. 테마 파일이 없으면 원본을 그대로 반환한다.
  */
 export function literalizeDocxThemeFonts(docxBytes: Uint8Array): Uint8Array {
-  const entries = unzipSync(docxBytes);
+  const entries = guardedUnzipSync(docxBytes, 'literalizeDocxThemeFonts');
   const themeXmlBytes = entries['word/theme/theme1.xml'];
   if (!themeXmlBytes) return docxBytes;
   const themeXml = strFromU8(themeXmlBytes);

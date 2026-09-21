@@ -2,12 +2,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { unzipSync } from 'fflate';
 import { recordAudit } from '../audit.js';
 import { SizedLruCache } from '../cache.js';
 import { config } from '../config.js';
 import { findConverter } from '../converters/index.js';
 import { IMAGE_MIME_BY_EXT } from '../pptx/slideContent.js';
+import { guardedUnzipSync } from '../zipGuard.js';
 import { convertToPdf } from './documents.js';
 import {
   PageOutOfRangeError,
@@ -679,7 +679,7 @@ export async function viewerRoutes(app: FastifyInstance): Promise<void> {
       }
       try {
         const bytes = await store.readOriginal(view.meta.id, 'pptx');
-        const zipEntries = unzipSync(bytes);
+        const zipEntries = guardedUnzipSync(bytes, 'slide-media');
         const mediaBytes = zipEntries[mediaPath];
         if (!mediaBytes) {
           return reply.code(404).send({ success: false, error: '이미지를 찾을 수 없습니다.' });

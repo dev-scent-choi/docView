@@ -49,8 +49,16 @@ function statusRow(label: string, value: string): string {
   return `<tr><th>${escapeHtml(label)}</th><td>${value}</td></tr>`;
 }
 
+/** IP 허용목록을 이미 통과한 요청만 여기까지 온다는 전제 위의 두 번째 방어선 — 비밀번호 추측
+ * 시도 속도를 늦춘다. HTTP Basic Auth는 브라우저가 자격증명을 잘못 입력해도 몇 번은 자연스럽게
+ * 재시도하므로, 정상적인 오타 재시도까지 걸리지 않을 만큼은 넉넉히 잡는다. */
+const ADMIN_LOGIN_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
+
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/admin', { preHandler: requireAdminAuth }, async (_request, reply) => {
+  app.get(
+    '/admin',
+    { preHandler: requireAdminAuth, config: { rateLimit: ADMIN_LOGIN_RATE_LIMIT } },
+    async (_request, reply) => {
     const docs = await store.listMeta();
     const originalsBytes = config.storageMode === 'disk' ? await dirSizeBytes(config.originalsDir) : 0;
     const convertedBytes = config.storageMode === 'disk' ? await dirSizeBytes(config.convertedDir) : 0;
@@ -144,5 +152,6 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 </html>`;
 
     return await reply.type('text/html; charset=utf-8').send(html);
-  });
+    },
+  );
 }

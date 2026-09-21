@@ -1167,8 +1167,16 @@ function cellAt(sheetIdx, rowNumber, colIdx) {
   return row ? row[colIdx] : 0;
 }
 
+// 지금은 항상 텍스트 콘텐츠 자리(예: <span>...</span> 안쪽)에만 쓰여 따옴표 이스케이프가 없어도
+// 뚫리지 않지만, 나중에 이 값이 속성 자리(예: title="...")에 쓰이게 바뀌어도 안전하도록 처음부터
+// 따옴표까지 전부 이스케이프한다.
 function escapeHtml(text) {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /** 셀 값 중 검색어와 일치하는 부분만 <mark>로 감싼다 (대소문자 무시) */

@@ -1,5 +1,6 @@
-import { strFromU8, unzipSync } from 'fflate';
+import { strFromU8 } from 'fflate';
 import { XMLParser } from 'fast-xml-parser';
+import { guardedUnzipSync } from '../zipGuard.js';
 import { Node as PMNode, type NodeType } from 'prosemirror-model';
 import {
   docxSchema,
@@ -631,7 +632,7 @@ export interface DocxImportResult {
  * 편집기 진입 전 "저장하면 이미지가 사라집니다" 경고를 띄우는 용도(src/routes/viewer.ts).
  */
 export function docxHasUnsupportedContent(docxBytes: Uint8Array): boolean {
-  const entries = unzipSync(docxBytes);
+  const entries = guardedUnzipSync(docxBytes, 'docxHasUnsupportedContent');
   const documentXmlBytes = entries['word/document.xml'];
   if (!documentXmlBytes) return false;
   return /<w:drawing\b|<w:object\b|<w:pict\b/.test(strFromU8(documentXmlBytes));
@@ -747,7 +748,7 @@ function stylesChildrenOf(stylesXml: string): XmlNode[] {
  * 자체가 크기를 지정하면 그 값이 docDefaults보다 우선한다(실제 Word의 상속 순서).
  */
 export function getDocxDefaultFontSizePt(docxBytes: Uint8Array): number {
-  const entries = unzipSync(docxBytes);
+  const entries = guardedUnzipSync(docxBytes, 'getDocxDefaultFontSizePt');
   const stylesXmlBytes = entries['word/styles.xml'];
   if (!stylesXmlBytes) return FALLBACK_DEFAULT_FONT_SIZE_PT;
   const stylesChildren = stylesChildrenOf(strFromU8(stylesXmlBytes));
@@ -815,7 +816,7 @@ function resolveFontFamilyFromRFonts(rFonts: XmlNode | undefined, themeXml: stri
  * (기존 CSS 폴백 유지).
  */
 export function getDocxDefaultFontFamily(docxBytes: Uint8Array): ScriptFontFamily | null {
-  const entries = unzipSync(docxBytes);
+  const entries = guardedUnzipSync(docxBytes, 'getDocxDefaultFontFamily');
   const stylesXmlBytes = entries['word/styles.xml'];
   if (!stylesXmlBytes) return null;
   const stylesChildren = stylesChildrenOf(strFromU8(stylesXmlBytes));
@@ -833,7 +834,7 @@ export function getDocxDefaultFontFamily(docxBytes: Uint8Array): ScriptFontFamil
  * 뷰어가 "이 문서를 실제 Word 페이지 비율로 얼마나 넓게 그릴지" 계산하는 용도(src/routes/viewer.ts).
  */
 export function getDocxPageSetup(docxBytes: Uint8Array): PageSetup | null {
-  const entries = unzipSync(docxBytes);
+  const entries = guardedUnzipSync(docxBytes, 'getDocxPageSetup');
   const documentXmlBytes = entries['word/document.xml'];
   if (!documentXmlBytes) return null;
   const sectPrXml = extractSectPrXml(strFromU8(documentXmlBytes));
@@ -845,7 +846,7 @@ export function getDocxPageSetup(docxBytes: Uint8Array): PageSetup | null {
 
 /** docx(zip) 바이트 → ProseMirror 문서. 알려지지 않은 요소(이미지·머리글 등)는 건너뛴다. */
 export function importDocx(docxBytes: Uint8Array): DocxImportResult {
-  const entries = unzipSync(docxBytes);
+  const entries = guardedUnzipSync(docxBytes, 'importDocx');
   const documentXmlBytes = entries['word/document.xml'];
   if (!documentXmlBytes) {
     throw new Error('word/document.xml을 찾을 수 없습니다 — 올바른 docx 파일이 아닙니다.');

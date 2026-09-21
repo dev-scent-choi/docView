@@ -16,18 +16,25 @@ export class InvalidTokenError extends Error {
   }
 }
 
+/** 서명·검증 양쪽에 알고리즘을 명시로 고정한다. jsonwebtoken 9.x는 alg:"none"(서명 없음)
+ * 토큰을 옵션 없이도 이미 기본으로 거부하고, 지금 이 앱은 대칭키(HS256) 하나만 쓰기 때문에
+ * RS256/HS256를 오가며 공개키를 대칭키로 오인시키는 전형적인 algorithm-confusion 공격도 적용될
+ * 여지가 없다 — 즉 지금 당장 이 고정이 막아주는 실제 구멍은 없다. 그래도 향후 비대칭키 로그인
+ * 등을 추가하며 verify 호출부가 바뀔 때를 대비해 알고리즘을 명시로 강제해 두는 값싼 보험이다. */
+const JWT_ALGORITHM = 'HS256';
+
 export function issueViewToken(claims: ViewClaims, ttlSeconds: number): string {
   return jwt.sign(
     { docId: claims.docId, viewer: claims.viewer, perms: claims.perms },
     jwtSecret,
-    { expiresIn: ttlSeconds },
+    { expiresIn: ttlSeconds, algorithm: JWT_ALGORITHM },
   );
 }
 
 export function verifyViewToken(token: string): ViewClaims {
   let payload: unknown;
   try {
-    payload = jwt.verify(token, jwtSecret);
+    payload = jwt.verify(token, jwtSecret, { algorithms: [JWT_ALGORITHM] });
   } catch {
     throw new InvalidTokenError();
   }

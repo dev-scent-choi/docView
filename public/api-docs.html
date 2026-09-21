@@ -67,6 +67,8 @@
           <pre><code>{ "success": true, "data": { /* 엔드포인트마다 다름 */ } }</code></pre>
           <div class="apidoc-pre-label">실패</div>
           <pre><code>{ "success": false, "error": "문서를 찾을 수 없습니다." }</code></pre>
+          <p style="margin-bottom:0"><code>429</code>(속도 제한 초과)만 예외로 <code>statusCode</code>
+            필드가 하나 더 붙는다 — <a href="#auth">인증</a> 절 참고.</p>
         </div>
       </section>
 
@@ -88,6 +90,15 @@
           <p><a href="#download">다운로드</a> API는 API 키가 아니라, 토큰 발급 API로 받은
             <strong>열람 토큰</strong>(URL의 <code>?token=</code>)으로 인증한다 — 이 토큰은 만료
             시간이 있는 서명된 JWT라 API 키보다 훨씬 좁은 권한(문서 하나, 정해진 권한만)을 가진다.</p>
+          <h3>속도 제한</h3>
+          <p>업로드·토큰 발급·삭제(쓰기 성격의 API 키 엔드포인트)는 IP당 속도 제한이 있다 — 업로드·
+            삭제는 분당 30회, 토큰 발급은 다른 시스템이 사용자가 문서를 열 때마다 호출할 수 있어
+            더 넉넉하게 분당 120회다. 초과하면 <code>429</code>와 함께 <code>Retry-After</code>
+            헤더(초 단위)를 돌려준다:</p>
+          <pre><code>{ "statusCode": 429, "success": false, "error": "요청이 너무 많습니다. 42 seconds 후 다시 시도하세요." }</code></pre>
+          <p>조회·다운로드 계열(<a href="#status">상태 조회</a>, <a href="#download">다운로드</a>)
+            에는 속도 제한이 없다 — 뷰어 화면이 페이지를 넘기거나 그리드를 스크롤할 때마다 정상적으로
+            자주 호출하기 때문이다.</p>
         </div>
       </section>
 
@@ -151,6 +162,7 @@
               <tr><td><code>400</code></td><td>파일이 없거나(빈 본문), 업로드 요청 자체를 파싱할 수 없음</td></tr>
               <tr><td><code>401</code></td><td>API 키가 없거나 틀림</td></tr>
               <tr><td><code>413</code></td><td>파일이 업로드 용량 제한을 초과함</td></tr>
+              <tr><td><code>429</code></td><td>같은 IP에서 분당 30회 초과 호출(업로드·삭제 공통 상한) — 아래 참고</td></tr>
               <tr><td><code>500</code></td><td>업로드 저장에 실패함</td></tr>
             </tbody>
           </table>
@@ -293,6 +305,7 @@
             <tbody>
               <tr><td><code>401</code></td><td>API 키가 없거나 틀림</td></tr>
               <tr><td><code>404</code></td><td>문서가 없거나, 아직 <code>status: "ready"</code>가 아님</td></tr>
+              <tr><td><code>429</code></td><td>같은 IP에서 분당 120회 초과 호출</td></tr>
             </tbody>
           </table>
         </div>
@@ -347,6 +360,7 @@
             <tbody>
               <tr><td><code>401</code></td><td>API 키가 없거나 틀림</td></tr>
               <tr><td><code>404</code></td><td>문서를 찾을 수 없음</td></tr>
+              <tr><td><code>429</code></td><td>같은 IP에서 분당 30회 초과 호출</td></tr>
             </tbody>
           </table>
         </div>

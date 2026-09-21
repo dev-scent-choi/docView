@@ -1,4 +1,5 @@
-import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { strFromU8, strToU8, zipSync } from 'fflate';
+import { guardedUnzipSync } from '../zipGuard.js';
 import type { Mark, Node as PMNode } from 'prosemirror-model';
 import { extractSectPrXml } from './import.js';
 import type { CellBorderSide, CellBorders, CellPadding, RowHeight } from './schema.js';
@@ -305,7 +306,7 @@ export function renderDocumentXml(doc: PMNode, sectPrXml: string = '<w:sectPr/>'
  * 설정이 유지된다(과거엔 항상 빈 <w:sectPr/>로 덮어써서 편집 후 페이지 크기가 사라졌었다).
  */
 export function exportDocx(originalDocxBytes: Uint8Array, doc: PMNode): Uint8Array {
-  const entries = unzipSync(originalDocxBytes);
+  const entries = guardedUnzipSync(originalDocxBytes, 'exportDocx');
   const originalDocumentXml = entries['word/document.xml'];
   const sectPrXml = (originalDocumentXml && extractSectPrXml(strFromU8(originalDocumentXml))) ?? '<w:sectPr/>';
   entries['word/document.xml'] = strToU8(renderDocumentXml(doc, sectPrXml));

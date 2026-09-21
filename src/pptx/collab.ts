@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { strFromU8, strToU8, zipSync } from 'fflate';
 import type { Zippable } from 'fflate';
+import { guardedUnzipSync } from '../zipGuard.js';
 import * as Y from 'yjs';
 import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror';
 import {
@@ -42,7 +43,7 @@ function sldIdListOrder(presentationXml: string): string[] {
 
 /** 원본 pptx를 열어 슬라이드 순서 배열을 초기 상태로 채운다 (room.ts의 seedRoom에서 호출). */
 export function seedSlidesFromPptx(pptxBytes: Uint8Array, slidesArray: Y.Array<SlideEntry>): void {
-  const zipEntries = unzipSync(pptxBytes);
+  const zipEntries = guardedUnzipSync(pptxBytes, 'seedSlidesFromPptx');
   const presentationXml = strFromU8(zipEntries['ppt/presentation.xml']);
   const presentationRelsXml = strFromU8(zipEntries['ppt/_rels/presentation.xml.rels']);
 
@@ -338,7 +339,7 @@ export function exportPptxFromSlides(
   // zipEntries[key] = 새값 형태의 재할당이 이 객체의 프로퍼티를 건드리지 않으므로(스프레드가
   // 만든 얕은 복사본이 zipEntries) 이 스냅샷은 함수가 끝날 때까지 항상 "저장 시작 시점의
   // 슬라이드 XML"을 그대로 유지한다.
-  const originalZipEntries = unzipSync(pptxBytes);
+  const originalZipEntries = guardedUnzipSync(pptxBytes, 'exportPptxFromSlides');
   const zipEntries = { ...originalZipEntries };
   const rawEntryList = slidesArray.toArray();
   const entryList = filterValidEntries(rawEntryList, zipEntries);

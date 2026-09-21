@@ -266,34 +266,47 @@ async function ingestUpload(
   }
 }
 
-export async function documentRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/api/documents', { preHandler: requireApiKey }, async (request, reply) => {
-    const callerProject = (request as ApiKeyAuthenticatedRequest).callerProject;
-    let file;
-    let data: Buffer;
-    try {
-      file = await request.file();
-      if (!file) {
-        return await reply.code(400).send({ success: false, error: '업로드된 파일이 없습니다.' });
-      }
-      data = await file.toBuffer();
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      if (code === 'FST_REQ_FILE_TOO_LARGE') {
-        return reply.code(413).send({ success: false, error: '파일이 업로드 용량 제한을 초과했습니다.' });
-      }
-      request.log.error(error, 'upload parsing failed');
-      return reply.code(400).send({ success: false, error: '업로드 요청을 처리할 수 없습니다.' });
-    }
+/** API 키로 보호되는 쓰기 엔드포인트(업로드·삭제)의 속도 제한 — app.ts가 전역 대신 라우트별
+ * opt-in으로 등록해 둔 rate-limit 플러그인을 여기서 켠다. 정상적인 연동 트래픽(예: 여러 문서를
+ * 순차 업로드)은 넉넉히 통과시키면서, 유출된 키를 대량 업로드·삭제에 악용하는 속도는 늦춘다. */
+const WRITE_RATE_LIMIT = { max: 30, timeWindow: '1 minute' } as const;
+/** 토큰 발급은 다른 시스템이 사용자가 문서를 열 때마다 호출할 수 있어 쓰기보다 정상 빈도가
+ * 높다 — 정상 사용은 걸리지 않을 만큼 더 넉넉하게 잡는다. */
+const TOKEN_RATE_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
 
-    const result = await ingestUpload(app, file.filename, data, callerProject);
-    return await reply.code(result.code).send(result.body);
-  });
+export async function documentRoutes(app: FastifyInstance): Promise<void> {
+  app.post(
+    '/api/documents',
+    { preHandler: requireApiKey, config: { rateLimit: WRITE_RATE_LIMIT } },
+    async (request, reply) => {
+      const callerProject = (request as ApiKeyAuthenticatedRequest).callerProject;
+      let file;
+      let data: Buffer;
+      try {
+        file = await request.file();
+        if (!file) {
+          return await reply.code(400).send({ success: false, error: '업로드된 파일이 없습니다.' });
+        }
+        data = await file.toBuffer();
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code === 'FST_REQ_FILE_TOO_LARGE') {
+          return reply.code(413).send({ success: false, error: '파일이 업로드 용량 제한을 초과했습니다.' });
+        }
+        request.log.error(error, 'upload parsing failed');
+        return reply.code(400).send({ success: false, error: '업로드 요청을 처리할 수 없습니다.' });
+      }
+
+      const result = await ingestUpload(app, file.filename, data, callerProject);
+      return await reply.code(result.code).send(result.body);
+    },
+  );
 
   app.post<{ Querystring: { filename: string } }>(
     '/api/documents/stream',
     {
       preHandler: requireApiKey,
+      config: { rateLimit: WRITE_RATE_LIMIT },
       schema: {
         querystring: {
           type: 'object',
@@ -340,7 +353,7 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete<{ Params: { id: string } }>(
     '/api/documents/:id',
-    { preHandler: requireApiKey },
+    { preHandler: requireApiKey, config: { rateLimit: WRITE_RATE_LIMIT } },
     async (request, reply) => {
       const meta = await store.readMeta(request.params.id);
       if (!meta) {
@@ -362,7 +375,7 @@ export async function documentRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Params: { id: string }; Body: TokenBody }>(
     '/api/documents/:id/tokens',
-    { schema: { body: tokenBodySchema }, preHandler: requireApiKey },
+    { schema: { body: tokenBodySchema }, preHandler: requireApiKey, config: { rateLimit: TOKEN_RATE_LIMIT } },
     async (request, reply) => {
       const callerProject = (request as ApiKeyAuthenticatedRequest).callerProject;
       const meta = await store.readMeta(request.params.id);

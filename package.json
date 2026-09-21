@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@fastify/multipart": "^9.0.0",
+    "@fastify/rate-limit": "^11.2.0",
     "@fastify/static": "^8.0.0",
     "@fastify/websocket": "^11.0.2",
     "@pdf-lib/fontkit": "^1.1.1",
