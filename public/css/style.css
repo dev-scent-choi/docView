@@ -97,6 +97,8 @@ body {
 .app-header h1 span { color: var(--color-accent); font-weight: 800; }
 
 .tagline { margin: 0.4rem 0 0; color: var(--color-ink-soft); font-size: 0.95rem; }
+.tagline a { color: var(--color-accent); text-decoration: none; }
+.tagline a:hover { text-decoration: underline; }
 
 .container {
   max-width: 860px;
@@ -2706,4 +2708,216 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   white-space: nowrap;
   color: #fff;
   user-select: none;
+}
+
+/* ---------- API 문서 페이지 (public/api-docs.html) ---------- */
+
+.apidoc-header { max-width: 1180px; }
+
+.apidoc-layout {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 1.5rem 5rem;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 2.5rem;
+  align-items: start;
+}
+
+.apidoc-nav {
+  position: sticky;
+  top: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.86rem;
+}
+.apidoc-nav-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-soft);
+  margin: 1.1rem 0 0.35rem;
+}
+.apidoc-nav-label:first-child { margin-top: 0; }
+.apidoc-nav a {
+  color: var(--color-ink-soft);
+  text-decoration: none;
+  padding: 0.3rem 0.55rem;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+.apidoc-nav a:hover { background: var(--color-accent-soft); color: var(--color-ink); }
+.apidoc-nav a .apidoc-method {
+  font-size: 0.62rem;
+  min-width: 2.6em;
+}
+
+.apidoc-main { min-width: 0; }
+
+.apidoc-lede {
+  font-size: 1.02rem;
+  color: var(--color-ink-soft);
+  max-width: 62ch;
+  margin: 0 0 1.8rem;
+}
+
+.apidoc-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem 1.7rem 1.7rem;
+  margin: 0 0 1.6rem;
+}
+.apidoc-card > :first-child { margin-top: 0; }
+.apidoc-card > :last-child { margin-bottom: 0; }
+.apidoc-card h2, .apidoc-card h3 { scroll-margin-top: 1.25rem; }
+
+.apidoc-endpoint-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0 0 0.5rem;
+}
+.apidoc-endpoint-head h2 { margin: 0; font-size: 1.15rem; }
+.apidoc-path {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--color-ink);
+}
+
+.apidoc-method {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  color: #fff;
+  flex: none;
+}
+.apidoc-method-get { background: #217346; }
+.apidoc-method-post { background: #1f4d47; }
+.apidoc-method-delete { background: #b3402a; }
+
+.apidoc-badges { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0 0 1rem; }
+.apidoc-badge {
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  border: 1px solid transparent;
+}
+.apidoc-badge-open { background: transparent; border-color: var(--color-line); color: var(--color-ink-soft); }
+.apidoc-badge-warn { background: #fbeee9; color: var(--color-danger); }
+
+.apidoc-card p { line-height: 1.65; }
+.apidoc-card h3 { font-size: 0.95rem; margin: 1.6rem 0 0.6rem; }
+.apidoc-card h4 {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--color-ink-soft);
+  margin: 1.1rem 0 0.5rem;
+}
+
+.apidoc-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; margin: 0 0 1rem; }
+.apidoc-table th, .apidoc-table td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--color-line);
+  vertical-align: top;
+}
+.apidoc-table th { color: var(--color-ink-soft); font-weight: 500; font-size: 0.78rem; }
+.apidoc-table code { white-space: nowrap; }
+.apidoc-table tr:last-child td { border-bottom: none; }
+.apidoc-required { color: var(--color-danger); font-size: 0.72rem; margin-left: 0.3rem; }
+
+.apidoc-card code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--color-accent-soft);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+.apidoc-card pre {
+  margin: 0 0 1rem;
+  padding: 0.9rem 1.05rem;
+  border-radius: var(--radius);
+  background: #1b1a17;
+  color: #f0ede6;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+.apidoc-card pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.apidoc-pre-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--color-ink-soft);
+  margin: 0 0 0.4rem;
+}
+
+.apidoc-callout {
+  display: flex;
+  gap: 0.65rem;
+  padding: 0.8rem 1rem;
+  border-radius: var(--radius);
+  background: var(--color-accent-soft);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  margin: 0 0 1rem;
+}
+.apidoc-callout svg { flex: none; width: 17px; height: 17px; margin-top: 0.15em; color: var(--color-accent); }
+.apidoc-callout-warn { background: #fbeee9; }
+.apidoc-callout-warn svg { color: var(--color-danger); }
+.apidoc-callout strong { font-weight: 600; }
+
+.apidoc-flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0 0 1.8rem;
+}
+.apidoc-flow-step {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.8rem;
+  font-size: 0.83rem;
+}
+.apidoc-flow-step b { font-family: var(--font-mono); font-size: 0.72rem; color: var(--color-accent); }
+.apidoc-flow-arrow { color: var(--color-ink-soft); flex: none; }
+
+@media (max-width: 860px) {
+  .apidoc-layout { grid-template-columns: 1fr; gap: 1.2rem; }
+  .apidoc-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .apidoc-nav-label { display: none; }
+  .apidoc-nav a { border: 1px solid var(--color-line); }
 }

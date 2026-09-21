@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>API 문서 — DocView</title>
+  <meta name="description" content="다른 프로젝트에서 DocView를 연동할 때 쓰는 REST API 레퍼런스." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='3' width='19' height='26' rx='3' fill='%231f4d47'/%3E%3Cpath d='M18 3v6a2 2 0 0 0 2 2h6z' fill='%234fd6c4'/%3E%3Crect x='9' y='16' width='11' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3Crect x='9' y='21' width='8' height='2' rx='1' fill='%23fff' fill-opacity='.9'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="app-header apidoc-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      </span>
+      <h1>Doc<span>View</span> API</h1>
+    </div>
+    <p class="tagline">다른 프로젝트에서 이 뷰어를 연동할 때 쓰는 REST API 레퍼런스 — <a href="/">← 문서 목록으로</a></p>
+  </header>
+
+  <main class="apidoc-layout">
+    <nav class="apidoc-nav" aria-label="API 목차">
+      <p class="apidoc-nav-label">시작하기</p>
+      <a href="#overview">개요</a>
+      <a href="#auth">인증</a>
+      <p class="apidoc-nav-label">엔드포인트</p>
+      <a href="#upload"><span class="apidoc-method apidoc-method-post">POST</span> 문서 업로드</a>
+      <a href="#status"><span class="apidoc-method apidoc-method-get">GET</span> 상태·변경 조회</a>
+      <a href="#tokens"><span class="apidoc-method apidoc-method-post">POST</span> 토큰 발급</a>
+      <a href="#download"><span class="apidoc-method apidoc-method-get">GET</span> 다운로드</a>
+      <a href="#delete"><span class="apidoc-method apidoc-method-delete">DEL</span> 문서 삭제</a>
+      <p class="apidoc-nav-label">참고</p>
+      <a href="#more">그 외 엔드포인트</a>
+    </nav>
+
+    <div class="apidoc-main">
+      <section id="overview">
+        <p class="apidoc-lede">
+          DocView는 4~5개의 REST API만으로 연동한다 — 업로드하고, 상태(및 실시간 변경 이력)를
+          폴링하고, 열람/편집 토큰을 발급해 <code>&lt;iframe&gt;</code>으로 띄우고, 필요하면
+          최신 파일을 내려받는다. 이 페이지는 <code>README.md</code>의 "다른 프로젝트에서
+          연동하기" 절을 그대로 옮긴 것이라, 최신 내용은 두 문서가 항상 같다.
+        </p>
+
+        <div class="apidoc-flow" aria-label="일반적인 연동 흐름">
+          <div class="apidoc-flow-step"><b>1</b>문서 업로드</div>
+          <span class="apidoc-flow-arrow">→</span>
+          <div class="apidoc-flow-step"><b>2</b>GET으로 status:'ready' 폴링</div>
+          <span class="apidoc-flow-arrow">→</span>
+          <div class="apidoc-flow-step"><b>3</b>토큰 발급</div>
+          <span class="apidoc-flow-arrow">→</span>
+          <div class="apidoc-flow-step"><b>4</b>editorUrl/viewerUrl을 iframe으로 임베드</div>
+          <span class="apidoc-flow-arrow">→</span>
+          <div class="apidoc-flow-step"><b>5</b>(선택) 다운로드</div>
+        </div>
+
+        <div class="apidoc-card">
+          <h3 style="margin-top:0">응답 형식</h3>
+          <p>모든 API는 같은 봉투(envelope)를 쓴다 — 성공/실패를 <code>success</code> 불리언으로
+            구분하고, 실패 시 사람이 읽을 수 있는 한국어 <code>error</code> 메시지를 준다(에러
+            메시지 문자열 자체를 파싱해 분기하지 말고, HTTP 상태 코드로 분기할 것을 권장한다).</p>
+          <div class="apidoc-pre-label">성공</div>
+          <pre><code>{ "success": true, "data": { /* 엔드포인트마다 다름 */ } }</code></pre>
+          <div class="apidoc-pre-label">실패</div>
+          <pre><code>{ "success": false, "error": "문서를 찾을 수 없습니다." }</code></pre>
+        </div>
+      </section>
+
+      <section id="auth">
+        <div class="apidoc-card">
+          <h2>인증</h2>
+          <p>업로드·토큰 발급·삭제처럼 아무나 호출하면 안 되는 API는
+            <code>Authorization: Bearer &lt;발급받은 키&gt;</code> 헤더를 요구한다. 키는 서버
+            환경변수 <code>DOCVIEW_API_KEYS</code>에 <code>"이름:키,이름2:키2"</code> 형식으로
+            프로젝트별로 등록한다 — 반드시 <strong>서버 사이드에서만</strong> 호출해야 한다(키가
+            브라우저 자바스크립트에 노출되면 안 된다).</p>
+          <div class="apidoc-callout">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+            <span><code>DOCVIEW_API_KEYS</code>가 아예 설정돼 있지 않으면(로컬 개발 등) 이 검사
+              자체를 건너뛴다. 운영 배포에서는 반드시 설정한다.</span>
+          </div>
+          <p>키가 없거나 틀리면 다음을 <code>401</code>로 돌려준다:</p>
+          <pre><code>{ "success": false, "error": "API 키가 없거나 유효하지 않습니다." }</code></pre>
+          <p><a href="#download">다운로드</a> API는 API 키가 아니라, 토큰 발급 API로 받은
+            <strong>열람 토큰</strong>(URL의 <code>?token=</code>)으로 인증한다 — 이 토큰은 만료
+            시간이 있는 서명된 JWT라 API 키보다 훨씬 좁은 권한(문서 하나, 정해진 권한만)을 가진다.</p>
+        </div>
+      </section>
+
+      <section id="upload">
+        <div class="apidoc-card">
+          <div class="apidoc-endpoint-head">
+            <h2>문서 업로드</h2>
+          </div>
+          <div class="apidoc-badges">
+            <span class="apidoc-badge">API 키 필요</span>
+          </div>
+          <p>같은 처리 로직을 타므로 둘 중 편한 방식을 쓰면 된다 — 결과(응답 모양)는 동일하다.</p>
+
+          <h3><span class="apidoc-method apidoc-method-post">POST</span> <span class="apidoc-path">/api/documents</span></h3>
+          <p><code>multipart/form-data</code>, 파일 필드명은 <code>file</code>. 파일 필드가 있는
+            폼 전송에 이미 익숙한 쪽에 맞다.</p>
+
+          <h3><span class="apidoc-method apidoc-method-post">POST</span> <span class="apidoc-path">/api/documents/stream?filename=문서.pptx</span></h3>
+          <p>요청 본문에 파일 바이트를 그대로 싣는다(<code>Content-Type: application/octet-stream</code>).
+            multipart 경계를 직접 구성할 필요가 없어, 같은 서버(또는 같은 파일시스템)에 원본이 이미
+            있는 호출자가 디스크에서 바로 읽어 스트림으로 파이프하기에 특히 편하다.</p>
+
+          <h4>쿼리 파라미터 (stream 방식만)</h4>
+          <table class="apidoc-table">
+            <thead><tr><th>이름</th><th>타입</th><th>설명</th></tr></thead>
+            <tbody>
+              <tr><td><code>filename</code><span class="apidoc-required">필수</span></td><td>string (1–300자)</td><td>원본 파일명(확장자 포함) — 저장될 형식 판별에 쓰인다.</td></tr>
+            </tbody>
+          </table>
+
+          <div class="apidoc-pre-label">예시 (stream 방식, curl)</div>
+          <pre><code>curl -X POST \
+  --data-binary "@/path/to/문서.pptx" \
+  -H "Content-Type: application/octet-stream" \
+  -H "Authorization: Bearer &lt;발급받은 키&gt;" \
+  "https://&lt;이 서비스 주소&gt;/api/documents/stream?filename=문서.pptx"</code></pre>
+          <p>Node에서는 파일을 버퍼로 먼저 다 읽지 않고 <code>fetch(url, { method: 'POST', body:
+            fs.createReadStream(path), duplex: 'half', headers: {...} })</code>처럼 스트림을 body에
+            그대로 넘기면 된다.</p>
+
+          <h4>응답 <code>201</code></h4>
+          <pre><code>{
+  "success": true,
+  "data": {
+    "id": "3c5cf246-3de2-4107-8028-073bab533f61",
+    "name": "문서.pptx",
+    "ext": "pptx",
+    "status": "processing",
+    "pageCount": 0,
+    "createdAt": "2026-09-21T04:19:04.786Z",
+    "progress": 0
+  }
+}</code></pre>
+          <p><code>status</code>는 업로드 직후 대개 <code>"processing"</code>이다 — <a href="#status">상태
+            조회 API</a>로 <code>"ready"</code>가 될 때까지 폴링한다.</p>
+
+          <h4>에러</h4>
+          <table class="apidoc-table">
+            <thead><tr><th>코드</th><th>상황</th></tr></thead>
+            <tbody>
+              <tr><td><code>400</code></td><td>파일이 없거나(빈 본문), 업로드 요청 자체를 파싱할 수 없음</td></tr>
+              <tr><td><code>401</code></td><td>API 키가 없거나 틀림</td></tr>
+              <tr><td><code>413</code></td><td>파일이 업로드 용량 제한을 초과함</td></tr>
+              <tr><td><code>500</code></td><td>업로드 저장에 실패함</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="status">
+        <div class="apidoc-card">
+          <div class="apidoc-endpoint-head">
+            <span class="apidoc-method apidoc-method-get">GET</span>
+            <h2><span class="apidoc-path">/api/documents/:id</span></h2>
+          </div>
+          <div class="apidoc-badges"><span class="apidoc-badge apidoc-badge-open">인증 불필요</span></div>
+          <p>변환 상태를 <code>status: "ready"</code>가 될 때까지 폴링한다. <strong>xlsx/docx/pptx이고
+            지금 동시편집 룸이 열려 있으면</strong>(누군가 편집기를 켜 놓은 상태) 응답에
+            <code>changes</code> 배열이 함께 실린다 — 룸이 열린 시점 대비 누적된 변경 내역이다.</p>
+
+          <h4>응답 <code>200</code></h4>
+          <pre><code>{
+  "success": true,
+  "data": {
+    "id": "…", "name": "문서.docx", "ext": "docx",
+    "status": "ready", "pageCount": 4,
+    "createdAt": "…", "progress": 100,
+    "changes": [ /* 아래 참고, 룸이 없으면 항상 [] */ ]
+  }
+}</code></pre>
+
+          <h4>changes — 문서 형식(<code>ext</code>)마다 항목 모양이 다르다</h4>
+          <p><strong>xlsx — 셀 단위</strong> (<code>row</code>/<code>col</code>은 엑셀 A1 표기에
+            맞춘 1-based):</p>
+          <pre><code>{ "sheet": 0, "row": 2, "col": 1, "before": "Alice", "after": "Bob", "viewer": "김철수", "at": "2026-09-18T12:42:59.249Z" }</code></pre>
+
+          <p><strong>docx — 문단 단위</strong>:</p>
+          <pre><code>{ "paragraph": 4, "before": "구분", "after": "구분[수정]", "viewer": "이영희", "at": "2026-09-19T00:10:36.637Z" }</code></pre>
+          <p><code>paragraph</code>는 현재 문서 순서 기준 1-based 문단 번호(표 셀·목록 항목 안의
+            문단도 똑같이 센다). 삭제된 문단은 <code>paragraph: null</code>·<code>after: ""</code>,
+            새로 추가된 문단은 <code>before: ""</code>다. 글자 서식만 바뀐 편집은 보고하지 않는다.
+            문단이 삽입/삭제되면 번호가 밀리므로 <strong><code>paragraph</code>는 안정적인
+            식별자가 아니다</strong> — <code>before</code>+<code>at</code> 조합으로 이력을 쌓는
+            것을 권장한다.</p>
+
+          <p><strong>pptx — 슬라이드/텍스트박스 단위</strong>, <code>kind</code>가 세 가지다:</p>
+          <pre><code>{ "kind": "text", "slideId": "9f1c…", "slide": 3, "originalSlide": null, "shape": "2", "before": "제목", "after": "제목(수정)", "viewer": "박민수", "at": "…" }
+{ "kind": "slide_added", "slideId": "c07a…", "slide": 5, "originalSlide": null, "shape": null, "before": "", "after": "", "viewer": "박민수", "at": "…" }
+{ "kind": "slide_removed", "slideId": "51de…", "slide": null, "originalSlide": 2, "shape": null, "before": "", "after": "", "viewer": "박민수", "at": "…" }</code></pre>
+          <p><code>slide</code>는 <strong>조회 시점의 현재 덱 순서 기준</strong> 1-based 번호라
+            슬라이드가 삭제·추가되면 밀린다 — 삭제된 슬라이드는 대신 <code>originalSlide</code>(룸이
+            열릴 때의 위치)를 준다. <code>slideId</code>는 룸이 열려 있는 동안 순서가 바뀌거나
+            다른 슬라이드가 지워져도 그대로인 식별자라, 안정적인 upsert 키로 쓰기 좋다.</p>
+
+          <div class="apidoc-callout apidoc-callout-warn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+            <span><strong>DB가 아니라 메모리에만 있는 값이다.</strong> 룸이 닫히면(모든 편집자가
+              나가서 파일로 flush되면) <code>changes</code>는 그 즉시 <code>[]</code>가 된다 —
+              "지금 아무도 안 보고 있다"와 "변경이 없었다"를 구분하지 않는다. 저장 시점마다
+              초기화하지 않고 계속 누적되므로, 같은 문서를 여러 번 polling하면 이미 받은 항목을
+              다시 받을 수 있다(호출하는 쪽에서 upsert 필요 — xlsx는 <code>sheet,row,col</code>,
+              docx는 <code>before</code>+<code>at</code>, pptx는
+              <code>slideId</code>+<code>shape</code>+<code>kind</code>). hwp는 아직 지원하지
+              않는다(항상 <code>[]</code>).</span>
+          </div>
+
+          <h4>룸이 닫힐 때 디스크에도 남는다(안전망)</h4>
+          <p>편집 중이던 연동 측이 그 사이 한 번도 polling하지 못했거나 호출이 일시적으로
+            실패했다면, 룸이 닫히는 순간(마지막 편집자 퇴장) 그때까지 쌓인 항목 전체가 서버의
+            <code>data/changeLogs/changes-YYYY-MM-DD.jsonl</code>(UTC 날짜 기준)에 한 줄씩
+            append된다. 각 줄은 위 <code>changes</code> 항목에 <code>docId</code>,
+            <code>docKind</code>(<code>"xlsx"</code>/<code>"docx"</code>/<code>"pptx"</code>),
+            <code>closedAt</code>을 얹은 모양이다. 이건 fire-and-forget 안전망이지 조회 API가
+            아니다 — 이 파일을 읽어 돌려주는 엔드포인트는 없고, 서버가 스스로 지우지도 않는다(로그
+            보관 정책은 배포 환경의 일반적인 방식(logrotate 등)에 맡긴다). 룸이 "정상적으로" 닫힐
+            때만 기록하므로, 서버가 죽거나 재시작되면 그 세션의 변경 이력은 디스크에도 남지
+            않는다(문서 내용 자체는 별도 자동저장으로 안전하다).</p>
+
+          <h4>에러</h4>
+          <table class="apidoc-table">
+            <tbody><tr><td><code>404</code></td><td>문서를 찾을 수 없음</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tokens">
+        <div class="apidoc-card">
+          <div class="apidoc-endpoint-head">
+            <span class="apidoc-method apidoc-method-post">POST</span>
+            <h2><span class="apidoc-path">/api/documents/:id/tokens</span></h2>
+          </div>
+          <div class="apidoc-badges"><span class="apidoc-badge">API 키 필요</span></div>
+          <p>열람/편집 토큰을 발급한다. 이 토큰을 <code>viewerUrl</code>/<code>editorUrl</code>에
+            실어 <code>&lt;iframe&gt;</code>으로 그대로 띄우면 된다.</p>
+
+          <h4>요청 본문</h4>
+          <table class="apidoc-table">
+            <thead><tr><th>필드</th><th>타입</th><th>기본값</th><th>설명</th></tr></thead>
+            <tbody>
+              <tr><td><code>viewer</code><span class="apidoc-required">필수</span></td><td>string (1–100자)</td><td>—</td><td>열람자 이름. 인증된 사용자 식별자가 아니라 <strong>자유 텍스트</strong>다 — 동시편집 귀속(누가 고쳤는지)과 감사 로그에 그대로 노출된다.</td></tr>
+              <tr><td><code>canPrint</code></td><td>boolean</td><td><code>false</code></td><td>인쇄 허용.</td></tr>
+              <tr><td><code>canDownload</code></td><td>boolean</td><td><code>false</code></td><td><a href="#download">다운로드 API</a> 호출 허용.</td></tr>
+              <tr><td><code>canCopy</code></td><td>boolean</td><td><code>false</code></td><td>그리드 뷰에서 셀 텍스트 선택/복사 허용.</td></tr>
+              <tr><td><code>canEdit</code></td><td>boolean</td><td><code>false</code></td><td>docx/xlsx/pptx 동시편집 세션 참여, 또는 PDF 등에서 마크업(리뷰 코멘트) 추가/삭제 허용.</td></tr>
+            </tbody>
+          </table>
+
+          <div class="apidoc-pre-label">예시</div>
+          <pre><code>curl -X POST \
+  -H "Authorization: Bearer &lt;발급받은 키&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"viewer":"김철수","canDownload":true,"canEdit":true}' \
+  "https://&lt;이 서비스 주소&gt;/api/documents/&lt;id&gt;/tokens"</code></pre>
+
+          <h4>응답 <code>200</code></h4>
+          <pre><code>{
+  "success": true,
+  "data": {
+    "token": "eyJhbGciOi…",
+    "viewerUrl": "/viewer.html?token=eyJhbGciOi…",
+    "editorUrl": "/editor.html?token=eyJhbGciOi…",
+    "expiresInSeconds": 3600
+  }
+}</code></pre>
+          <table class="apidoc-table">
+            <thead><tr><th>필드</th><th>설명</th></tr></thead>
+            <tbody>
+              <tr><td><code>viewerUrl</code></td><td>항상 내려준다 — 이 서비스의 상대경로이므로, 호출하는 쪽에서 이 서비스의 접속 주소를 앞에 붙여야 한다.</td></tr>
+              <tr><td><code>editorUrl</code></td><td>docx/xlsx/pptx만 내려준다(pdf 등은 없음, <code>undefined</code>). <strong><code>canEdit:false</code>여도</strong> 읽기 전용으로 열람 가능한 문서 형식이면 그대로 내려준다 — 서버가 그 연결의 실제 쓰기를 막으므로, "같은 화면인데 손은 못 대는" 경우에도 같은 편집기 UI를 재사용할 수 있다.</td></tr>
+              <tr><td><code>expiresInSeconds</code></td><td><code>DOCVIEW_TOKEN_TTL</code> 환경변수 값(기본 1시간).</td></tr>
+            </tbody>
+          </table>
+
+          <div class="apidoc-callout">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+            <span>브라우저가 이 서비스에 직접 WebSocket 연결을 맺어야 하므로(동시편집·실시간 갱신),
+              iframe은 반드시 <strong>이 서비스 자체의 URL</strong>로 로드해야 한다 — 프록시를
+              거쳐 다른 오리진으로 다시 감싸면 안 된다.</span>
+          </div>
+
+          <h4>에러</h4>
+          <table class="apidoc-table">
+            <tbody>
+              <tr><td><code>401</code></td><td>API 키가 없거나 틀림</td></tr>
+              <tr><td><code>404</code></td><td>문서가 없거나, 아직 <code>status: "ready"</code>가 아님</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="download">
+        <div class="apidoc-card">
+          <div class="apidoc-endpoint-head">
+            <span class="apidoc-method apidoc-method-get">GET</span>
+            <h2><span class="apidoc-path">/api/view/download</span></h2>
+          </div>
+          <div class="apidoc-badges"><span class="apidoc-badge apidoc-badge-open">열람 토큰으로 인증(API 키 아님)</span></div>
+          <p><code>canDownload</code> 권한이 있는 토큰으로 최신 저장 상태의 원본 파일 바이트를
+            내려받는다. 동시편집 중인 문서는 유휴 저장 디바운스가 아직 안 지났어도, 메모리의 현재
+            편집 상태를 그 자리에서 바이트로 만들어 최신 상태로 내려준다.</p>
+
+          <h4>쿼리 파라미터</h4>
+          <table class="apidoc-table">
+            <thead><tr><th>이름</th><th>타입</th><th>설명</th></tr></thead>
+            <tbody>
+              <tr><td><code>token</code><span class="apidoc-required">필수</span></td><td>string</td><td>토큰 발급 API로 받은 <code>canDownload:true</code> 토큰.</td></tr>
+            </tbody>
+          </table>
+
+          <h4>응답 <code>200</code></h4>
+          <p><code>Content-Type: application/octet-stream</code>, <code>Content-Disposition:
+            attachment</code>로 원본 파일 바이트를 그대로 돌려준다(JSON 아님).</p>
+
+          <h4>에러</h4>
+          <table class="apidoc-table">
+            <tbody>
+              <tr><td><code>403</code></td><td>토큰에 <code>canDownload</code> 권한이 없음</td></tr>
+              <tr><td><code>404</code></td><td>토큰이 유효하지 않거나(만료 포함) 문서가 없음</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="delete">
+        <div class="apidoc-card">
+          <div class="apidoc-endpoint-head">
+            <span class="apidoc-method apidoc-method-delete">DELETE</span>
+            <h2><span class="apidoc-path">/api/documents/:id</span></h2>
+          </div>
+          <div class="apidoc-badges"><span class="apidoc-badge">API 키 필요</span></div>
+          <p>문서를 완전히 삭제한다(원본·변환 캐시·마크업·presence 모두 정리). 지금 동시편집
+            중이던 연결이 있으면 즉시 끊는다(재연결을 시도하지 않도록 4410 코드로 닫는다).</p>
+          <h4>응답 <code>200</code></h4>
+          <pre><code>{ "success": true, "data": { "id": "…" } }</code></pre>
+          <h4>에러</h4>
+          <table class="apidoc-table">
+            <tbody>
+              <tr><td><code>401</code></td><td>API 키가 없거나 틀림</td></tr>
+              <tr><td><code>404</code></td><td>문서를 찾을 수 없음</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="more">
+        <div class="apidoc-card">
+          <h2>그 외 엔드포인트</h2>
+          <p>위 5개가 연동에 쓰는 전부지만, 참고로 둘 더 있다(둘 다 인증 불필요, 관리 화면
+            <code>/</code>가 쓰는 것과 같다):</p>
+          <table class="apidoc-table">
+            <thead><tr><th>엔드포인트</th><th>설명</th></tr></thead>
+            <tbody>
+              <tr><td><span class="apidoc-method apidoc-method-get">GET</span> <code>/api/documents</code></td><td>전체 문서 목록(<code>{ data: DocumentMeta[] }</code>) — <code>changes</code>는 포함하지 않는다(목록 API라 문서마다 룸을 조회하는 비용을 피한다). <code>changes</code>가 필요하면 <a href="#status">문서 하나씩 상태 조회</a>를 쓴다.</td></tr>
+              <tr><td><span class="apidoc-method apidoc-method-get">GET</span> <code>/api/formats</code></td><td>업로드 가능한 확장자 목록.</td></tr>
+            </tbody>
+          </table>
+          <p style="margin-bottom:0">
+            <code>maintenance-management</code>의 "업체별 접속현황" 탭이 이 API들로 실제
+            연동되어 있다 — 소비자 관점의 자세한 흐름은 그 프로젝트의
+            <code>WEBVIEWER_INTEGRATION.md</code> 참고. 이 페이지 자체는 저장소 루트
+            <code>README.md</code>의 "다른 프로젝트에서 연동하기" 절과 내용이 같다 — 둘 중 하나만
+            고치고 나머지를 잊지 않도록, API가 바뀌면 항상 같이 갱신한다.
+          </p>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
