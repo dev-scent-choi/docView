@@ -2649,6 +2649,11 @@ body.chrome-hidden .editor-surface { margin: 0; max-width: none; border: none; b
   font-family: var(--doc-font-family, var(--font-sans));
   line-height: 1.75;
   max-width: 65ch;
+  /* 기본값 normal은 연속된 공백 문자를 화면에서 한 칸으로 합쳐 보여준다 — 원본 docx의 텍스트런과
+     내보낸 파일 양쪽 다 공백 개수는 그대로 남아 있는데(예: "인계자 :" 뒤 서명란처럼 자리를 맞추려
+     여러 칸을 띄운 문서), 화면에서만 한 칸처럼 보여 "편집하면 공백이 사라졌다"로 오인하게 만든다.
+     pre-wrap은 줄바꿈은 그대로 자동으로 하면서 공백 폭은 Word처럼 있는 그대로 보여준다. */
+  white-space: pre-wrap;
 }
 /* Word 원본의 실제 페이지 크기를 읽어온 문서(.page-sized, editor.ts의 applyPageSetup)는 임의
    글자수 기준 폭(65ch) 대신 실제 여백만큼의 콘텐츠 폭을 그대로 쓴다 — .editor-surface 자체의
