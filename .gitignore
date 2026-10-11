@@ -39,3 +39,6 @@ scripts/.screenshots/
 # start.local.bat.example을 이 이름으로 복사해서 실제 값을 채운다(README "운영 실행" 참고).
 # 이 파일 자체가 없으면(로컬 개발 등) start.bat이 경고만 남기고 임시 시크릿으로 계속 동작한다.
 start.local.bat
+
+# Claude Code 개인용 로컬 설정(권한 등) — 팀과 공유하지 않는다.
+.claude/settings.local.json
